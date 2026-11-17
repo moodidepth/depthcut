@@ -173,7 +173,7 @@ fn quick_sync_decodes_hevc_10bit_and_av1() {
         assert_eq!(f.data.len(), fmt.frame_size(1280, 720));
         if fmt == PixelFormat::P010 {
             // P010 keeps samples in the high 10 bits: low 6 bits are zero
-            let y: Vec<u16> = f.data[..1280 * 720 * 2].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+            let y: Vec<u16> = f.data[..1280 * 720 * 2].as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
             assert!(y.iter().all(|v| v & 0x3f == 0), "P010 layout");
             assert!(y.iter().any(|v| *v > 0x8000), "bright pixels present");
         }

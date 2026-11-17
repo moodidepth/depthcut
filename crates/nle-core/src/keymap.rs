@@ -245,8 +245,8 @@ impl FromStr for KeyBinding {
         let mut key = None;
         let mut mouse = None;
         // split on '+' but keep a literal "+" / "Plus" key
-        let tokens: Vec<&str> = if s.ends_with("++") {
-            let mut t: Vec<&str> = s[..s.len() - 2].split('+').collect();
+        let tokens: Vec<&str> = if let Some(rest) = s.strip_suffix("++") {
+            let mut t: Vec<&str> = rest.split('+').collect();
             t.push("Plus");
             t
         } else {

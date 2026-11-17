@@ -185,7 +185,7 @@ impl FrameSource for Moving {
                 }
             }
         }
-        data.extend(std::iter::repeat(128u8).take((MW * MH / 2) as usize));
+        data.extend(std::iter::repeat_n(128u8, (MW * MH / 2) as usize));
         Some(VideoFrame::new(MW, MH, PixelFormat::Nv12, data, Time::from_frames(index, FrameRate::FPS_30)))
     }
 }

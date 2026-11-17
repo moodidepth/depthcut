@@ -85,7 +85,7 @@ pub fn resample_stereo(input: &[f32], from: u32, to: u32) -> Vec<f32> {
     let cutoff = (to as f64 / from as f64).min(1.0) * 0.97;
     let mut out = vec![0.0f32; out_frames * 2];
     out.par_chunks_mut(2 * 1024).enumerate().for_each(|(chunk, dst)| {
-        for (k, frame) in dst.chunks_exact_mut(2).enumerate() {
+        for (k, frame) in dst.as_chunks_mut::<2>().0.iter_mut().enumerate() {
             let i = chunk * 1024 + k;
             let pos = i as f64 * ratio;
             let center = pos.floor() as i64;

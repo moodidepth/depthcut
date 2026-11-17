@@ -407,7 +407,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let snap_threshold = Time::from_secs_f64((8.0 / geo.pps) as f64);
     let hit_at = |p: Pos2| hits.iter().rev().find(|h| h.rect.contains(p));
     let mut snap_line: Option<Time> = None;
-    app.tl.hovered_clip = resp.hover_pos().and_then(|p| hit_at(p)).map(|h| h.id);
+    app.tl.hovered_clip = resp.hover_pos().and_then(&hit_at).map(|h| h.id);
     app.tl.snap_extra = audio_peak_snaps(app, &placed, (geo.t(area.left()), geo.t(area.right())));
 
     // skimming
@@ -420,7 +420,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 
     // blade hover indicator
     if app.tool == Tool::Blade {
-        if let Some(h) = pointer.and_then(|p| hit_at(p)) {
+        if let Some(h) = pointer.and_then(&hit_at) {
             let t = geo.t(pointer.map(|p| p.x).unwrap_or(0.0)).snap_to_frame(rate);
             let x = geo.x(t);
             painter.line_segment([Pos2::new(x, h.rect.top()), Pos2::new(x, h.rect.bottom())], Stroke::new(2.0_f32, theme::PLAYHEAD));
@@ -773,7 +773,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         if app.tl.key_menu.is_some() {
             app.tl.selected_key = app.tl.key_menu;
         }
-        app.tl.context_clip = pointer.and_then(|p| hit_at(p)).map(|h| h.id);
+        app.tl.context_clip = pointer.and_then(&hit_at).map(|h| h.id);
         if let Some(id) = app.tl.context_clip {
             if !app.selection.contains(&id) {
                 app.selection = vec![id];
@@ -1095,7 +1095,7 @@ fn caption_hit(app: &App, cr: Rect, geo: &Geo, p: Pos2) -> Option<(usize, Option
         }
         for (start_edge, x) in [(true, x0), (false, x1)] {
             let d = (p.x - x).abs();
-            if d < CAP_EDGE_PX && edge.map_or(true, |(_, _, best)| d < best) {
+            if d < CAP_EDGE_PX && edge.is_none_or(|(_, _, best)| d < best) {
                 edge = Some((i, start_edge, d));
             }
         }
@@ -1309,7 +1309,7 @@ fn draw_duck_overlay(app: &App, p: &egui::Painter, rect: Rect, c: &Clip, start: 
     }
     let pps = pps_of(rect, c) as f64;
     let range = nle_core::DuckingSettings::AMOUNT_RANGE_DB;
-    let floor_db = *range.end() as f32;
+    let floor_db = *range.end();
     let y_of = |g: f32| {
         let db = (-nle_core::clip::gain_to_db(g.max(1e-6))).clamp(0.0, floor_db);
         arect.top() + 2.0 + db / floor_db * (arect.height() - 4.0)

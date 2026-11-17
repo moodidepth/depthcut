@@ -541,6 +541,15 @@ fn write_credits_file(project: &Project, movie_path: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Map a preset's LUFS target onto the dialog's loudness choice.
+fn loudness_choice(target: Option<f32>) -> usize {
+    match target {
+        Some(t) if t <= -15.0 => 2,
+        Some(_) => 1,
+        None => 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -561,14 +570,5 @@ mod tests {
         let name = p.file_name().unwrap().to_string_lossy().to_string();
         assert!(!name.contains(['/', ':', '?']), "{name}");
         assert_eq!(sanitize_file_name("  ..."), "Untitled");
-    }
-}
-
-/// Map a preset's LUFS target onto the dialog's loudness choice.
-fn loudness_choice(target: Option<f32>) -> usize {
-    match target {
-        Some(t) if t <= -15.0 => 2,
-        Some(_) => 1,
-        None => 0,
     }
 }

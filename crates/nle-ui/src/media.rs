@@ -20,6 +20,8 @@ const THUMB_H: u32 = 108;
 /// Waveform resolution.
 const WAVE_BUCKETS_PER_SEC: u32 = 200;
 
+// short-lived channel messages: boxing the big variant would only add allocations
+#[allow(clippy::large_enum_variant)]
 enum JobResult {
     Probed { path: PathBuf, result: Result<MediaAsset, String> },
     Filmstrip { asset: AssetId, strip: Filmstrip },
@@ -47,6 +49,7 @@ impl StripTextures {
 }
 
 /// Events the app reacts to after [`MediaLibrary::poll`].
+#[allow(clippy::large_enum_variant)] // one per finished import, consumed immediately
 pub enum MediaEvent {
     Imported(MediaAsset),
     AudioReady(AssetId, Arc<AudioBuffer>, Option<f32>),

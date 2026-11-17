@@ -185,7 +185,7 @@ mod tests {
         let sha = crate::online::block_on(async { crate::online::client().get(FFMPEG_SHA256_URL).send().await.unwrap().text().await.map_err(|e| e.to_string()) }).unwrap();
         let expected = parse_sha256(&sha).expect("checksum file");
         let zip = dir.join("ff.zip");
-        crate::online::download::download_blocking(FFMPEG_ZIP_URL, &zip, |_, _| {}, &|| false).unwrap();
+        crate::online::download::download_blocking(FFMPEG_ZIP_URL, &zip, |_, _| {}, || false).unwrap();
         assert_eq!(sha256_file(&zip).unwrap(), expected);
         let files = extract_tools(&zip, &dir.join("bin")).unwrap();
         println!("extracted: {files:?}");

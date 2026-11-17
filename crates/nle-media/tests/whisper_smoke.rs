@@ -49,7 +49,7 @@ fn transcribes_real_speech_on_gpu_and_cpu() {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| nle_media::paths::models_dir().join("ggml-base-q5_1.bin"));
     let bytes = std::fs::read(&pcm_path).expect("read PCM");
-    let pcm: Vec<f32> = bytes.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+    let pcm: Vec<f32> = bytes.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
     eprintln!("{:.1} s of audio, {} window(s)", pcm.len() as f64 / 16_000.0, transcribe::chunk_windows(pcm.len()).len());
 
     let gpu = run(&pcm, &model, true);

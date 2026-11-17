@@ -938,9 +938,11 @@ mod tests {
         tl.spine.push(game);
         tl.spine.push(song);
         let w = |a: i64, b: i64| CaptionWord { start: Time::from_millis(a), end: Time::from_millis(b), text: "hey".into() };
-        let mut track = CaptionTrack::default();
         // speech over both clips; only the General one is re-roled
-        track.segments = vec![CaptionSegment { start: Time::from_millis(500), end: Time::from_millis(6000), text: "hey hey".into(), words: vec![w(500, 1200), w(4500, 6000)] }];
+        let track = CaptionTrack {
+            segments: vec![CaptionSegment { start: Time::from_millis(500), end: Time::from_millis(6000), text: "hey hey".into(), words: vec![w(500, 1200), w(4500, 6000)] }],
+            ..Default::default()
+        };
         assert_eq!(speech_clips(&tl, &track), vec![g]);
         assert!(!speech_clips(&tl, &CaptionTrack::default()).contains(&m));
     }

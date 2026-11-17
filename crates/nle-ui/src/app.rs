@@ -111,13 +111,17 @@ pub struct BrowserState {
     pub skim: Option<(AssetId, Time)>,
 }
 
+/// What the last preview frame was rendered from:
+/// (history revision, playhead, wipe, proxy, skim position).
+type PreviewKey = (u64, Time, Option<f32>, bool, Option<(AssetId, Time)>);
+
 /// GPU preview: the renderer shares eframe's wgpu device and its display
 /// texture is registered with egui, so the viewer shows it without copies.
 pub struct Preview {
     pub renderer: Renderer,
     pub texture: egui::TextureId,
     render_state: egui_wgpu::RenderState,
-    last: Option<(u64, Time, Option<f32>, bool, Option<(AssetId, Time)>)>,
+    last: Option<PreviewKey>,
     pending_uploads: bool,
 }
 
@@ -680,7 +684,7 @@ impl App {
                     _ => 1,
                 };
                 self.exec(cmd);
-                self.status(&format!("Polished audio on {n} clip(s) — Ctrl+Z to undo"));
+                self.status(format!("Polished audio on {n} clip(s) — Ctrl+Z to undo"));
             }
             None => self.status("Audio is already polished (or there are no audible clips)"),
         }
@@ -1465,7 +1469,7 @@ impl App {
     }
 
     fn load_fcpxml_file(&mut self, path: &std::path::Path) {
-        let res = std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|s| nle_core::fcpxml::import(&s).map_err(|e| e.to_string()));
+        let res = std::fs::read_to_string(path).map_err(|e| e.to_string()).and_then(|s| nle_core::fcpxml::import(&s).map_err(|e| e.to_string()));
         match res {
             Ok(p) => {
                 self.set_project(p, None);

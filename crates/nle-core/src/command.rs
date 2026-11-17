@@ -89,12 +89,12 @@ impl Command {
             Command::FreezeFrame { .. } => "Freeze Frame",
             Command::SetTransition { .. } => "Transition",
             Command::UpdateClip { .. } => "Change Parameters",
-            Command::ReplaceClip { label, .. } => *label,
+            Command::ReplaceClip { label, .. } => label,
             Command::ToggleEnabled { .. } => "Enable/Disable",
             Command::SetMarkers { .. } => "Markers",
             Command::SetCaptions { .. } => "Captions",
             Command::InsertGap { .. } => "Insert Gap",
-            Command::Batch { label, .. } => *label,
+            Command::Batch { label, .. } => label,
         }
     }
 

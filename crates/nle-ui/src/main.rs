@@ -45,7 +45,7 @@ fn main() -> eframe::Result<()> {
         native_adapter_selector: Some(Arc::new(|adapters: &[wgpu::Adapter], surface: Option<&wgpu::Surface<'_>>| {
             adapters
                 .iter()
-                .filter(|a| surface.map_or(true, |s| a.is_surface_supported(s)))
+                .filter(|a| surface.is_none_or(|s| a.is_surface_supported(s)))
                 .max_by_key(|a| nle_render::gpu::adapter_score(&a.get_info()))
                 .cloned()
                 .ok_or_else(|| "no compatible GPU adapter".to_string())

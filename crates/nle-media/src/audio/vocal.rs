@@ -39,7 +39,7 @@ impl VocalClarity {
 
     /// Process interleaved stereo in place.
     pub fn process(&mut self, buf: &mut [f32]) {
-        for frame in buf.chunks_exact_mut(2) {
+        for frame in buf.as_chunks_mut::<2>().0 {
             let mut peak = 0.0f32;
             for (c, s) in frame.iter_mut().enumerate() {
                 let mut x = self.hpf.process(c, *s);

@@ -136,7 +136,7 @@ impl CliDecoder {
         }
         loop {
             match self.read_frame() {
-                Ok(f) if self.next_index - 1 >= idx => return Ok(f),
+                Ok(f) if self.next_index > idx => return Ok(f),
                 Ok(_) => continue,
                 Err(e) => return Err(e),
             }

@@ -135,7 +135,7 @@ impl PeakBuffer {
             let v = amp(bucket);
             let count = i.min(WINDOW);
             let avg = if count == 0 { 0.0 } else { sum / count as f32 };
-            if v >= MIN_LEVEL && v >= RATIO * (avg + 0.02) && last.map_or(true, |l| i - l >= min_gap) {
+            if v >= MIN_LEVEL && v >= RATIO * (avg + 0.02) && last.is_none_or(|l| i - l >= min_gap) {
                 out.push(i as f64 / bps);
                 last = Some(i);
             }
@@ -177,7 +177,7 @@ impl PeakBuffer {
         if bucket as usize != BUCKET_SAMPLES || sample_rate == 0 || body.len() != count.checked_mul(2)? {
             return None;
         }
-        let base = body.chunks_exact(2).map(|p| (p[0] as i8, p[1] as i8)).collect();
+        let base = body.as_chunks::<2>().0.iter().map(|p| (p[0] as i8, p[1] as i8)).collect();
         Some(Self::from_base(sample_rate, base))
     }
 }

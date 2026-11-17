@@ -270,7 +270,7 @@ mod tests {
         assert!((quiet + 20.0).abs() < 0.1, "{quiet}");
         // 5 s tone + 5 s silence: silence is gated out
         let mut x = sine_stereo(48_000, 997.0, 0.1, 5.0);
-        x.extend(std::iter::repeat(0.0).take(48_000 * 2 * 5));
+        x.extend(std::iter::repeat_n(0.0, 48_000 * 2 * 5));
         let gated = integrated_lufs(&x, 2, 48_000).unwrap();
         assert!((gated - quiet).abs() < 0.2, "{gated} vs {quiet}");
         assert!(integrated_lufs(&vec![0.0; 48_000 * 2], 2, 48_000).is_none());

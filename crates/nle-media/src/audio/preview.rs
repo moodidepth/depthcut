@@ -21,7 +21,7 @@ pub fn decode_pcm_f32le_chunks(bytes: &[u8], carry: &mut Vec<u8>, out: &mut Vec<
     if carry.is_empty() {
         let whole = (bytes.len() / 4) * 4;
         out.reserve(whole / 4);
-        for chunk in bytes[..whole].chunks_exact(4) {
+        for chunk in bytes[..whole].as_chunks::<4>().0 {
             out.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
         }
         if whole < bytes.len() {
@@ -33,7 +33,7 @@ pub fn decode_pcm_f32le_chunks(bytes: &[u8], carry: &mut Vec<u8>, out: &mut Vec<
     carry.extend_from_slice(bytes);
     let whole = (carry.len() / 4) * 4;
     out.reserve(whole / 4);
-    for chunk in carry[..whole].chunks_exact(4) {
+    for chunk in carry[..whole].as_chunks::<4>().0 {
         out.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
     }
     carry.drain(..whole);

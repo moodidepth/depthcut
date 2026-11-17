@@ -80,7 +80,7 @@ fn export_every_working_encoder() {
                 assert_eq!((v.width, v.height), (640, 360));
                 assert!((out.duration.as_secs_f64() - 3.0).abs() < 0.2, "{}: duration {}", preset.encoder(), out.duration.as_secs_f64());
                 assert!(out.audio.is_some(), "{}: audio track", preset.encoder());
-                assert_eq!(frames as u64, s.total_frames());
+                assert_eq!(frames, s.total_frames());
                 eprintln!("{}: ok ({} frames, codec {})", preset.encoder(), frames, v.codec);
                 ok.push(preset);
             }

@@ -193,7 +193,7 @@ impl Shared {
             let s0 = self.cb_seq.load(Ordering::Acquire);
             let start = self.cb_start_frames.load(Ordering::Acquire);
             let nanos = self.cb_nanos.load(Ordering::Acquire);
-            if s0 % 2 == 0 && self.cb_seq.load(Ordering::Acquire) == s0 {
+            if s0.is_multiple_of(2) && self.cb_seq.load(Ordering::Acquire) == s0 {
                 break (start, nanos);
             }
             std::hint::spin_loop();

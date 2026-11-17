@@ -141,7 +141,7 @@ impl ThreeBandEq {
         if !self.is_active() {
             return;
         }
-        for frame in buf.chunks_exact_mut(2) {
+        for frame in buf.as_chunks_mut::<2>().0 {
             for (ch, s) in frame.iter_mut().enumerate() {
                 let mut x = *s;
                 for b in &mut self.bands {

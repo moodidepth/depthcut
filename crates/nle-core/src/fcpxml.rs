@@ -266,10 +266,8 @@ fn adjustments(c: &Clip, origin: Time, fmt: &VideoFormat, ctx: &mut ExportCtx) -
             .set("scale", format!("{} {}", num(v.scale_x.value), num(v.scale_y.value)))
             .set("rotation", num(-v.rotation.value))
             .set("anchor", format!("{} {}", num(v.anchor_x.value * aspect * 100.0), num(-v.anchor_y.value * 100.0)));
-        for (name, p, k) in [("rotation", &v.rotation, -1.0)] {
-            if let Some(e) = param_el(name, p, origin, |x| num(x * k)) {
-                tr.push(e);
-            }
+        if let Some(e) = param_el("rotation", &v.rotation, origin, |x| num(-x)) {
+            tr.push(e);
         }
         // Position/scale keyframes are written per axis using RCP param names.
         for (name, p) in [("rcp.positionX", &v.position_x), ("rcp.positionY", &v.position_y), ("rcp.scaleX", &v.scale_x), ("rcp.scaleY", &v.scale_y)] {

@@ -75,6 +75,7 @@ fn db(x: f64) -> f64 {
 
 #[test]
 #[ignore = "release smoke test: needs Windows TTS, ffmpeg, a GPU and the Whisper base model"]
+#[allow(clippy::assertions_on_constants)] // AVAILABLE is a build-feature flag; the assert explains a wrong build
 fn e2e_import_trim_punch_captions_duck_export() {
     assert!(ffmpeg_cli::available(), "ffmpeg not found");
     assert!(transcribe::AVAILABLE, "build without Whisper: add --features nle-media/whisper-vulkan");

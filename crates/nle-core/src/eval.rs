@@ -123,6 +123,9 @@ pub struct ResolvedTransition {
     pub progress: f32,
 }
 
+// Layer is the common case and is built every frame; boxing it would add an
+// allocation per layer per frame to save memory only on rare transitions.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum RenderNode {
     Layer(Layer),

@@ -35,6 +35,7 @@ pub trait VideoDecoder: Send {
 
 /// Options for opening a decoder.
 #[derive(Clone, Copy, Debug)]
+#[derive(Default)]
 pub struct DecodeOptions {
     /// Prefer the proxy file if one exists.
     pub use_proxy: bool,
@@ -42,11 +43,6 @@ pub struct DecodeOptions {
     pub max_height: Option<u32>,
 }
 
-impl Default for DecodeOptions {
-    fn default() -> Self {
-        DecodeOptions { use_proxy: false, max_height: None }
-    }
-}
 
 /// Open the best available decoder for `asset`.
 pub fn open(asset: &MediaAsset, opts: DecodeOptions) -> Result<Box<dyn VideoDecoder>, MediaError> {

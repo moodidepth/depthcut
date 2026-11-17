@@ -183,7 +183,7 @@ pub fn license_name(code: &str, version: &str) -> String {
     let name = match badge.as_str() {
         "CC0" => "CC0".to_string(),
         "PD" => "Public Domain".to_string(),
-        b if b.starts_with("CC-") => format!("CC {}", b[3..].replace('-', "-")),
+        b if b.starts_with("CC-") => format!("CC {}", &b[3..]),
         b => b.to_string(),
     };
     if version.is_empty() || badge == "PD" {

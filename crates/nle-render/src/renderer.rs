@@ -572,7 +572,7 @@ impl Renderer {
             return;
         }
         let mut bytes = frame.data.as_slice().to_vec();
-        while bytes.len() % 4 != 0 {
+        while !bytes.len().is_multiple_of(4) {
             bytes.push(0);
         }
         let buffer = self.gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -736,6 +736,7 @@ impl Renderer {
 
     // ----- optical flow --------------------------------------------------------
 
+    #[allow(clippy::too_many_arguments)] // one GPU pass: encoder, targets and per-pass state
     fn flow_pass(&mut self, enc: &mut wgpu::CommandEncoder, pipe: &str, a: &wgpu::TextureView, b: &wgpu::TextureView, f: &wgpu::TextureView, u: FlowU, out: &Target) {
         let ub = self.uniform(&u);
         let p = match pipe {
@@ -984,7 +985,8 @@ impl Renderer {
             EffectKind::MotionBlur => self.motion_blur(enc, src, size, e, flow?, vel_scale),
             EffectKind::Halation => {
                 let w = v[3];
-                let tint = [1.0 + (1.0 - 1.0) * w, 1.0 + (0.32 - 1.0) * w, 1.0 + (0.1 - 1.0) * w];
+                // white → warm red (1.0, 0.32, 0.1) by warmth `w`; red stays at 1.0
+                let tint = [1.0, 1.0 + (0.32 - 1.0) * w, 1.0 + (0.1 - 1.0) * w];
                 // bloom's core + halo gains sum to 4; halation keeps its unit gain
                 let s = v[2] * 0.25;
                 self.bloom(enc, src, size, base, v[0], false, v[1] * k, [tint[0] * s, tint[1] * s, tint[2] * s, 1.0])
@@ -1238,6 +1240,7 @@ impl Renderer {
     }
 
     /// An adjustment layer: grade + effects applied to everything beneath.
+    #[allow(clippy::too_many_arguments)] // one GPU pass: encoder, targets and per-pass state
     fn draw_adjustment(&mut self, enc: &mut wgpu::CommandEncoder, bg: Target, layer: &Layer, src: &mut dyn FrameSource, opts: RenderOptions, depth: u32, ctx: Ctx) -> Target {
         let grade = opts.color && layer.color.enabled;
         if !grade && layer.effects.is_empty() {
@@ -1283,6 +1286,7 @@ impl Renderer {
     }
 
     /// Composite `layer` over `bg`, returning the new accumulator.
+    #[allow(clippy::too_many_arguments)] // one GPU pass: encoder, targets and per-pass state
     fn draw_layer(&mut self, enc: &mut wgpu::CommandEncoder, bg: Target, layer: &Layer, src: &mut dyn FrameSource, opts: RenderOptions, depth: u32, ctx: Ctx) -> Target {
         self.stats.layers += 1;
         if layer.adjustment {

@@ -36,12 +36,10 @@ fn test_sine_padding() {
     }
     let prepared = prepare_pcm(&input).expect("Should not be silent");
     assert_eq!(prepared.len(), 16000);
-    for i in 0..4000 {
-        assert!((prepared[i] - input[i]).abs() < 1e-6);
+    for (p, x) in prepared[..4000].iter().zip(&input[..4000]) {
+        assert!((p - x).abs() < 1e-6);
     }
-    for i in 4000..16000 {
-        assert_eq!(prepared[i], 0.0);
-    }
+    assert!(prepared[4000..].iter().all(|&p| p == 0.0));
 }
 
 #[test]

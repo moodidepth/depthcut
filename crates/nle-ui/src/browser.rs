@@ -83,7 +83,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             .iter()
             .filter(|a| a.matches(&app.browser.search))
             .filter(|a| !app.browser.favorites_only || a.favorite)
-            .filter(|a| app.browser.tag.as_ref().map_or(true, |t| a.tags.contains(t)))
+            .filter(|a| app.browser.tag.as_ref().is_none_or(|t| a.tags.contains(t)))
             .cloned()
             .collect();
         if assets.is_empty() {

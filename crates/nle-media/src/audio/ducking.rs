@@ -175,7 +175,7 @@ impl RmsAccumulator {
         RmsAccumulator { hop: ((sample_rate as f64 * ENV_HOP_SECS).round() as usize).max(1), sum: 0.0, count: 0, rms: Vec::new() }
     }
     pub fn push_stereo(&mut self, stereo: &[f32]) {
-        for f in stereo.chunks_exact(2) {
+        for f in stereo.as_chunks::<2>().0 {
             let m = 0.5 * (f[0] + f[1]);
             let m = if m.is_finite() { m as f64 } else { 0.0 };
             self.sum += m * m;
@@ -205,7 +205,7 @@ impl DuckCurve {
     /// Gain at timeline time `secs` (linear between frames; unity outside).
     #[inline]
     pub fn gain_at(&self, secs: f64) -> f32 {
-        if !(secs >= 0.0) || self.gains.is_empty() {
+        if secs.is_nan() || secs < 0.0 || self.gains.is_empty() {
             return 1.0;
         }
         let x = secs / ENV_HOP_SECS;

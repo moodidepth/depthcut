@@ -118,8 +118,7 @@ fn captions_render_on_top_and_are_undoable() {
         CaptionWord { start: secs(1), end: Time::from_millis(1_400), text: "Hello".into() },
         CaptionWord { start: Time::from_millis(1_400), end: secs(2), text: "world".into() },
     ];
-    let mut track = CaptionTrack::default();
-    track.segments = CaptionTrack::from_words(&words, 42, Time::from_millis(700));
+    let track = CaptionTrack { segments: CaptionTrack::from_words(&words, 42, Time::from_millis(700)), ..Default::default() };
     let mut h = History::new(10);
     h.execute(&mut tl, Command::SetCaptions { captions: Box::new(track) }).unwrap();
 
@@ -180,8 +179,7 @@ fn insert_gap_command() {
 
 #[test]
 fn loudness_normalize_and_credits() {
-    let mut a = AudioParams::default();
-    a.loudness_gain_db = 6.0;
+    let mut a = AudioParams { loudness_gain_db: 6.0, ..Default::default() };
     assert!((a.gain_at(Time::ZERO, secs(1)) - 1.0).abs() < 1e-6, "off by default");
     a.loudness_normalize = true;
     assert!((a.gain_at(Time::ZERO, secs(1)) - 10f32.powf(6.0 / 20.0)).abs() < 1e-4);

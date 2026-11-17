@@ -28,7 +28,7 @@ pub fn decode_audio(asset: &MediaAsset) -> Result<AudioBuffer, MediaError> {
     if !out.status.success() && out.stdout.is_empty() {
         return Err(MediaError::Decode(format!("audio decode failed for {}", asset.path.display())));
     }
-    let samples: Vec<f32> = out.stdout.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+    let samples: Vec<f32> = out.stdout.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
     let native = AudioBuffer::new(info.sample_rate, info.channels, samples);
     Ok(resample::to_internal(&native))
 }

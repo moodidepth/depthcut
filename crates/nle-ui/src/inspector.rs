@@ -366,8 +366,7 @@ fn effects_section(ui: &mut egui::Ui, effects: &mut Vec<Effect>, t: Time, f: Tim
         let mut swap: Option<(usize, usize)> = None;
         let mut remove: Option<usize> = None;
         let n = effects.len();
-        for idx in 0..n {
-            let e = &mut effects[idx];
+        for (idx, e) in effects.iter_mut().enumerate() {
             e.normalize();
             let id = e.id;
             ui.add_space(2.0);
@@ -553,6 +552,7 @@ fn color_tab(ui: &mut egui::Ui, c: &mut Clip, t: Time, f: Time) {
 
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)] // egui panel: each argument is a separate piece of app state
 fn audio_tab(
     ui: &mut egui::Ui,
     c: &mut Clip,

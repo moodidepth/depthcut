@@ -386,7 +386,7 @@ impl TimelineMixer {
                 let gain_db = span.params.sub_bass_db.clamp(-12.0, 15.0);
                 let sb = self.sub_basses.entry(span.clip).or_insert_with(|| Biquad::new(BandKind::LowShelf, self.sample_rate as f32, 80.0, gain_db, 0.707));
                 sb.set(BandKind::LowShelf, self.sample_rate as f32, 80.0, gain_db, 0.707);
-                for frame in tmp.chunks_exact_mut(2) {
+                for frame in tmp.as_chunks_mut::<2>().0 {
                     frame[0] = sb.process(0, frame[0]);
                     frame[1] = sb.process(1, frame[1]);
                 }
@@ -417,7 +417,7 @@ impl TimelineMixer {
             let settings = self.spans.iter().find(|s| s.clip == *clip).map(|s| s.params.ducking).unwrap_or_default();
             if let Some(curve) = self.duck_curve(*clip, settings) {
                 // look-ahead curve on the timeline clock: identical in preview and export
-                for (i, frame) in buf.chunks_exact(2).enumerate() {
+                for (i, frame) in buf.as_chunks::<2>().0.iter().enumerate() {
                     let g = curve.gain_at(t0 + speed * i as f64 / sr);
                     out[2 * i] += frame[0] * g;
                     out[2 * i + 1] += frame[1] * g;
@@ -426,7 +426,7 @@ impl TimelineMixer {
             }
             let ducker = self.duckers.entry(*clip).or_insert_with(|| Ducker::new(self.sample_rate as f32, settings));
             ducker.update(&settings);
-            for (i, frame) in buf.chunks_exact(2).enumerate() {
+            for (i, frame) in buf.as_chunks::<2>().0.iter().enumerate() {
                 let side = 0.5 * (self.dialogue[2 * i] + self.dialogue[2 * i + 1]);
                 let g = ducker.process(side);
                 out[2 * i] += frame[0] * g;
@@ -436,7 +436,7 @@ impl TimelineMixer {
 
         // Master bus: always-on −1 dBFS soft-knee limiter (playback + export).
         let mut peaks = [0.0f32; 2];
-        for frame in out.chunks_exact_mut(2) {
+        for frame in out.as_chunks_mut::<2>().0 {
             for s in frame.iter_mut() {
                 *s = if s.is_finite() { *s * self.master_gain } else { 0.0 };
             }
@@ -516,7 +516,7 @@ pub fn mixdown(spans: Vec<AudioSpan>, sources: &HashMap<AssetId, Arc<AudioBuffer
 /// 48 kHz stereo → 16 kHz mono (Whisper's input format).
 pub fn to_mono_16k(stereo48: &[f32]) -> Vec<f32> {
     let down = super::resample::resample_stereo(stereo48, super::resample::INTERNAL_RATE, 16_000);
-    down.chunks_exact(2).map(|f| 0.5 * (f[0] + f[1])).collect()
+    down.as_chunks::<2>().0.iter().map(|f| 0.5 * (f[0] + f[1])).collect()
 }
 
 #[cfg(test)]
@@ -690,7 +690,7 @@ mod tests {
         assert!(rms > 0.5, "limited mix stays loud: {rms}");
         // −12 dBFS program: bit-transparent (below the −3 dBFS knee)
         let quiet = render_clip(Clip::from_asset(&a), &a, sine(2.0, 220.0, 0.25), 1.0, 1.0);
-        for (i, s) in quiet.chunks_exact(2).enumerate().skip(10) {
+        for (i, s) in quiet.as_chunks::<2>().0.iter().enumerate().skip(10) {
             let want = (std::f32::consts::TAU * 220.0 * i as f32 / 48_000.0).sin() * 0.25;
             assert!((s[0] - want).abs() < 1e-4, "sample {i}: {} vs {want}", s[0]);
         }
