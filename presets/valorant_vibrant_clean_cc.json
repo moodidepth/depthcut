@@ -1,0 +1,53 @@
+{
+  "name": "Valorant Vibrant Clean CC",
+  "category": "ColorAndSignatureFx",
+  "game_tag": "Valorant",
+  "description": "+12% contrast, shadow lift -6%, highlight roll-off -10%, +18% vibrance, teal shadows/warm highlights + Deep Glow (0.78 / 32px / 0.35).",
+  "velocity_preset": null,
+  "color": {
+    "exposure": 0.05,
+    "contrast": 0.12,
+    "saturation": 1.18,
+    "temperature": 0.04,
+    "tint": 0.0,
+    "shadows": {
+      "r": -0.03,
+      "g": -0.01,
+      "b": 0.02,
+      "master": -0.06
+    },
+    "midtones": {
+      "r": 0.0,
+      "g": 0.0,
+      "b": 0.0,
+      "master": 0.0
+    },
+    "highlights": {
+      "r": 0.04,
+      "g": 0.02,
+      "b": -0.02,
+      "master": -0.1
+    }
+  },
+  "effects": [
+    {
+      "id": 8,
+      "kind": "Glow",
+      "enabled": true,
+      "params": [
+        {
+          "value": 0.78
+        },
+        {
+          "value": 32.0
+        },
+        {
+          "value": 0.35
+        }
+      ]
+    }
+  ],
+  "transition_in": null,
+  "freeze_frames": null,
+  "zoom_push_scale": null
+}

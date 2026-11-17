@@ -1,0 +1,41 @@
+{
+  "name": "Ace Final-Kill Freeze Outline",
+  "category": "ColorAndSignatureFx",
+  "game_tag": "Valorant / CS2",
+  "description": "10-frame final-kill showcase w/ Sobel neon/white character silhouette outline (0.85) + smooth 1.0x -> 1.12x Z-push.",
+  "velocity_preset": null,
+  "color": null,
+  "effects": [
+    {
+      "id": 14,
+      "kind": "NeonOutline",
+      "enabled": true,
+      "params": [
+        {
+          "value": 0.85
+        },
+        {
+          "value": 0.22
+        },
+        {
+          "value": 2.0
+        },
+        {
+          "value": 0.92
+        },
+        {
+          "value": 0.98
+        },
+        {
+          "value": 1.0
+        },
+        {
+          "value": 0.25
+        }
+      ]
+    }
+  ],
+  "transition_in": null,
+  "freeze_frames": 10,
+  "zoom_push_scale": 1.12
+}

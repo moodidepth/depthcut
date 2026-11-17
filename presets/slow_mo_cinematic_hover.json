@@ -1,0 +1,56 @@
+{
+  "name": "Slow-Mo Cinematic Hover",
+  "category": "ShakeAndImpact",
+  "game_tag": "Universal",
+  "description": "Gentle organic handheld wave drift (3.5px @ 1.8 Hz, 0.4° tilt) so slow-motion shots stay alive.",
+  "velocity_preset": null,
+  "color": null,
+  "effects": [
+    {
+      "id": 7,
+      "kind": "CameraShake",
+      "enabled": true,
+      "params": [
+        {
+          "value": 0.1
+        },
+        {
+          "value": 1.8
+        },
+        {
+          "value": 0.14
+        },
+        {
+          "value": 0.0
+        },
+        {
+          "value": 0.0
+        },
+        {
+          "value": 7.0
+        },
+        {
+          "value": 0.0
+        },
+        {
+          "value": 1.0
+        },
+        {
+          "value": 0.4
+        },
+        {
+          "value": 0.0
+        },
+        {
+          "value": 0.0
+        },
+        {
+          "value": 0.0
+        }
+      ]
+    }
+  ],
+  "transition_in": null,
+  "freeze_frames": null,
+  "zoom_push_scale": null
+}

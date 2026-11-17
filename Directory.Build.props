@@ -1,0 +1,7 @@
+<Project>
+  <PropertyGroup>
+    <!-- Shorten MSBuild tracker log & up-to-date marker paths so deeply nested CMake external projects (whisper-rs-sys ggml-vulkan) stay under MAX_PATH on Windows. -->
+    <TLogLocation Condition="'$(TLogLocation)' == '' and '$(TEMP)' != ''">$(TEMP)\rcp-tlog\$(MSBuildProjectName)_$([MSBuild]::StableStringHash($(MSBuildProjectFullPath)))\</TLogLocation>
+    <MSBuildCopyMarkerName Condition="'$(MSBuildCopyMarkerName)' == ''">u</MSBuildCopyMarkerName>
+  </PropertyGroup>
+</Project>

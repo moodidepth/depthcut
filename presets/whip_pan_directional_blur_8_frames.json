@@ -1,0 +1,18 @@
+{
+  "name": "Whip-Pan Directional Blur (8 frames)",
+  "category": "Transitions",
+  "game_tag": "Universal",
+  "description": "8-frame high-speed directional Whip-Pan transition w/ motion blur.",
+  "velocity_preset": null,
+  "color": null,
+  "effects": [],
+  "transition_in": {
+    "kind": "WhipPan",
+    "duration": 94080000,
+    "easing": "EaseInOut",
+    "direction": "Right",
+    "softness": 0.1
+  },
+  "freeze_frames": null,
+  "zoom_push_scale": null
+}

@@ -1,0 +1,38 @@
+{
+  "name": "RSMB Clean Flick (Valorant/CS2)",
+  "category": "RsmbMotionBlur",
+  "game_tag": "Valorant / CS2",
+  "description": "Blur Amount 0.25, Sensitivity 82%, 16 samples — smooths fast mouse flicks while keeping HUD/crosshair razor-sharp.",
+  "velocity_preset": null,
+  "color": null,
+  "effects": [
+    {
+      "id": 1,
+      "kind": "MotionBlur",
+      "enabled": true,
+      "params": [
+        {
+          "value": 180.0
+        },
+        {
+          "value": 16.0
+        },
+        {
+          "value": 0.5
+        },
+        {
+          "value": 1.0
+        },
+        {
+          "value": 0.25
+        },
+        {
+          "value": 82.0
+        }
+      ]
+    }
+  ],
+  "transition_in": null,
+  "freeze_frames": null,
+  "zoom_push_scale": null
+}

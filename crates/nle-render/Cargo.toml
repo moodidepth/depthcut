@@ -1,0 +1,23 @@
+[package]
+name = "nle-render"
+description = "wgpu/WGSL GPU render engine for Rust Cut Pro: YUV conversion, grading, LUTs, transitions, compositing, frame interpolation, titles and hardware export"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+nle-core.workspace = true
+nle-media.workspace = true
+wgpu.workspace = true
+pollster.workspace = true
+bytemuck.workspace = true
+half.workspace = true
+ab_glyph.workspace = true
+log.workspace = true
+thiserror.workspace = true
+parking_lot.workspace = true
+
+[dev-dependencies]
+naga.workspace = true

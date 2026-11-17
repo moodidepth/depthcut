@@ -1,0 +1,84 @@
+{
+  "name": "CS2 Moody Fragmovie CC",
+  "category": "ColorAndSignatureFx",
+  "game_tag": "CS2",
+  "description": "Crushed blacks (-10%), desaturated greens (-20%), warm amber/gold muzzle pop + 35mm Halation (0.28) + 20% vignette.",
+  "velocity_preset": null,
+  "color": {
+    "exposure": -0.05,
+    "contrast": 0.16,
+    "saturation": 0.86,
+    "temperature": 0.1,
+    "tint": -0.12,
+    "shadows": {
+      "r": -0.02,
+      "g": -0.02,
+      "b": 0.0,
+      "master": -0.1
+    },
+    "midtones": {
+      "r": 0.02,
+      "g": 0.01,
+      "b": -0.02,
+      "master": 0.0
+    },
+    "highlights": {
+      "r": 0.09,
+      "g": 0.05,
+      "b": -0.04,
+      "master": 0.04
+    }
+  },
+  "effects": [
+    {
+      "id": 9,
+      "kind": "Halation",
+      "enabled": true,
+      "params": [
+        {
+          "value": 0.72
+        },
+        {
+          "value": 28.0
+        },
+        {
+          "value": 0.28
+        },
+        {
+          "value": 0.85
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "kind": "ImpactFlash",
+      "enabled": true,
+      "params": [
+        {
+          "value": 0.0
+        },
+        {
+          "value": 14.0
+        },
+        {
+          "value": 1.0
+        },
+        {
+          "value": 1.0
+        },
+        {
+          "value": 1.0
+        },
+        {
+          "value": 0.2
+        },
+        {
+          "value": 1.0
+        }
+      ]
+    }
+  ],
+  "transition_in": null,
+  "freeze_frames": null,
+  "zoom_push_scale": null
+}

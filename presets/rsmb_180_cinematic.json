@@ -1,0 +1,38 @@
+{
+  "name": "RSMB 180° Cinematic",
+  "category": "RsmbMotionBlur",
+  "game_tag": "Universal",
+  "description": "Blur Amount 0.50, Sensitivity 72%, 24 samples — rich filmic blur for slow-mo cinematics and HLAE freecam shots.",
+  "velocity_preset": null,
+  "color": null,
+  "effects": [
+    {
+      "id": 2,
+      "kind": "MotionBlur",
+      "enabled": true,
+      "params": [
+        {
+          "value": 180.0
+        },
+        {
+          "value": 24.0
+        },
+        {
+          "value": 0.35
+        },
+        {
+          "value": 1.0
+        },
+        {
+          "value": 0.5
+        },
+        {
+          "value": 72.0
+        }
+      ]
+    }
+  ],
+  "transition_in": null,
+  "freeze_frames": null,
+  "zoom_push_scale": null
+}

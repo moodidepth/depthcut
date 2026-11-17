@@ -1,0 +1,12 @@
+{
+  "name": "Smooth Ease",
+  "category": "VelocityGraph",
+  "game_tag": "Universal",
+  "description": "Smooth 160% -> 35% -> 160% S-curve speed ramp.",
+  "velocity_preset": "Smooth Ease",
+  "color": null,
+  "effects": [],
+  "transition_in": null,
+  "freeze_frames": null,
+  "zoom_push_scale": null
+}

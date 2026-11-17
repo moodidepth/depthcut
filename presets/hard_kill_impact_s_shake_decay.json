@@ -1,0 +1,133 @@
+{
+  "name": "Hard Kill Impact (S_Shake Decay)",
+  "category": "ShakeAndImpact",
+  "game_tag": "Valorant / CS2",
+  "description": "42px high-freq S_Shake w/ 1.08x Z-punch, 2.2° tilt, 0.75 MoBlur, Mirror wrap decaying over 14 frames + 18% white flash + 6px RGB split.",
+  "velocity_preset": null,
+  "color": null,
+  "effects": [
+    {
+      "id": 3,
+      "kind": "CameraShake",
+      "enabled": true,
+      "params": [
+        {
+          "value": 0.85
+        },
+        {
+          "value": 10.0
+        },
+        {
+          "value": 0.0
+        },
+        {
+          "value": 0.0
+        },
+        {
+          "value": 1.0
+        },
+        {
+          "value": 11.0
+        },
+        {
+          "value": 12.0
+        },
+        {
+          "value": 1.08
+        },
+        {
+          "value": 2.2
+        },
+        {
+          "value": 0.75
+        },
+        {
+          "value": 0.0
+        },
+        {
+          "value": 6.0
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "kind": "ImpactFlash",
+      "enabled": true,
+      "params": [
+        {
+          "value": 0.18
+        },
+        {
+          "value": 24.0
+        },
+        {
+          "value": 1.0
+        },
+        {
+          "value": 1.0
+        },
+        {
+          "value": 1.0
+        },
+        {
+          "value": 0.0
+        },
+        {
+          "value": 1.0
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "kind": "RgbSplitGlitch",
+      "enabled": true,
+      "params": [
+        {
+          "value": 6.0,
+          "curve": {
+            "keys": [
+              {
+                "time": 0,
+                "value": 6.0,
+                "interp": "EaseOut",
+                "in_handle": {
+                  "dt": 0.3333333333333333,
+                  "dv": 0.0
+                },
+                "out_handle": {
+                  "dt": 0.3333333333333333,
+                  "dv": 0.0
+                }
+              },
+              {
+                "time": 141120000,
+                "value": 0.0,
+                "interp": "Hold",
+                "in_handle": {
+                  "dt": 0.3333333333333333,
+                  "dv": 0.0
+                },
+                "out_handle": {
+                  "dt": 0.3333333333333333,
+                  "dv": 0.0
+                }
+              }
+            ]
+          }
+        },
+        {
+          "value": 0.0
+        },
+        {
+          "value": 0.85
+        },
+        {
+          "value": 0.0
+        }
+      ]
+    }
+  ],
+  "transition_in": null,
+  "freeze_frames": null,
+  "zoom_push_scale": null
+}

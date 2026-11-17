@@ -1,0 +1,238 @@
+{
+  "name": "Operator / AWP Scope Pulse",
+  "category": "ColorAndSignatureFx",
+  "game_tag": "CS2 / Valorant",
+  "description": "5-frame scope-in radial zoom-blur (0.35), chromatic aberration (8px), and 35% vignette that snaps cleanly to 0 on shot.",
+  "velocity_preset": null,
+  "color": null,
+  "effects": [
+    {
+      "id": 11,
+      "kind": "ZoomBlur",
+      "enabled": true,
+      "params": [
+        {
+          "value": 0.0
+        },
+        {
+          "value": 0.0
+        },
+        {
+          "value": 0.35,
+          "curve": {
+            "keys": [
+              {
+                "time": 0,
+                "value": 0.0,
+                "interp": "EaseIn",
+                "in_handle": {
+                  "dt": 0.3333333333333333,
+                  "dv": 0.0
+                },
+                "out_handle": {
+                  "dt": 0.3333333333333333,
+                  "dv": 0.0
+                }
+              },
+              {
+                "time": 58800000,
+                "value": 0.35,
+                "interp": "Hold",
+                "in_handle": {
+                  "dt": 0.3333333333333333,
+                  "dv": 0.0
+                },
+                "out_handle": {
+                  "dt": 0.3333333333333333,
+                  "dv": 0.0
+                }
+              },
+              {
+                "time": 70560000,
+                "value": 0.0,
+                "interp": "Hold",
+                "in_handle": {
+                  "dt": 0.3333333333333333,
+                  "dv": 0.0
+                },
+                "out_handle": {
+                  "dt": 0.3333333333333333,
+                  "dv": 0.0
+                }
+              }
+            ]
+          }
+        },
+        {
+          "value": 16.0
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "kind": "RgbSplitGlitch",
+      "enabled": true,
+      "params": [
+        {
+          "value": 8.0,
+          "curve": {
+            "keys": [
+              {
+                "time": 0,
+                "value": 0.0,
+                "interp": "EaseIn",
+                "in_handle": {
+                  "dt": 0.3333333333333333,
+                  "dv": 0.0
+                },
+                "out_handle": {
+                  "dt": 0.3333333333333333,
+                  "dv": 0.0
+                }
+              },
+              {
+                "time": 58800000,
+                "value": 8.0,
+                "interp": "Hold",
+                "in_handle": {
+                  "dt": 0.3333333333333333,
+                  "dv": 0.0
+                },
+                "out_handle": {
+                  "dt": 0.3333333333333333,
+                  "dv": 0.0
+                }
+              },
+              {
+                "time": 70560000,
+                "value": 0.0,
+                "interp": "Hold",
+                "in_handle": {
+                  "dt": 0.3333333333333333,
+                  "dv": 0.0
+                },
+                "out_handle": {
+                  "dt": 0.3333333333333333,
+                  "dv": 0.0
+                }
+              }
+            ]
+          }
+        },
+        {
+          "value": 0.0
+        },
+        {
+          "value": 0.9
+        },
+        {
+          "value": 0.0
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "kind": "ImpactFlash",
+      "enabled": true,
+      "params": [
+        {
+          "value": 0.0
+        },
+        {
+          "value": 14.0
+        },
+        {
+          "value": 1.0
+        },
+        {
+          "value": 1.0
+        },
+        {
+          "value": 1.0
+        },
+        {
+          "value": 0.35,
+          "curve": {
+            "keys": [
+              {
+                "time": 0,
+                "value": 0.35,
+                "interp": "EaseIn",
+                "in_handle": {
+                  "dt": 0.3333333333333333,
+                  "dv": 0.0
+                },
+                "out_handle": {
+                  "dt": 0.3333333333333333,
+                  "dv": 0.0
+                }
+              },
+              {
+                "time": 58800000,
+                "value": 0.35,
+                "interp": "Hold",
+                "in_handle": {
+                  "dt": 0.3333333333333333,
+                  "dv": 0.0
+                },
+                "out_handle": {
+                  "dt": 0.3333333333333333,
+                  "dv": 0.0
+                }
+              },
+              {
+                "time": 70560000,
+                "value": 0.0,
+                "interp": "Hold",
+                "in_handle": {
+                  "dt": 0.3333333333333333,
+                  "dv": 0.0
+                },
+                "out_handle": {
+                  "dt": 0.3333333333333333,
+                  "dv": 0.0
+                }
+              }
+            ]
+          }
+        },
+        {
+          "value": 1.12,
+          "curve": {
+            "keys": [
+              {
+                "time": 0,
+                "value": 1.12,
+                "interp": "EaseIn",
+                "in_handle": {
+                  "dt": 0.3333333333333333,
+                  "dv": 0.0
+                },
+                "out_handle": {
+                  "dt": 0.3333333333333333,
+                  "dv": 0.0
+                }
+              },
+              {
+                "time": 70560000,
+                "value": 1.0,
+                "interp": "Hold",
+                "in_handle": {
+                  "dt": 0.3333333333333333,
+                  "dv": 0.0
+                },
+                "out_handle": {
+                  "dt": 0.3333333333333333,
+                  "dv": 0.0
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "transition_in": null,
+  "freeze_frames": null,
+  "zoom_push_scale": null
+}

@@ -1,0 +1,12 @@
+{
+  "name": "Clean Skill Showcase (Pro Gameplay)",
+  "category": "VelocityGraph",
+  "game_tag": "CS2 / Valorant",
+  "description": "Keeps 100% native speed through aim flick -> smooth Bezier ease to 45% right after kill -> 100% exit.",
+  "velocity_preset": "Clean Skill Showcase",
+  "color": null,
+  "effects": [],
+  "transition_in": null,
+  "freeze_frames": null,
+  "zoom_push_scale": null
+}

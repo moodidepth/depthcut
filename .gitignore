@@ -1,0 +1,29 @@
+﻿# Build output
+/target
+/dist
+
+# Release/run leftovers
+research_tmp/
+*.prev.exe
+*.running*
+*.pdb
+*.log
+
+# Secrets & local config (API keys live in Windows Credential Manager)
+ai_config.toml
+.env
+.env.*
+
+# Per-user presets saved from the app
+/presets/user/*
+!/presets/user/.gitkeep
+
+# Editor / OS noise
+.vs/
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+Desktop.ini
+.DS_Store
+__pycache__/

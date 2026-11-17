@@ -1,0 +1,37 @@
+[package]
+name = "nle-ui"
+description = "Final Cut Pro-style egui/wgpu user interface for Rust Cut Pro"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "rust-cut-pro"
+path = "src/main.rs"
+
+[features]
+default = ["whisper-vulkan"]
+ffmpeg = ["nle-media/ffmpeg"]
+whisper = ["nle-media/whisper"]
+whisper-vulkan = ["nle-media/whisper-vulkan"]
+
+[dependencies]
+nle-core.workspace = true
+nle-media.workspace = true
+nle-render.workspace = true
+nle-ai.workspace = true
+eframe.workspace = true
+log.workspace = true
+env_logger.workspace = true
+parking_lot.workspace = true
+rfd.workspace = true
+rayon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# Ctrl+V reaches egui only as a paste event (and not at all when the clipboard
+# holds no text), so the animation-lane shortcut reads the key state directly.
+windows-sys = { version = "0.59", features = ["Win32_UI_Input_KeyboardAndMouse"] }

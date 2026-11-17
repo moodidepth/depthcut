@@ -1,0 +1,12 @@
+{
+  "name": "Bullet-Time Kill Ramp",
+  "category": "VelocityGraph",
+  "game_tag": "Universal",
+  "description": "Fast 220% entry -> deep 12% bullet-time hold w/ Weighted Accumulation -> 240% exit.",
+  "velocity_preset": "Bullet-Time Kill Ramp",
+  "color": null,
+  "effects": [],
+  "transition_in": null,
+  "freeze_frames": null,
+  "zoom_push_scale": null
+}

@@ -1,0 +1,116 @@
+{
+  "name": "Pre-Drop Build-Up Riser Shake",
+  "category": "ShakeAndImpact",
+  "game_tag": "Universal",
+  "description": "Ramps X/Y amplitude 0px -> 12px and frequency 10 Hz -> 28 Hz over 18 frames into the beat drop or sniper shot.",
+  "velocity_preset": null,
+  "color": null,
+  "effects": [
+    {
+      "id": 6,
+      "kind": "CameraShake",
+      "enabled": true,
+      "params": [
+        {
+          "value": 0.32,
+          "curve": {
+            "keys": [
+              {
+                "time": 0,
+                "value": 0.0,
+                "interp": "EaseIn",
+                "in_handle": {
+                  "dt": 0.3333333333333333,
+                  "dv": 0.0
+                },
+                "out_handle": {
+                  "dt": 0.3333333333333333,
+                  "dv": 0.0
+                }
+              },
+              {
+                "time": 211680000,
+                "value": 0.34,
+                "interp": "Linear",
+                "in_handle": {
+                  "dt": 0.3333333333333333,
+                  "dv": 0.0
+                },
+                "out_handle": {
+                  "dt": 0.3333333333333333,
+                  "dv": 0.0
+                }
+              }
+            ]
+          }
+        },
+        {
+          "value": 6.0,
+          "curve": {
+            "keys": [
+              {
+                "time": 0,
+                "value": 3.3,
+                "interp": "EaseIn",
+                "in_handle": {
+                  "dt": 0.3333333333333333,
+                  "dv": 0.0
+                },
+                "out_handle": {
+                  "dt": 0.3333333333333333,
+                  "dv": 0.0
+                }
+              },
+              {
+                "time": 211680000,
+                "value": 9.4,
+                "interp": "Linear",
+                "in_handle": {
+                  "dt": 0.3333333333333333,
+                  "dv": 0.0
+                },
+                "out_handle": {
+                  "dt": 0.3333333333333333,
+                  "dv": 0.0
+                }
+              }
+            ]
+          }
+        },
+        {
+          "value": 0.25
+        },
+        {
+          "value": 0.0
+        },
+        {
+          "value": 0.0
+        },
+        {
+          "value": 7.0
+        },
+        {
+          "value": 0.0
+        },
+        {
+          "value": 1.0
+        },
+        {
+          "value": 0.8
+        },
+        {
+          "value": 0.0
+        },
+        {
+          "value": 0.0
+        },
+        {
+          "value": 0.0
+        }
+      ]
+    }
+  ],
+  "transition_in": null,
+  "freeze_frames": null,
+  "zoom_push_scale": null
+}

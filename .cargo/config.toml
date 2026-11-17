@@ -1,0 +1,6 @@
+# Windows 11 developer toolchain paths (overridable via host env vars).
+[env]
+FFMPEG_DIR = { value = "C:/Users/<you>/AppData/Local/Microsoft/WinGet/Packages/Gyan.FFmpeg.Shared_Microsoft.Winget.Source_8wekyb3d8bbwe/ffmpeg-9.0.2-full_build-shared", force = false }
+LIBCLANG_PATH = { value = "C:/Program Files/LLVM/bin", force = false }
+VULKAN_SDK = { value = "C:/VulkanSDK/1.4.363.0", force = false }
+CMAKE = { value = "C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe", force = false }

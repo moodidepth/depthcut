@@ -1,0 +1,12 @@
+{
+  "name": "Valorant Flow Sync (Fast-In / Kill-Hold / Snap-Out)",
+  "category": "VelocityGraph",
+  "game_tag": "Valorant",
+  "description": "Ramps 280% during strafe/peek -> sharp Bezier drop to 25% held 10 frames on kill banner -> 340% cut exit.",
+  "velocity_preset": "Valorant Flow Sync",
+  "color": null,
+  "effects": [],
+  "transition_in": null,
+  "freeze_frames": null,
+  "zoom_push_scale": null
+}

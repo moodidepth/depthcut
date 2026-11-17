@@ -1,0 +1,43 @@
+[package]
+name = "nle-media"
+description = "Media I/O for Rust Cut Pro: hardware-accelerated decode (QSV/VA-API/D3D11VA), frame queues, proxies, audio DSP and playback"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["audio-out", "online"]
+# Real-time audio playback through cpal (WASAPI on Windows, ALSA/PipeWire on Linux).
+audio-out = ["dep:cpal"]
+# In-process libav* decoding via ffmpeg-next. Requires FFmpeg 9.x development
+# libraries (and libclang for bindgen). Without it, media is decoded by piping
+# from the `ffmpeg` command-line tool, which uses the same QSV/VA-API/D3D11VA paths.
+ffmpeg = ["dep:ffmpeg-next"]
+# Online audio/SFX search (Openverse, Internet Archive), downloads and the
+# Whisper model manager (async reqwest + tokio, rustls).
+online = ["dep:reqwest", "dep:tokio", "dep:futures-util"]
+# Offline speech-to-text captions via whisper.cpp (needs CMake + libclang).
+whisper = ["dep:whisper-rs"]
+# Run Whisper on the GPU through Vulkan (needs the Vulkan SDK at build time).
+whisper-vulkan = ["whisper", "whisper-rs/vulkan"]
+
+[dependencies]
+nle-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+log.workspace = true
+parking_lot.workspace = true
+rayon.workspace = true
+core_affinity.workspace = true
+crossbeam.workspace = true
+rtrb.workspace = true
+rustfft.workspace = true
+cpal = { workspace = true, optional = true }
+ffmpeg-next = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
+whisper-rs = { workspace = true, optional = true }

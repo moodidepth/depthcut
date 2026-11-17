@@ -1,0 +1,12 @@
+{
+  "name": "CS2 AWP / Deagle Double-Pump",
+  "category": "VelocityGraph",
+  "game_tag": "CS2",
+  "description": "220% lead-in -> 18% shot 1 impact (8 frames) -> 300% bolt-cycle whip -> 30% second kill -> 100%.",
+  "velocity_preset": "CS2 AWP / Deagle Double-Pump",
+  "color": null,
+  "effects": [],
+  "transition_in": null,
+  "freeze_frames": null,
+  "zoom_push_scale": null
+}
