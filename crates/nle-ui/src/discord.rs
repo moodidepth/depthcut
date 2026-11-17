@@ -17,6 +17,10 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const DEFAULT_ASSET_KEY: &str = "rust_cut_pro";
+/// Official Rust Cut Pro Discord application, baked in at build time:
+/// `set RCP_DISCORD_APP_ID=<id>` before `cargo build --release` (see
+/// docs/DISCORD.md). Empty in dev builds; users can still paste their own.
+const BUILT_IN_APP_ID: Option<&str> = option_env!("RCP_DISCORD_APP_ID");
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -51,8 +55,10 @@ impl DiscordConfig {
             .and_then(|s| serde_json::from_str::<DiscordConfig>(&s).ok())
             .unwrap_or_default();
         if cfg.app_id.trim().is_empty() {
-            if let Ok(env_id) = std::env::var("RCP_DISCORD_APP_ID") {
-                cfg.app_id = env_id.trim().to_string();
+            // runtime override first, then the id compiled into release builds
+            let id = std::env::var("RCP_DISCORD_APP_ID").ok().or_else(|| BUILT_IN_APP_ID.map(str::to_string));
+            if let Some(id) = id {
+                cfg.app_id = id.trim().to_string();
             }
         }
         if cfg.asset_key.trim().is_empty() {

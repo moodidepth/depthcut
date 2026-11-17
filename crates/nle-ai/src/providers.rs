@@ -52,14 +52,24 @@ pub struct CopilotError {
     pub message: String,
     /// Transient (network, rate limit, server, malformed model output): retrying may succeed.
     pub retryable: bool,
+    /// HTTP status of the provider's error response, when there was one.
+    pub http_status: Option<u16>,
 }
 
 impl CopilotError {
     fn transient(message: impl Into<String>) -> Self {
-        Self { message: message.into(), retryable: true }
+        Self { message: message.into(), retryable: true, http_status: None }
     }
     fn fatal(message: impl Into<String>) -> Self {
-        Self { message: message.into(), retryable: false }
+        Self { message: message.into(), retryable: false, http_status: None }
+    }
+    fn with_status(mut self, code: u16) -> Self {
+        self.http_status = Some(code);
+        self
+    }
+    /// The model is overloaded or rate limited (another model may still answer).
+    pub fn is_overload(&self) -> bool {
+        matches!(self.http_status, Some(429 | 503 | 529))
     }
 }
 
@@ -276,9 +286,9 @@ async fn send_json(
                         }
                         let msg = format!("{label} HTTP {code}: {detail}");
                         if transient {
-                            CopilotError::transient(msg)
+                            CopilotError::transient(msg).with_status(code.as_u16())
                         } else {
-                            CopilotError::fatal(msg)
+                            CopilotError::fatal(msg).with_status(code.as_u16())
                         }
                     }
                     Err(e) => CopilotError::transient(format!("{label} response interrupted: {}", e.without_url())),
@@ -357,7 +367,7 @@ pub fn run_copilot_blocking(
     let (parsed, label) = rt.block_on(async {
         match config.provider {
             AiProviderKind::Gemini4 => {
-                let mut file_uri = None;
+                let mut uploaded = None;
                 if config.attach_video_proxy {
                     if let Some(src) = active_video_path {
                         status("Encoding 480p proxy for Gemini…".into());
@@ -366,19 +376,42 @@ pub fn run_copilot_blocking(
                             Ok(proxy_file) => {
                                 status("Uploading proxy video…".into());
                                 match multimodal::upload_gemini_file(&client, &key, &proxy_file, "video/mp4").await {
-                                    Ok(uri) => file_uri = Some(uri),
-                                    Err(e) => log::warn!("copilot: continuing without video: {e}"),
+                                    Ok(f) => uploaded = Some(f),
+                                    Err(e) => {
+                                        log::warn!("copilot: continuing without video: {e}");
+                                        status("Video upload failed — asking without the video…".into());
+                                    }
                                 }
                             }
                             Err(e) => log::warn!("copilot: skipping 480p proxy attachment: {e}"),
                         }
                     }
                 }
-                let body = build_gemini_request_body(&config, &prompt, &timeline_json, file_uri.as_deref());
-                let url = format!("https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent", config.gemini_model.trim());
-                status(format!("Waiting for Gemini ({})…", config.gemini_model));
-                let json = send_json("Gemini", || client.post(&url).header("x-goog-api-key", &key).json(&body), cancelled, status).await?;
-                Ok::<_, CopilotError>((parse_gemini_response(&json).map_err(CopilotError::transient)?, format!("Gemini 4 ({})", config.gemini_model)))
+                let body = build_gemini_request_body(&config, &prompt, &timeline_json, uploaded.as_ref().map(|f| f.uri.as_str()));
+                let model = config.effective_gemini_model();
+                let ask = |model: String| {
+                    let (client, key, body) = (&client, &key, &body);
+                    async move {
+                        let url = format!("https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent");
+                        status(format!("Waiting for Gemini ({model})…"));
+                        send_json("Gemini", || client.post(&url).header("x-goog-api-key", key).json(body), cancelled, status).await.map(|j| (j, model))
+                    }
+                };
+                let mut result = ask(model.clone()).await;
+                // the chosen model is overloaded: one try on the fallback model
+                if let (Err(e), Some(fallback)) = (&result, config.gemini_fallback()) {
+                    if e.is_overload() {
+                        log::warn!("copilot: {model} overloaded ({}); trying {fallback}", e.message);
+                        status(format!("{model} is busy — trying {fallback}…"));
+                        result = ask(fallback).await;
+                    }
+                }
+                if let Some(f) = &uploaded {
+                    multimodal::delete_gemini_file(&client, &key, &f.name).await;
+                }
+                let (json, used) = result?;
+                let label = if used == model { format!("Gemini ({used})") } else { format!("Gemini ({used}, fallback from {model})") };
+                Ok::<_, CopilotError>((parse_gemini_response(&json).map_err(CopilotError::transient)?, label))
             }
             AiProviderKind::OpenAiCompatible => {
                 let url = format!("{}/chat/completions", config.openai_base_url.trim_end_matches('/'));

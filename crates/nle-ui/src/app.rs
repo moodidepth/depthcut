@@ -178,6 +178,8 @@ pub struct App {
     pub show_captions: bool,
     pub keymap: ActionMap,
     pub shortcuts_ui: shortcuts_ui::ShortcutsState,
+    pub ffmpeg_setup: crate::ffmpeg_setup::FfmpegSetup,
+    pub about: crate::about_ui::AboutState,
     status: Option<(String, Instant)>,
     audio_revision: u64,
     audio_sources: HashSet<AssetId>,
@@ -294,6 +296,8 @@ impl App {
             show_captions: false,
             keymap: shortcuts_ui::load_keymap(),
             shortcuts_ui: shortcuts_ui::ShortcutsState::default(),
+            ffmpeg_setup: Default::default(),
+            about: Default::default(),
             status: None,
             audio_revision: u64::MAX,
             audio_sources: HashSet::new(),
@@ -1956,6 +1960,15 @@ impl App {
                     }
                     ui.close_menu();
                 }
+                ui.separator();
+                if ui.button("Licenses & Notices…").clicked() {
+                    self.about.open_licenses();
+                    ui.close_menu();
+                }
+                if ui.button("About Rust Cut Pro…").clicked() {
+                    self.about.open = true;
+                    ui.close_menu();
+                }
             });
             ui.separator();
             ui.toggle_value(&mut self.copilot.open, "🤖 AI Copilot").on_hover_text(self.menu_label("Toggle AI Copilot", Action::ToggleCopilot));
@@ -2258,6 +2271,7 @@ impl eframe::App for App {
         self.sync_audio();
 
         egui::TopBottomPanel::top("menu").frame(egui::Frame::new().fill(theme::BG).inner_margin(egui::Margin::symmetric(8, 4))).show(ctx, |ui| self.menu_bar(ui));
+        crate::ffmpeg_setup::show(self, ctx);
         egui::TopBottomPanel::bottom("timeline")
             .resizable(true)
             .default_height(390.0)
@@ -2283,6 +2297,7 @@ impl eframe::App for App {
         captions_ui::show(self, ctx);
         self.discord.show_dialog(ctx);
         shortcuts_ui::show(self, ctx);
+        crate::about_ui::show(&mut self.about, ctx);
         self.marker_edit_window(ctx);
         self.recovery_window(ctx);
         self.crash_notice(ctx);

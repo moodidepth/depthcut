@@ -6,7 +6,7 @@ use nle_core::{ClipId, MediaAsset, Time, Timeline};
 use nle_media::ffmpeg_cli;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 /// Transcode `source` to a lightweight 480p 15fps H.264 MP4 proxy (`h264_qsv` first,
 /// falling back to `libx264`) suitable for fast cloud AI video understanding uploads.
@@ -48,7 +48,7 @@ pub fn encode_proxy_480p15(source: &Path, out: &Path) -> Result<PathBuf, String>
             "+faststart".into(),
             out_s.clone(),
         ]);
-        let output = Command::new(&ffmpeg)
+        let output = ffmpeg_cli::command(&ffmpeg)
             .args(&args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -64,70 +64,133 @@ pub fn encode_proxy_480p15(source: &Path, out: &Path) -> Result<PathBuf, String>
     Err(format!("480p proxy encode failed: {last_err}"))
 }
 
-/// Upload a local media/proxy file to the Gemini File API (`upload/v1beta/files`)
-/// and return the resulting `file.uri`.
-pub async fn upload_gemini_file(client: &reqwest::Client, api_key: &str, file_path: &Path, mime_type: &str) -> Result<String, String> {
+const GEMINI_API: &str = "https://generativelanguage.googleapis.com";
+
+/// A file stored with the Gemini File API.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UploadedFile {
+    /// `files/<id>` (used to poll and delete).
+    pub name: String,
+    /// URI passed as `fileData.fileUri` in `generateContent`.
+    pub uri: String,
+    pub mime_type: String,
+}
+
+/// Upload a local media/proxy file with the Gemini File API resumable
+/// protocol (start → `x-goog-upload-url` → upload+finalize), then wait until
+/// the server has processed it (`state == ACTIVE`).
+pub async fn upload_gemini_file(client: &reqwest::Client, api_key: &str, file_path: &Path, mime_type: &str) -> Result<UploadedFile, String> {
     let bytes = tokio::fs::read(file_path)
         .await
         .map_err(|e| format!("read upload file {}: {e}", file_path.display()))?;
     let display_name = file_path
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "argon_proxy.mp4".to_string());
+        .unwrap_or_else(|| "rust_cut_pro_proxy.mp4".to_string());
     let len = bytes.len();
-    let url = "https://generativelanguage.googleapis.com/upload/v1beta/files";
 
-    // key goes in a header (never the URL) so it can't leak into error text
-    let resp = client
-        .post(url)
+    // 1. start: returns the session URL in a response header.
+    // The key goes in a header (never the URL) so it can't leak into error text.
+    let start = client
+        .post(format!("{GEMINI_API}/upload/v1beta/files"))
         .header("x-goog-api-key", api_key)
-        .header("X-Goog-Upload-Protocol", "raw")
-        .header("X-Goog-Upload-Command", "start, upload, finalize")
+        .header("X-Goog-Upload-Protocol", "resumable")
+        .header("X-Goog-Upload-Command", "start")
         .header("X-Goog-Upload-Header-Content-Length", len.to_string())
         .header("X-Goog-Upload-Header-Content-Type", mime_type)
-        .header("X-Goog-Upload-File-Name", display_name)
-        .header(reqwest::header::CONTENT_TYPE, mime_type)
+        .json(&json!({ "file": { "display_name": display_name } }))
+        .send()
+        .await
+        .map_err(|e| format!("Gemini upload start failed: {}", e.without_url()))?;
+    let status = start.status();
+    let session = start.headers().get("x-goog-upload-url").and_then(|v| v.to_str().ok()).map(str::to_string);
+    if !status.is_success() {
+        let text = start.text().await.unwrap_or_default();
+        return Err(format!("Gemini upload start HTTP {status}: {}", api_error(&text)));
+    }
+    let session = session.ok_or("Gemini upload start returned no upload URL")?;
+
+    // 2. upload all bytes and finalize
+    let resp = client
+        .post(&session)
+        .header("x-goog-api-key", api_key)
+        .header(reqwest::header::CONTENT_LENGTH, len.to_string())
+        .header("X-Goog-Upload-Offset", "0")
+        .header("X-Goog-Upload-Command", "upload, finalize")
         .body(bytes)
         .send()
         .await
-        .map_err(|e| format!("Gemini file upload request failed: {}", e.without_url()))?;
-
+        .map_err(|e| format!("Gemini file upload failed: {}", e.without_url()))?;
     let status = resp.status();
     let text = resp.text().await.map_err(|e| format!("Gemini file upload response: {}", e.without_url()))?;
     if !status.is_success() {
-        return Err(format!("Gemini file upload HTTP {status}: {}", clip_str(&text, 200)));
+        return Err(format!("Gemini file upload HTTP {status}: {}", api_error(&text)));
     }
     let body: Value = serde_json::from_str(&text).map_err(|e| format!("Gemini file upload invalid JSON: {e}"))?;
-    let file = body.get("file").unwrap_or(&body);
-    let uri = file
-        .get("uri")
-        .and_then(Value::as_str)
-        .map(ToString::to_string)
-        .ok_or_else(|| format!("Gemini file upload response missing URI: {}", clip_str(&text, 200)))?;
-    let name = file.get("name").and_then(Value::as_str).map(ToString::to_string);
-    let mut state = file.get("state").and_then(Value::as_str).unwrap_or("ACTIVE").to_string();
+    let mut file = parse_file(body.get("file").unwrap_or(&body)).ok_or_else(|| format!("Gemini file upload response missing name/uri: {}", clip_str(&text, 200)))?;
+    if file.mime_type.is_empty() {
+        file.mime_type = mime_type.to_string();
+    }
+    let mut state = body.pointer("/file/state").and_then(Value::as_str).unwrap_or("PROCESSING").to_string();
 
-    // Video files must finish server-side processing before generateContent can use them.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+    // 3. video must finish server-side processing before generateContent can use it
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
     while state != "ACTIVE" {
         if state == "FAILED" {
+            delete_gemini_file(client, api_key, &file.name).await;
             return Err("Gemini could not process the uploaded proxy video".into());
         }
-        let Some(name) = name.as_deref() else { break };
         if std::time::Instant::now() >= deadline {
-            return Err("Gemini file processing did not finish within 90 s".into());
+            delete_gemini_file(client, api_key, &file.name).await;
+            return Err("Gemini file processing did not finish within 120 s".into());
         }
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         let poll = client
-            .get(format!("https://generativelanguage.googleapis.com/v1beta/{name}"))
+            .get(format!("{GEMINI_API}/v1beta/{}", file.name))
             .header("x-goog-api-key", api_key)
             .send()
             .await
             .map_err(|e| format!("Gemini file status request failed: {}", e.without_url()))?;
-        let v: Value = poll.json().await.map_err(|e| format!("Gemini file status invalid JSON: {}", e.without_url()))?;
-        state = v.get("state").and_then(Value::as_str).unwrap_or("FAILED").to_string();
+        let code = poll.status();
+        let text = poll.text().await.map_err(|e| format!("Gemini file status response: {}", e.without_url()))?;
+        if code.is_server_error() || code.as_u16() == 429 {
+            continue; // transient: keep polling until the deadline
+        }
+        if !code.is_success() {
+            return Err(format!("Gemini file status HTTP {code}: {}", api_error(&text)));
+        }
+        let v: Value = serde_json::from_str(&text).map_err(|e| format!("Gemini file status invalid JSON: {e}"))?;
+        state = v.get("state").and_then(Value::as_str).unwrap_or("PROCESSING").to_string();
     }
-    Ok(uri)
+    Ok(file)
+}
+
+/// Best-effort delete of an uploaded file (they also expire after 48 h).
+pub async fn delete_gemini_file(client: &reqwest::Client, api_key: &str, name: &str) {
+    if !name.starts_with("files/") {
+        return;
+    }
+    match client.delete(format!("{GEMINI_API}/v1beta/{name}")).header("x-goog-api-key", api_key).send().await {
+        Ok(r) if r.status().is_success() => log::debug!("deleted Gemini upload {name}"),
+        Ok(r) => log::debug!("could not delete Gemini upload {name}: HTTP {}", r.status()),
+        Err(e) => log::debug!("could not delete Gemini upload {name}: {}", e.without_url()),
+    }
+}
+
+fn parse_file(file: &Value) -> Option<UploadedFile> {
+    Some(UploadedFile {
+        name: file.get("name")?.as_str()?.to_string(),
+        uri: file.get("uri")?.as_str()?.to_string(),
+        mime_type: file.get("mimeType").and_then(Value::as_str).unwrap_or_default().to_string(),
+    })
+}
+
+/// `error.message` from a Google API error body, else a short snippet.
+fn api_error(text: &str) -> String {
+    serde_json::from_str::<Value>(text)
+        .ok()
+        .and_then(|v| v.pointer("/error/message").and_then(Value::as_str).map(str::to_string))
+        .unwrap_or_else(|| clip_str(text, 200))
 }
 
 fn clip_str(s: &str, max: usize) -> String {
@@ -231,4 +294,19 @@ pub fn build_timeline_json(tl: &Timeline, assets: &[MediaAsset], playhead: Time,
 
 fn round3(v: f64) -> f64 {
     (v * 1000.0).round() / 1000.0
+}
+
+#[cfg(test)]
+mod upload_tests {
+    use super::*;
+
+    #[test]
+    fn parses_file_resource_and_api_errors() {
+        let v = json!({"file": {"name": "files/abc", "uri": "https://x/files/abc", "mimeType": "video/mp4", "state": "PROCESSING"}});
+        let f = parse_file(&v["file"]).unwrap();
+        assert_eq!((f.name.as_str(), f.mime_type.as_str()), ("files/abc", "video/mp4"));
+        assert!(parse_file(&json!({"name": "files/abc"})).is_none());
+        assert_eq!(api_error(r#"{"error":{"code":503,"message":"overloaded"}}"#), "overloaded");
+        assert_eq!(api_error("plain"), "plain");
+    }
 }

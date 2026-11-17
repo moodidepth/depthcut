@@ -17,7 +17,7 @@ audio-out = ["dep:cpal"]
 ffmpeg = ["dep:ffmpeg-next"]
 # Online audio/SFX search (Openverse, Internet Archive), downloads and the
 # Whisper model manager (async reqwest + tokio, rustls).
-online = ["dep:reqwest", "dep:tokio", "dep:futures-util"]
+online = ["dep:reqwest", "dep:tokio", "dep:futures-util", "dep:sha2", "dep:zip"]
 # Offline speech-to-text captions via whisper.cpp (needs CMake + libclang).
 whisper = ["dep:whisper-rs"]
 # Run Whisper on the GPU through Vulkan (needs the Vulkan SDK at build time).
@@ -41,3 +41,5 @@ reqwest = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 whisper-rs = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+zip = { workspace = true, optional = true }

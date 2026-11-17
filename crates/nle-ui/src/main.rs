@@ -6,6 +6,7 @@
 // Release builds on Windows open without a console window.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod about_ui;
 mod app;
 mod browser;
 mod captions_ui;
@@ -14,6 +15,7 @@ mod demo;
 mod diagnostics;
 mod discord;
 mod export_ui;
+mod ffmpeg_setup;
 mod inspector;
 mod media;
 mod online_ui;

@@ -5,6 +5,7 @@
 use crate::app::App;
 use crate::theme;
 use eframe::egui::{self, Color32, CornerRadius, Stroke};
+use nle_ai::connection::{ConnectionReport, ModelInfo};
 use nle_ai::{AiConfig, AiProviderKind, ChatMessage, CopilotError, CopilotResponse, ThinkingLevel, GEMINI_4_MODELS, QUICK_PROMPTS};
 use nle_core::ClipKind;
 use nle_media::jobs::Job;
@@ -22,6 +23,14 @@ pub struct CopilotState {
     pub retry_prompt: Option<String>,
     /// Prompt of the in-flight request.
     pub pending_prompt: Option<String>,
+    /// "Test Live Connection" in flight / last result.
+    pub test_job: Option<Job<ConnectionReport>>,
+    pub test_report: Option<ConnectionReport>,
+    /// "Refresh model list" in flight / last result.
+    pub models_job: Option<Job<Vec<ModelInfo>>>,
+    pub live_models: Vec<ModelInfo>,
+    pub models_error: Option<String>,
+    pub save_error: Option<String>,
 }
 
 impl Default for CopilotState {
@@ -36,6 +45,12 @@ impl Default for CopilotState {
             last_notice: None,
             retry_prompt: None,
             pending_prompt: None,
+            test_job: None,
+            test_report: None,
+            models_job: None,
+            live_models: Vec::new(),
+            models_error: None,
+            save_error: None,
         }
     }
 }
@@ -49,6 +64,8 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     let mut save_cfg = false;
     let mut do_undo = false;
     let mut do_cancel = false;
+    let mut do_test = false;
+    let mut do_list_models = false;
 
     egui::SidePanel::right("ai_copilot_panel")
         .resizable(true)
@@ -76,6 +93,8 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                     .corner_radius(CornerRadius::same(4))
                     .inner_margin(egui::Margin::same(8))
                     .show(ui, |ui| {
+                        let live_models = &app.copilot.live_models;
+                        let listing = app.copilot.models_job.is_some();
                         let cfg = &mut app.copilot.config;
                         ui.horizontal(|ui| {
                             ui.label(egui::RichText::new("Provider").small().color(theme::TEXT_DIM));
@@ -93,11 +112,37 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                                     ui.label(egui::RichText::new("Model").small().color(theme::TEXT_DIM));
                                     egui::ComboBox::from_id_salt("gemini-model")
                                         .selected_text(&cfg.gemini_model)
+                                        .width(170.0)
                                         .show_ui(ui, |ui| {
                                             for (id, desc) in GEMINI_4_MODELS {
                                                 ui.selectable_value(&mut cfg.gemini_model, id.to_string(), desc);
                                             }
+                                            let extra: Vec<_> = live_models.iter().filter(|m| !GEMINI_4_MODELS.iter().any(|(id, _)| *id == m.id)).collect();
+                                            if !extra.is_empty() {
+                                                ui.separator();
+                                                ui.label(egui::RichText::new("Available to your key").small().color(theme::TEXT_DIM));
+                                                for m in extra {
+                                                    ui.selectable_value(&mut cfg.gemini_model, m.id.clone(), &m.id).on_hover_text(&m.display_name);
+                                                }
+                                            }
                                         });
+                                    if ui
+                                        .add_enabled(!listing, egui::Button::new(if listing { "…" } else { "⟳" }).small())
+                                        .on_hover_text("Refresh model list from Google (needs the API key)")
+                                        .clicked()
+                                    {
+                                        do_list_models = true;
+                                    }
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new("Custom").small().color(theme::TEXT_DIM));
+                                    ui.add(egui::TextEdit::singleline(&mut cfg.gemini_custom_model).hint_text("optional model id override").desired_width(170.0))
+                                        .on_hover_text("If set, this model id is used instead of the dropdown (e.g. a newer preview model)");
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new("Fallback").small().color(theme::TEXT_DIM));
+                                    ui.add(egui::TextEdit::singleline(&mut cfg.gemini_fallback_model).hint_text("empty = no fallback").desired_width(170.0))
+                                        .on_hover_text("Used once when the main model answers 'busy' (HTTP 503/429)");
                                 });
                                 ui.horizontal(|ui| {
                                     ui.label(egui::RichText::new("Thinking").small().color(theme::TEXT_DIM));
@@ -140,8 +185,33 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                                 });
                             }
                         }
-                        if ui.button("💾 Save AI Config").clicked() {
-                            save_cfg = true;
+                        if nle_ai::config::secrets::SECURE {
+                            ui.label(egui::RichText::new("🔒 API keys are stored in Windows Credential Manager, not in the config file.").small().color(theme::TEXT_DIM));
+                        }
+                        ui.horizontal(|ui| {
+                            if ui.button("💾 Save AI Config").clicked() {
+                                save_cfg = true;
+                            }
+                            let testing = app.copilot.test_job.is_some();
+                            if ui
+                                .add_enabled(!testing, egui::Button::new(if testing { "Testing…" } else { "📡 Test Live Connection" }))
+                                .on_hover_text("Checks the key, that the model exists, and sends a tiny request (uses a few tokens)")
+                                .clicked()
+                            {
+                                do_test = true;
+                            }
+                        });
+                        if let Some(e) = &app.copilot.save_error {
+                            ui.colored_label(Color32::from_rgb(0xE5, 0x6B, 0x6B), egui::RichText::new(format!("Save failed: {e}")).small());
+                        }
+                        if let Some(e) = &app.copilot.models_error {
+                            ui.colored_label(Color32::from_rgb(0xE5, 0x6B, 0x6B), egui::RichText::new(format!("Model list: {e}")).small());
+                        }
+                        if let Some(report) = &app.copilot.test_report {
+                            for line in &report.lines {
+                                let (icon, color) = if line.ok { ("✔", Color32::from_rgb(0x6B, 0xD3, 0x8A)) } else { ("✖", Color32::from_rgb(0xE5, 0x6B, 0x6B)) };
+                                ui.colored_label(color, egui::RichText::new(format!("{icon} {}", line.text)).small());
+                            }
                         }
                     });
                 ui.add_space(4.0);
@@ -266,10 +336,28 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     if save_cfg {
         match app.copilot.config.save() {
             Ok(()) => {
+                app.copilot.save_error = None;
                 app.copilot.last_notice = Some("Saved AI Copilot config".into());
                 app.status("Saved AI Copilot configuration");
             }
-            Err(e) => app.status(format!("Save config failed: {e}")),
+            Err(e) => {
+                app.status(format!("Save config failed: {e}"));
+                app.copilot.save_error = Some(e.to_string());
+            }
+        }
+    }
+    if do_test {
+        let cfg = app.copilot.config.clone();
+        app.copilot.test_report = None;
+        app.copilot.test_job = Some(Job::spawn("ai-connection-test", move |_| Ok(nle_ai::connection::test_connection(&cfg))));
+    }
+    if do_list_models {
+        match app.copilot.config.effective_gemini_key() {
+            Some(key) => {
+                app.copilot.models_error = None;
+                app.copilot.models_job = Some(Job::spawn("gemini-models", move |_| nle_ai::connection::list_gemini_models(&key)));
+            }
+            None => app.copilot.models_error = Some("set an API key first".into()),
         }
     }
     if do_undo {
@@ -345,7 +433,39 @@ fn push_error(app: &mut App, message: String, retryable: bool) {
     app.status(format!("AI Copilot failed: {message}"));
 }
 
+/// Finish the settings-panel background checks.
+fn poll_settings_jobs(app: &mut App, ctx: &egui::Context) {
+    if let Some(job) = &app.copilot.test_job {
+        match job.take() {
+            Some(res) => {
+                app.copilot.test_job = None;
+                let report = res.unwrap_or_else(|e| ConnectionReport {
+                    lines: vec![nle_ai::connection::CheckLine { ok: false, text: e }],
+                });
+                app.status(if report.ok() { "AI connection OK".to_string() } else { "AI connection test found a problem — see Copilot settings".to_string() });
+                app.copilot.test_report = Some(report);
+            }
+            None => ctx.request_repaint_after(Duration::from_millis(100)),
+        }
+    }
+    if let Some(job) = &app.copilot.models_job {
+        match job.take() {
+            Some(Ok(models)) => {
+                app.copilot.models_job = None;
+                app.status(format!("{} Gemini models available to this key", models.len()));
+                app.copilot.live_models = models;
+            }
+            Some(Err(e)) => {
+                app.copilot.models_job = None;
+                app.copilot.models_error = Some(e);
+            }
+            None => ctx.request_repaint_after(Duration::from_millis(100)),
+        }
+    }
+}
+
 pub fn poll(app: &mut App, ctx: &egui::Context) {
+    poll_settings_jobs(app, ctx);
     let Some(job) = app.copilot.job.as_ref() else { return };
     if let Some(res) = job.take() {
         app.copilot.job = None;

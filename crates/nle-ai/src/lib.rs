@@ -6,6 +6,7 @@
 //! Ollama, structured undoable timeline tools, and an offline deterministic fallback.
 
 pub mod config;
+pub mod connection;
 pub mod multimodal;
 pub mod providers;
 pub mod tools;
@@ -43,6 +44,12 @@ mod tests {
         assert_eq!(GEMINI_4_MODELS[0].0, "gemini-4-hydrogen");
         assert_eq!(GEMINI_4_MODELS[1].0, "gemini-4-argon");
         assert_eq!(GEMINI_4_MODELS[2].0, "gemini-4-carbon");
+        // the key went to the (test-only) credential store, not the file
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.contains("test-key-123"), !crate::config::secrets::SECURE);
+        let mut cleared = cfg.clone();
+        cleared.gemini_api_key.clear();
+        cleared.save_to_path(&path).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 

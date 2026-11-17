@@ -8,6 +8,7 @@
 
 pub mod archive;
 pub mod download;
+pub mod ffmpeg_install;
 pub mod models;
 pub mod openverse;
 pub mod ytdlp;
