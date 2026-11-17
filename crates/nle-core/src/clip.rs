@@ -1,9 +1,9 @@
 //! Clips and their per-clip effect parameters.
 
 use crate::asset::MediaAsset;
+use crate::effects::Effect;
 use crate::ids::{AssetId, ClipId};
 use crate::keyframe::{Interpolation, Param};
-use crate::effects::Effect;
 use crate::speed::{FrameBlendMode, Retime};
 use crate::text_anim::TextAnimation;
 use crate::time::Time;
@@ -254,9 +254,11 @@ impl AudioRole {
     pub fn guess(name: &str, has_video: bool) -> AudioRole {
         let n = name.to_ascii_lowercase();
         let words: Vec<&str> = n.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty()).collect();
-        let voice = words.iter().any(|w| {
-            matches!(*w, "vo" | "voice" | "voiceover" | "mic" | "microphone" | "narration" | "commentary" | "dialogue" | "dialog" | "podcast" | "recording")
-        }) || n.contains("voiceover") || n.contains("voice over") || n.contains("mic input");
+        let voice =
+            words.iter().any(|w| matches!(*w, "vo" | "voice" | "voiceover" | "mic" | "microphone" | "narration" | "commentary" | "dialogue" | "dialog" | "podcast" | "recording"))
+                || n.contains("voiceover")
+                || n.contains("voice over")
+                || n.contains("mic input");
         if voice {
             AudioRole::Dialogue
         } else if has_video {
@@ -310,16 +312,7 @@ pub struct EqSettings {
 
 impl Default for EqSettings {
     fn default() -> Self {
-        EqSettings {
-            enabled: false,
-            low_gain_db: 0.0,
-            low_freq: 120.0,
-            mid_gain_db: 0.0,
-            mid_freq: 1_000.0,
-            mid_q: 0.9,
-            high_gain_db: 0.0,
-            high_freq: 8_000.0,
-        }
+        EqSettings { enabled: false, low_gain_db: 0.0, low_freq: 120.0, mid_gain_db: 0.0, mid_freq: 1_000.0, mid_q: 0.9, high_gain_db: 0.0, high_freq: 8_000.0 }
     }
 }
 
@@ -772,7 +765,9 @@ impl CompoundClip {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ClipKind {
-    Asset { asset: AssetId },
+    Asset {
+        asset: AssetId,
+    },
     /// Slug / placeholder that renders black and silence.
     Gap,
     Title(Box<TitleParams>),

@@ -395,12 +395,8 @@ impl ExportDialog {
 }
 
 /// Output sizes offered in the Render dialog (width, height, label).
-pub const OUTPUT_SIZES: [(u32, u32, &str); 4] = [
-    (1080, 1920, "1080×1920 (9:16 Shorts / TikTok)"),
-    (1920, 1080, "1920×1080 (1080p)"),
-    (2560, 1440, "2560×1440 (1440p)"),
-    (3840, 2160, "3840×2160 (4K)"),
-];
+pub const OUTPUT_SIZES: [(u32, u32, &str); 4] =
+    [(1080, 1920, "1080×1920 (9:16 Shorts / TikTok)"), (1920, 1080, "1920×1080 (1080p)"), (2560, 1440, "2560×1440 (1440p)"), (3840, 2160, "3840×2160 (4K)")];
 
 /// Encoder quality tiers: an offset on the codec's default quality value
 /// (lower = better), so each tier means the same thing on every encoder.

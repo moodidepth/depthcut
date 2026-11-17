@@ -70,10 +70,12 @@ mod tests {
     #[test]
     fn rms_of_sine_and_silence() {
         let sr = 48_000;
-        let mut s: Vec<f32> = (0..sr).flat_map(|i| {
-            let v = (i as f32 * 0.1).sin();
-            [v, v]
-        }).collect();
+        let mut s: Vec<f32> = (0..sr)
+            .flat_map(|i| {
+                let v = (i as f32 * 0.1).sin();
+                [v, v]
+            })
+            .collect();
         s.extend(std::iter::repeat_n(0.0, sr as usize * 2));
         let w = Waveform::compute(&AudioBuffer::new(sr, 2, s), 100);
         assert_eq!(w.rms.len(), 200);

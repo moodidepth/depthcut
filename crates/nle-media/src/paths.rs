@@ -37,9 +37,7 @@ pub fn argon_data_dir() -> PathBuf {
     let dir = if let Some(p) = std::env::var_os("ARGON_DATA_DIR") {
         PathBuf::from(p)
     } else if cfg!(windows) {
-        std::env::var_os("LOCALAPPDATA")
-            .map(|local| PathBuf::from(local).join("Argon"))
-            .unwrap_or_else(|| local_data_dir().join("Argon"))
+        std::env::var_os("LOCALAPPDATA").map(|local| PathBuf::from(local).join("Argon")).unwrap_or_else(|| local_data_dir().join("Argon"))
     } else if let Some(x) = std::env::var_os("XDG_DATA_HOME") {
         PathBuf::from(x).join("argon")
     } else if let Some(home) = std::env::var_os("HOME") {
@@ -63,13 +61,7 @@ pub fn ai_config_path() -> PathBuf {
 
 /// A file-system safe version of `name` (keeps letters, digits, `-_. ()`).
 pub fn sanitize_file_name(name: &str, max_len: usize) -> String {
-    let mut s: String = name
-        .chars()
-        .map(|c| if c.is_alphanumeric() || " -_.()[]".contains(c) { c } else { '_' })
-        .collect::<String>()
-        .trim()
-        .trim_matches('.')
-        .to_string();
+    let mut s: String = name.chars().map(|c| if c.is_alphanumeric() || " -_.()[]".contains(c) { c } else { '_' }).collect::<String>().trim().trim_matches('.').to_string();
     if s.chars().count() > max_len {
         s = s.chars().take(max_len).collect();
     }

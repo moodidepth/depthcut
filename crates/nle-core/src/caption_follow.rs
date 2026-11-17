@@ -61,16 +61,10 @@ pub fn anchor_captions(tl: &Timeline) -> CaptionAnchors {
             let under = |p: &&PlacedClip| p.start <= at && at < p.end();
             // audible dialogue first, then other audible media, then any media;
             // within each, the storyline before connected lanes
-            let speech = placed.iter().filter(under).filter(|p| is_media(p.clip)).min_by_key(|p| {
-                (!audible(p.clip), p.clip.audio.role != AudioRole::Dialogue, p.lane != 0, p.lane.abs())
-            });
+            let speech =
+                placed.iter().filter(under).filter(|p| is_media(p.clip)).min_by_key(|p| (!audible(p.clip), p.clip.audio.role != AudioRole::Dialogue, p.lane != 0, p.lane.abs()));
             if let Some(p) = speech {
-                return Anchor::Speech {
-                    clip: p.clip.id,
-                    asset: p.clip.asset_id(),
-                    source: p.clip.source_time(at - p.start),
-                    at,
-                };
+                return Anchor::Speech { clip: p.clip.id, asset: p.clip.asset_id(), source: p.clip.source_time(at - p.start), at };
             }
             match placed.iter().filter(under).find(|p| p.lane == 0) {
                 Some(p) => Anchor::Local { clip: p.clip.id, local: at - p.start, at },
@@ -96,9 +90,8 @@ pub fn follow_edit(tl: &mut Timeline, anchors: &CaptionAnchors) {
                 // the same clip first, then any other piece of the same media
                 // (blades and duplicates), nearest to where the caption was
                 let candidates = placed.iter().filter(|p| p.clip.id == *clip || (asset.is_some() && p.clip.asset_id() == *asset));
-                let found = candidates
-                    .filter_map(|p| local_for_source(p.clip, *source).map(|l| (p.clip.id != *clip, p.start + l)))
-                    .min_by_key(|(other, t)| (*other, (t.0 - at.0).abs()));
+                let found =
+                    candidates.filter_map(|p| local_for_source(p.clip, *source).map(|l| (p.clip.id != *clip, p.start + l))).min_by_key(|(other, t)| (*other, (t.0 - at.0).abs()));
                 match found {
                     Some((_, t)) => shifts[i] = t - *at,
                     None => {

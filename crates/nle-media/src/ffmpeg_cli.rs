@@ -186,7 +186,9 @@ pub fn available() -> bool {
     }
     let ok = run_capture(&ffmpeg_path(), &["-hide_banner", "-version"]).is_some() && run_capture(&ffprobe_path(), &["-hide_banner", "-version"]).is_some();
     if !ok {
-        log::warn!("ffmpeg/ffprobe not found (next to the editor, in its bin folder, on PATH or in winget/Scoop/Chocolatey locations) — using synthetic media and disabling export");
+        log::warn!(
+            "ffmpeg/ffprobe not found (next to the editor, in its bin folder, on PATH or in winget/Scoop/Chocolatey locations) — using synthetic media and disabling export"
+        );
     }
     *AVAILABLE.write() = Some(ok);
     ok

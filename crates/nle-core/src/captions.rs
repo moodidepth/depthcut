@@ -50,10 +50,7 @@ impl CaptionSegment {
         if self.words.len() != n {
             return Vec::new();
         }
-        self.words
-            .iter()
-            .map(|w| [(w.start - self.start).as_secs_f64() as f32, (w.end - self.start).as_secs_f64() as f32])
-            .collect()
+        self.words.iter().map(|w| [(w.start - self.start).as_secs_f64() as f32, (w.end - self.start).as_secs_f64() as f32]).collect()
     }
 
     /// Shortest this block may be trimmed to: [`MIN_CAPTION_MS`], and at
@@ -129,16 +126,9 @@ impl CaptionSegment {
         // a cut that shaves a sliver off a word (or leaves one) snaps to the boundary
         let shaved = (last_left.end - t).max(t - first_right.start).max(Time::ZERO);
         let sliver = shaved.is_positive() && shaved < min_word + min_word;
-        let cut = if sliver || t - last_left.start.max(self.start) < min_word || first_right.end.min(self.end) - t < min_word {
-            first_right.start.max(last_left.end)
-        } else {
-            t
-        };
+        let cut = if sliver || t - last_left.start.max(self.start) < min_word || first_right.end.min(self.end) - t < min_word { first_right.start.max(last_left.end) } else { t };
         let side = |words: &[CaptionWord], start: Time, end: Time| {
-            let words: Vec<CaptionWord> = words
-                .iter()
-                .map(|w| CaptionWord { start: w.start.max(start).min(end), end: w.end.max(start).min(end), text: w.text.clone() })
-                .collect();
+            let words: Vec<CaptionWord> = words.iter().map(|w| CaptionWord { start: w.start.max(start).min(end), end: w.end.max(start).min(end), text: w.text.clone() }).collect();
             let text = words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ");
             CaptionSegment { start, end, text, words }
         };
@@ -505,11 +495,8 @@ pub const MIN_WORD_MS: i64 = 50;
 /// Trimmed, non-empty words with strictly increasing, non-overlapping
 /// intervals (`start < end <= next.start`).
 pub fn sanitize_words(words: &[CaptionWord]) -> Vec<CaptionWord> {
-    let mut out: Vec<CaptionWord> = words
-        .iter()
-        .filter(|w| !w.text.trim().is_empty())
-        .map(|w| CaptionWord { start: w.start, end: w.end.max(w.start), text: w.text.trim().to_string() })
-        .collect();
+    let mut out: Vec<CaptionWord> =
+        words.iter().filter(|w| !w.text.trim().is_empty()).map(|w| CaptionWord { start: w.start, end: w.end.max(w.start), text: w.text.trim().to_string() }).collect();
     out.sort_by_key(|w| w.start);
     let min = Time::from_millis(MIN_WORD_MS);
     for i in 0..out.len() {
@@ -587,13 +574,7 @@ pub fn speech_clips(tl: &crate::timeline::Timeline, track: &CaptionTrack) -> Vec
     let spans: Vec<(Time, Time)> = track
         .segments
         .iter()
-        .flat_map(|s| {
-            if s.words.is_empty() {
-                vec![(s.start, s.end)]
-            } else {
-                s.words.iter().map(|w| (w.start, w.end)).collect()
-            }
-        })
+        .flat_map(|s| if s.words.is_empty() { vec![(s.start, s.end)] } else { s.words.iter().map(|w| (w.start, w.end)).collect() })
         .filter(|(a, b)| b > a)
         .collect();
     tl.placed_clips()
@@ -686,12 +667,17 @@ mod tests {
     #[test]
     fn phrases_group_two_to_four_words_and_break_on_pauses_and_punctuation() {
         let words = vec![
-            w(0.00, 0.20, "one"), w(0.22, 0.40, "two"), w(0.42, 0.60, "three"),
-            w(0.62, 0.80, "four"), w(0.82, 1.00, "five"),
+            w(0.00, 0.20, "one"),
+            w(0.22, 0.40, "two"),
+            w(0.42, 0.60, "three"),
+            w(0.62, 0.80, "four"),
+            w(0.82, 1.00, "five"),
             // 0.5 s pause → hard break
-            w(1.50, 1.70, "after"), w(1.72, 1.90, "pause,"),
+            w(1.50, 1.70, "after"),
+            w(1.72, 1.90, "pause,"),
             // punctuation → hard break
-            w(1.92, 2.10, "next"), w(2.12, 2.30, "bit"),
+            w(1.92, 2.10, "next"),
+            w(2.12, 2.30, "bit"),
         ];
         let segs = CaptionTrack::phrases(&words);
         assert_eq!(texts(&segs), ["one two three", "four five", "after pause,", "next bit"]);
@@ -813,10 +799,7 @@ mod tests {
 
     #[test]
     fn track_trim_and_slide_stop_at_neighbours() {
-        let mut tr = CaptionTrack {
-            segments: vec![block(&[(1.0, 1.5, "a"), (1.5, 2.0, "b")]), block(&[(3.0, 3.5, "c"), (3.5, 4.0, "d")])],
-            ..Default::default()
-        };
+        let mut tr = CaptionTrack { segments: vec![block(&[(1.0, 1.5, "a"), (1.5, 2.0, "b")]), block(&[(3.0, 3.5, "c"), (3.5, 4.0, "d")])], ..Default::default() };
         // right edge of block 0 can't pass block 1's start
         assert!(tr.trim_segment(0, false, Time::from_secs(5), WordFit::Scale));
         assert_eq!(tr.segments[0].end, Time::from_secs(3));

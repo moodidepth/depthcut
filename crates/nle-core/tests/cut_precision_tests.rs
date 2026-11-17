@@ -26,12 +26,7 @@ fn asset(dur: Time) -> MediaAsset {
 
 #[test]
 fn time_frame_round_trip() {
-    let rates = [
-        FrameRate::FPS_60,
-        FrameRate::FPS_120,
-        FrameRate::FPS_240,
-        FrameRate::new(165, 1),
-    ];
+    let rates = [FrameRate::FPS_60, FrameRate::FPS_120, FrameRate::FPS_240, FrameRate::new(165, 1)];
     for rate in rates {
         for n in (0..100000).step_by(997) {
             let t = Time::from_frames(n, rate);
@@ -72,7 +67,7 @@ fn high_fps_blade_precision() {
         let (_, r_id) = test_tl.blade_clip(id, at).unwrap();
         let left = test_tl.clip(id).unwrap();
         let right = test_tl.clip(r_id).unwrap();
-        
+
         assert_eq!(left.duration + right.duration, dur);
         assert_eq!(right.source_in, left.source_in + left.duration);
         assert_eq!(left.duration.ticks() % frame_ticks, 0);
@@ -87,7 +82,7 @@ fn ripple_trims() {
     tl.append(Clip::from_asset(&asset(Time::from_secs(10)))).unwrap();
     let b = tl.append(Clip::from_asset(&asset(Time::from_secs(10)))).unwrap();
     let c = tl.append(Clip::from_asset(&asset(Time::from_secs(10)))).unwrap();
-    
+
     let delta = Time::from_secs(2);
     let at = tl.clip_start(b).unwrap() + delta;
     tl.ripple_trim_start_to(b, at).unwrap();
@@ -195,16 +190,16 @@ fn project_round_trip_precision() {
     project.timeline.format.rate = rate;
     let asset_id = project.add_asset(asset(Time::from_secs(100)));
     let mut id = project.timeline.append(Clip::from_asset(project.asset(asset_id).unwrap())).unwrap();
-    
+
     for i in 1..50 {
         let at = Time::from_frames(i, rate);
         let (_, r) = project.timeline.blade_clip(id, at).unwrap();
         id = r;
     }
-    
+
     let json = project.to_json().unwrap();
     let loaded = Project::from_json(&json).unwrap();
-    
+
     for (a, b) in project.timeline.spine.iter().zip(&loaded.timeline.spine) {
         assert_eq!(a.source_in.ticks(), b.source_in.ticks());
         assert_eq!(a.duration.ticks(), b.duration.ticks());

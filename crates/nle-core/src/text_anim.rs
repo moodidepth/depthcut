@@ -82,7 +82,21 @@ pub struct TitleAnim {
 
 impl Default for TitleAnim {
     fn default() -> Self {
-        TitleAnim { scale: 1.0, offset: [0.0, 0.0], opacity: 1.0, visible_chars: None, tracking_add: 0.0, glitch: 0.0, glitch_seed: 0.0, highlight_word: None, word_scale: 1.0, word_lift: 0.0, pill_from: None, pill_glide: 1.0, dim_from: None }
+        TitleAnim {
+            scale: 1.0,
+            offset: [0.0, 0.0],
+            opacity: 1.0,
+            visible_chars: None,
+            tracking_add: 0.0,
+            glitch: 0.0,
+            glitch_seed: 0.0,
+            highlight_word: None,
+            word_scale: 1.0,
+            word_lift: 0.0,
+            pill_from: None,
+            pill_glide: 1.0,
+            dim_from: None,
+        }
     }
 }
 

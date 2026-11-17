@@ -129,11 +129,7 @@ impl Time {
             }
             let t = n * TICKS_PER_SECOND as i128;
             // round half away from zero
-            let q = if (t >= 0) == (d > 0) {
-                (t + d / 2) / d
-            } else {
-                (t - d / 2) / d
-            };
+            let q = if (t >= 0) == (d > 0) { (t + d / 2) / d } else { (t - d / 2) / d };
             Some(Time(q as i64))
         } else if let Ok(i) = s.parse::<i64>() {
             Some(Time::from_secs(i))
@@ -218,19 +214,8 @@ impl FrameRate {
     pub const FPS_240: FrameRate = FrameRate { num: 240, den: 1 };
     pub const FPS_480: FrameRate = FrameRate { num: 480, den: 1 };
 
-    pub const PRESETS: [FrameRate; 11] = [
-        Self::FPS_23_976,
-        Self::FPS_24,
-        Self::FPS_25,
-        Self::FPS_29_97,
-        Self::FPS_30,
-        Self::FPS_50,
-        Self::FPS_59_94,
-        Self::FPS_60,
-        Self::FPS_120,
-        Self::FPS_240,
-        Self::FPS_480,
-    ];
+    pub const PRESETS: [FrameRate; 11] =
+        [Self::FPS_23_976, Self::FPS_24, Self::FPS_25, Self::FPS_29_97, Self::FPS_30, Self::FPS_50, Self::FPS_59_94, Self::FPS_60, Self::FPS_120, Self::FPS_240, Self::FPS_480];
 
     pub const fn new(num: u32, den: u32) -> Self {
         FrameRate { num, den }
@@ -284,12 +269,7 @@ pub fn format_timecode(t: Time, rate: FrameRate) -> String {
 
 /// Parse `HH:MM:SS:FF` (or fewer leading fields) into a time.
 pub fn parse_timecode(s: &str, rate: FrameRate) -> Option<Time> {
-    let parts: Vec<i64> = s
-        .trim()
-        .split([':', ';'])
-        .map(|p| p.trim().parse::<i64>())
-        .collect::<Result<_, _>>()
-        .ok()?;
+    let parts: Vec<i64> = s.trim().split([':', ';']).map(|p| p.trim().parse::<i64>()).collect::<Result<_, _>>().ok()?;
     if parts.is_empty() || parts.len() > 4 {
         return None;
     }

@@ -26,12 +26,7 @@ pub enum FrameBlendMode {
 }
 
 impl FrameBlendMode {
-    pub const ALL: [FrameBlendMode; 4] = [
-        FrameBlendMode::FloorFrame,
-        FrameBlendMode::FrameBlend,
-        FrameBlendMode::OpticalFlow,
-        FrameBlendMode::WeightedAccumulation,
-    ];
+    pub const ALL: [FrameBlendMode; 4] = [FrameBlendMode::FloorFrame, FrameBlendMode::FrameBlend, FrameBlendMode::OpticalFlow, FrameBlendMode::WeightedAccumulation];
     pub fn label(self) -> &'static str {
         match self {
             FrameBlendMode::FloorFrame => "Normal",
@@ -156,13 +151,7 @@ impl Retime {
     }
 
     pub fn from_velocity_curve(duration: Time, curve: Curve, blend: FrameBlendMode) -> Self {
-        Retime {
-            segments: vec![RetimeSegment::new(duration.max(Time(1)), 1.0)],
-            start_offset: Time::ZERO,
-            lead_speed: None,
-            blend,
-            velocity_curve: Some(curve),
-        }
+        Retime { segments: vec![RetimeSegment::new(duration.max(Time(1)), 1.0)], start_offset: Time::ZERO, lead_speed: None, blend, velocity_curve: Some(curve) }
     }
 
     pub fn is_identity(&self) -> bool {
@@ -171,8 +160,7 @@ impl Retime {
                 return c.keys.iter().all(|k| (k.value - 1.0).abs() < 1e-6);
             }
         }
-        self.lead_speed.is_none_or(|s| (s - 1.0).abs() < 1e-6)
-            && self.segments.iter().all(|s| (s.speed - 1.0).abs() < 1e-6 && s.ramp.is_zero())
+        self.lead_speed.is_none_or(|s| (s - 1.0).abs() < 1e-6) && self.segments.iter().all(|s| (s.speed - 1.0).abs() < 1e-6 && s.ramp.is_zero())
     }
 
     pub fn has_velocity_curve(&self) -> bool {
@@ -206,13 +194,8 @@ impl Retime {
         self.timeline_duration()
     }
 
-    pub const PRESET_NAMES: [&'static str; 5] = [
-        "Valorant Flow Sync (Fast-In / Kill-Hold / Snap-Out)",
-        "CS2 AWP / Deagle Double-Pump",
-        "Clean Skill Showcase",
-        "Bullet-Time Kill Ramp",
-        "Smooth Ease",
-    ];
+    pub const PRESET_NAMES: [&'static str; 5] =
+        ["Valorant Flow Sync (Fast-In / Kill-Hold / Snap-Out)", "CS2 AWP / Deagle Double-Pump", "Clean Skill Showcase", "Bullet-Time Kill Ramp", "Smooth Ease"];
 
     /// Build a one-click fragmovie velocity curve preset over `duration`.
     pub fn velocity_preset(name: &str, duration: Time) -> Option<Self> {
@@ -520,13 +503,7 @@ impl Retime {
             _ => (None, None),
         };
         let left = Retime { segments: left_segments, velocity_curve: left_curve, ..self.clone() };
-        let right = Retime {
-            segments: right_segments,
-            start_offset: self.map(at),
-            lead_speed: right_lead,
-            blend: self.blend,
-            velocity_curve: right_curve,
-        };
+        let right = Retime { segments: right_segments, start_offset: self.map(at), lead_speed: right_lead, blend: self.blend, velocity_curve: right_curve };
         (left, right)
     }
 
@@ -559,12 +536,7 @@ impl Retime {
     pub fn reversed(&self) -> Retime {
         let total = self.timeline_duration();
         let end = self.map(total);
-        let mut segs: Vec<RetimeSegment> = self
-            .segments
-            .iter()
-            .rev()
-            .map(|s| RetimeSegment::new(s.duration, -s.speed))
-            .collect();
+        let mut segs: Vec<RetimeSegment> = self.segments.iter().rev().map(|s| RetimeSegment::new(s.duration, -s.speed)).collect();
         // keep ramps attached to the boundary they describe
         for (i, s) in self.segments.iter().enumerate().skip(1) {
             let j = self.segments.len() - i;

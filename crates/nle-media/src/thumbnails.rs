@@ -51,9 +51,7 @@ pub fn generate(asset: &MediaAsset, count: usize, max_w: u32, max_h: u32) -> Res
                     return Vec::new();
                 }
             };
-            ts.iter()
-                .filter_map(|t| dec.thumbnail_at(*t, max_w, max_h).ok().map(|(w, h, rgba)| Thumbnail { time: *t, width: w, height: h, rgba }))
-                .collect()
+            ts.iter().filter_map(|t| dec.thumbnail_at(*t, max_w, max_h).ok().map(|(w, h, rgba)| Thumbnail { time: *t, width: w, height: h, rgba })).collect()
         })
         .collect();
     Ok(Filmstrip { interval, frames: chunks.into_iter().flatten().collect() })

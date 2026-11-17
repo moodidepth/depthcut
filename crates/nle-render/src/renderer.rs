@@ -575,11 +575,7 @@ impl Renderer {
         while !bytes.len().is_multiple_of(4) {
             bytes.push(0);
         }
-        let buffer = self.gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("rcp-frame"),
-            contents: &bytes,
-            usage: wgpu::BufferUsages::STORAGE,
-        });
+        let buffer = self.gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("rcp-frame"), contents: &bytes, usage: wgpu::BufferUsages::STORAGE });
         let gf = Arc::new(GpuFrame { buffer, width: frame.width, height: frame.height, format: frame.format, bytes: bytes.len() as u64 });
         self.frames.insert(key, gf);
         self.stats.uploads += 1;
@@ -605,11 +601,7 @@ impl Renderer {
     // ----- helpers -----------------------------------------------------------
 
     fn uniform<T: Pod>(&self, v: &T) -> wgpu::Buffer {
-        self.gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("rcp-uniform"),
-            contents: bytemuck::bytes_of(v),
-            usage: wgpu::BufferUsages::UNIFORM,
-        })
+        self.gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("rcp-uniform"), contents: bytemuck::bytes_of(v), usage: wgpu::BufferUsages::UNIFORM })
     }
 
     fn dispatch(&self, enc: &mut wgpu::CommandEncoder, pipe: &Pipe, entries: &[wgpu::BindGroupEntry], gx: u32, gy: u32) {
@@ -642,13 +634,7 @@ impl Renderer {
             _pad: [0; 2],
         };
         let u = self.uniform(&params);
-        self.dispatch(
-            enc,
-            &self.p.yuv,
-            &[entry(0, f.buffer.as_entire_binding()), entry(1, u.as_entire_binding()), entry(2, tv(&out.view))],
-            ceil8(f.width),
-            ceil8(f.height),
-        );
+        self.dispatch(enc, &self.p.yuv, &[entry(0, f.buffer.as_entire_binding()), entry(1, u.as_entire_binding()), entry(2, tv(&out.view))], ceil8(f.width), ceil8(f.height));
         out
     }
 
@@ -749,7 +735,14 @@ impl Renderer {
         self.dispatch(
             enc,
             p,
-            &[entry(0, tv(a)), entry(1, tv(b)), entry(2, tv(f)), entry(3, wgpu::BindingResource::Sampler(&self.sampler)), entry(4, ub.as_entire_binding()), entry(5, tv(&out.view))],
+            &[
+                entry(0, tv(a)),
+                entry(1, tv(b)),
+                entry(2, tv(f)),
+                entry(3, wgpu::BindingResource::Sampler(&self.sampler)),
+                entry(4, ub.as_entire_binding()),
+                entry(5, tv(&out.view)),
+            ],
             ceil8(out.width),
             ceil8(out.height),
         );
@@ -889,7 +882,17 @@ impl Renderer {
     /// core keeps the light dense next to the highlight while the halo
     /// carries it out to the radius.
     #[allow(clippy::too_many_arguments)]
-    fn bloom(&mut self, enc: &mut wgpu::CommandEncoder, src: &wgpu::TextureView, size: (u32, u32), base: FxU, threshold: f32, mask: bool, sigma_full: f32, tint: [f32; 4]) -> Target {
+    fn bloom(
+        &mut self,
+        enc: &mut wgpu::CommandEncoder,
+        src: &wgpu::TextureView,
+        size: (u32, u32),
+        base: FxU,
+        threshold: f32,
+        mask: bool,
+        sigma_full: f32,
+        tint: [f32; 4],
+    ) -> Target {
         const CORE_GAIN: f32 = 1.6;
         const HALO_GAIN: f32 = 2.4;
         let dev = self.gpu.device.clone();
@@ -963,18 +966,20 @@ impl Renderer {
 
     /// One effect from `src` into a new pooled target (`None` = skipped).
     #[allow(clippy::too_many_arguments)]
-    fn apply_effect(&mut self, enc: &mut wgpu::CommandEncoder, src: &wgpu::TextureView, size: (u32, u32), e: &ResolvedEffect, flow: Option<&Target>, vel_scale: f32, time: f32, resize: bool) -> Option<Target> {
+    fn apply_effect(
+        &mut self,
+        enc: &mut wgpu::CommandEncoder,
+        src: &wgpu::TextureView,
+        size: (u32, u32),
+        e: &ResolvedEffect,
+        flow: Option<&Target>,
+        vel_scale: f32,
+        time: f32,
+        resize: bool,
+    ) -> Option<Target> {
         let v = e.values;
         let k = size.1 as f32 / 1080.0;
-        let base = FxU {
-            a: [v[0], v[1], v[2], v[3]],
-            b: [v[4], v[5], v[6], v[7]],
-            c: [v[8], v[9], v[10], v[11]],
-            x: [0.0; 4],
-            dims: [size.0 as f32, size.1 as f32],
-            time,
-            k,
-        };
+        let base = FxU { a: [v[0], v[1], v[2], v[3]], b: [v[4], v[5], v[6], v[7]], c: [v[8], v[9], v[10], v[11]], x: [0.0; 4], dims: [size.0 as f32, size.1 as f32], time, k };
         let simple = |r: &mut Self, enc: &mut wgpu::CommandEncoder, pipe: &str, u: FxU| {
             let out = r.pool.get(&r.gpu.device, size.0, size.1);
             r.fx(enc, pipe, src, src, u, &out);
@@ -1008,7 +1013,17 @@ impl Renderer {
     /// `resize` lets an effect change the layer size (9:16 reframe on a clip);
     /// adjustment layers keep the frame size.
     #[allow(clippy::too_many_arguments)]
-    fn apply_effects(&mut self, enc: &mut wgpu::CommandEncoder, src: &wgpu::TextureView, size: (u32, u32), effects: &[ResolvedEffect], flow: Option<&Target>, vel_scale: f32, time: f32, resize: bool) -> Option<Target> {
+    fn apply_effects(
+        &mut self,
+        enc: &mut wgpu::CommandEncoder,
+        src: &wgpu::TextureView,
+        size: (u32, u32),
+        effects: &[ResolvedEffect],
+        flow: Option<&Target>,
+        vel_scale: f32,
+        time: f32,
+        resize: bool,
+    ) -> Option<Target> {
         let mut cur: Option<Target> = None;
         for e in effects {
             let out = {
@@ -1306,7 +1321,7 @@ impl Renderer {
         };
         let out = self.composite(enc, &bg, img.view(), inv, layer);
         let Img::Pooled(t) = img;
-            {
+        {
             self.pool.put(t);
         }
         self.pool.put(bg);
@@ -1371,9 +1386,7 @@ impl Renderer {
             let bg = self.pool.get(&self.gpu.device, orig_w, orig_h);
             self.fill(&mut enc, &bg, [0.0, 0.0, 0.0, 1.0]);
             let copy_layer = Layer::new(nle_core::ClipId(0), 0, LayerSource::Solid([0.0; 4]));
-            let id = layer_to_output(&copy_layer.video, [sw as f32, sh as f32], [orig_w as f32, orig_h as f32])
-                .inverse()
-                .expect("identity");
+            let id = layer_to_output(&copy_layer.video, [sw as f32, sh as f32], [orig_w as f32, orig_h as f32]).inverse().expect("identity");
             let upscaled = self.composite(&mut enc, &bg, &small.view, id, &copy_layer);
             self.pool.put(small);
             self.pool.put(bg);
@@ -1415,7 +1428,13 @@ impl Renderer {
         let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("rcp-export") });
         let out = self.render_comp(&mut enc, comp, src, opts, 0);
         let u = self.uniform(&SizeU { width: w, height: h, _pad: [0; 2] });
-        self.dispatch(&mut enc, &self.p.nv12, &[entry(0, tv(&out.view)), entry(1, u.as_entire_binding()), entry(2, storage.as_entire_binding())], (w / 4).div_ceil(8), (h / 2).div_ceil(8));
+        self.dispatch(
+            &mut enc,
+            &self.p.nv12,
+            &[entry(0, tv(&out.view)), entry(1, u.as_entire_binding()), entry(2, storage.as_entire_binding())],
+            (w / 4).div_ceil(8),
+            (h / 2).div_ceil(8),
+        );
         enc.copy_buffer_to_buffer(&storage, 0, &readback, 0, size);
         self.gpu.queue.submit(Some(enc.finish()));
         self.pool.put(out);

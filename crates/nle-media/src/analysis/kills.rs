@@ -105,12 +105,7 @@ pub fn analyze_kills_from_samples(samples: &[f32], channels: usize, rate: u32, s
             4 => "Quadra Kill".to_string(),
             _ => "ACE!".to_string(),
         };
-        out.push(KillPeak {
-            time: Time::from_secs_f64(secs),
-            score,
-            is_multikill: streak >= 2,
-            label,
-        });
+        out.push(KillPeak { time: Time::from_secs_f64(secs), score, is_multikill: streak >= 2, label });
     }
     out
 }
@@ -134,8 +129,7 @@ mod tests {
             for i in 0..(rate as usize / 8) {
                 let tt = i as f32 / rate as f32;
                 let env = (-tt * 32.0).exp();
-                let chime = (std::f32::consts::TAU * 3800.0 * tt).sin() * 0.55
-                    + (std::f32::consts::TAU * 5100.0 * tt).sin() * 0.45;
+                let chime = (std::f32::consts::TAU * 3800.0 * tt).sin() * 0.55 + (std::f32::consts::TAU * 5100.0 * tt).sin() * 0.45;
                 samples[start + i] += env * chime;
             }
         }

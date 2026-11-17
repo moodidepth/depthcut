@@ -11,10 +11,7 @@ pub const ROWS: u32 = 25;
 /// excluding podcasts and LibriVox audiobooks.
 pub fn build_query(terms: &str) -> String {
     let t = terms.replace(['(', ')', ':', '"'], " ");
-    format!(
-        "({}) AND mediatype:(audio) AND (licenseurl:*publicdomain* OR licenseurl:*creativecommons*) AND -collection:(podcasts) AND -collection:(librivoxaudio)",
-        t.trim()
-    )
+    format!("({}) AND mediatype:(audio) AND (licenseurl:*publicdomain* OR licenseurl:*creativecommons*) AND -collection:(podcasts) AND -collection:(librivoxaudio)", t.trim())
 }
 
 fn first_str(v: Option<&Value>) -> String {

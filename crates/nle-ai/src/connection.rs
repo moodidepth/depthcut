@@ -38,11 +38,7 @@ pub struct ModelInfo {
 }
 
 fn client() -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(45))
-        .build()
-        .map_err(|e| e.to_string())
+    reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).timeout(Duration::from_secs(45)).build().map_err(|e| e.to_string())
 }
 
 fn runtime() -> Result<tokio::runtime::Runtime, String> {
@@ -87,11 +83,7 @@ pub fn parse_model_list(body: &Value) -> (Vec<ModelInfo>, Option<String>) {
         .and_then(Value::as_array)
         .map(|arr| {
             arr.iter()
-                .filter(|m| {
-                    m.get("supportedGenerationMethods")
-                        .and_then(Value::as_array)
-                        .is_some_and(|ms| ms.iter().any(|x| x.as_str() == Some("generateContent")))
-                })
+                .filter(|m| m.get("supportedGenerationMethods").and_then(Value::as_array).is_some_and(|ms| ms.iter().any(|x| x.as_str() == Some("generateContent"))))
                 .filter_map(|m| {
                     let id = m.get("name")?.as_str()?.trim_start_matches("models/").to_string();
                     let display_name = m.get("displayName").and_then(Value::as_str).unwrap_or(&id).to_string();
@@ -163,10 +155,7 @@ async fn gemini_checks(client: &reqwest::Client, config: &AiConfig, r: &mut Conn
     // 1. model metadata: proves the key works and the model id exists
     match get(client.get(format!("{GEMINI_API}/models/{model}")).header("x-goog-api-key", &key)).await {
         Ok((200, body, t)) => {
-            let name = serde_json::from_str::<Value>(&body)
-                .ok()
-                .and_then(|v| v.get("displayName").and_then(Value::as_str).map(str::to_string))
-                .unwrap_or_else(|| model.clone());
+            let name = serde_json::from_str::<Value>(&body).ok().and_then(|v| v.get("displayName").and_then(Value::as_str).map(str::to_string)).unwrap_or_else(|| model.clone());
             r.push(true, format!("Key accepted · model “{model}” found ({name}) · {}", ms(t)));
         }
         Ok((404, _, _)) => {
@@ -229,7 +218,14 @@ async fn openai_checks(client: &reqwest::Client, config: &AiConfig, r: &mut Conn
                 .and_then(|v| v.get("data").and_then(Value::as_array).cloned())
                 .is_some_and(|d| d.iter().any(|m| m.get("id").and_then(Value::as_str) == Some(config.openai_model.as_str())));
             r.push(true, format!("Key accepted · {}", ms(t)));
-            r.push(listed, if listed { format!("Model “{}” is available", config.openai_model) } else { format!("Model “{}” is not in this endpoint's model list", config.openai_model) });
+            r.push(
+                listed,
+                if listed {
+                    format!("Model “{}” is available", config.openai_model)
+                } else {
+                    format!("Model “{}” is not in this endpoint's model list", config.openai_model)
+                },
+            );
         }
         Ok((code, body, _)) => r.push(false, format!("HTTP {code}: {}", error_detail(&body))),
         Err(e) => r.push(false, format!("Endpoint unreachable: {e}")),
@@ -244,9 +240,7 @@ async fn ollama_checks(client: &reqwest::Client, config: &AiConfig, r: &mut Conn
             let has = serde_json::from_str::<Value>(&body)
                 .ok()
                 .and_then(|v| v.get("models").and_then(Value::as_array).cloned())
-                .is_some_and(|ms| {
-                    ms.iter().filter_map(|m| m.get("name").and_then(Value::as_str)).any(|n| n == want || n.split(':').next() == Some(want))
-                });
+                .is_some_and(|ms| ms.iter().filter_map(|m| m.get("name").and_then(Value::as_str)).any(|n| n == want || n.split(':').next() == Some(want)));
             r.push(true, format!("Ollama is running · {}", ms(t)));
             r.push(has, if has { format!("Model “{want}” is installed") } else { format!("Model “{want}” is not pulled — run: ollama pull {want}") });
         }

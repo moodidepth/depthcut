@@ -609,10 +609,8 @@ impl ActionMap {
     }
 
     pub fn to_toml(&self) -> String {
-        let file = KeymapFile {
-            profile: self.profile.clone(),
-            bindings: self.bindings.iter().map(|(a, v)| (a.id().to_string(), v.iter().map(|b| b.to_string()).collect())).collect(),
-        };
+        let file =
+            KeymapFile { profile: self.profile.clone(), bindings: self.bindings.iter().map(|(a, v)| (a.id().to_string(), v.iter().map(|b| b.to_string()).collect())).collect() };
         toml::to_string_pretty(&file).unwrap_or_default()
     }
 

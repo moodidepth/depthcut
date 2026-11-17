@@ -31,8 +31,7 @@ pub struct GpuContext {
 /// compute shaders write `Rg16Float` motion vectors (half the bandwidth),
 /// and `PIPELINE_CACHE` enables persistent shader compilation caching.
 pub fn wanted_features(adapter: &wgpu::Adapter) -> wgpu::Features {
-    adapter.features()
-        & (wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES | wgpu::Features::PIPELINE_CACHE)
+    adapter.features() & (wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES | wgpu::Features::PIPELINE_CACHE)
 }
 
 /// Load or initialize the persistent wgpu pipeline cache from `%LOCALAPPDATA%/Argon/shader_cache.bin`.
@@ -42,13 +41,7 @@ pub fn load_or_create_pipeline_cache(device: &wgpu::Device) -> Option<Arc<wgpu::
     }
     let path = nle_media::paths::shader_cache_path();
     let bytes = std::fs::read(&path).ok();
-    let cache = unsafe {
-        device.create_pipeline_cache(&wgpu::PipelineCacheDescriptor {
-            label: Some("argon-shader-cache"),
-            data: bytes.as_deref(),
-            fallback: true,
-        })
-    };
+    let cache = unsafe { device.create_pipeline_cache(&wgpu::PipelineCacheDescriptor { label: Some("argon-shader-cache"), data: bytes.as_deref(), fallback: true }) };
     Some(Arc::new(cache))
 }
 

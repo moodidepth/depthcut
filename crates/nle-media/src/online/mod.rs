@@ -24,19 +24,12 @@ static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
 /// Shared 2-thread tokio runtime for network I/O.
 pub fn runtime() -> &'static tokio::runtime::Runtime {
-    RUNTIME.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread().worker_threads(2).thread_name("rcp-net").enable_all().build().expect("tokio runtime")
-    })
+    RUNTIME.get_or_init(|| tokio::runtime::Builder::new_multi_thread().worker_threads(2).thread_name("rcp-net").enable_all().build().expect("tokio runtime"))
 }
 
 pub fn client() -> &'static reqwest::Client {
     CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .user_agent(USER_AGENT)
-            .connect_timeout(Duration::from_secs(15))
-            .timeout(Duration::from_secs(60 * 60))
-            .build()
-            .expect("http client")
+        reqwest::Client::builder().user_agent(USER_AGENT).connect_timeout(Duration::from_secs(15)).timeout(Duration::from_secs(60 * 60)).build().expect("http client")
     })
 }
 

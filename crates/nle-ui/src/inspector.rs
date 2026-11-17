@@ -8,8 +8,8 @@ use crate::theme;
 use crate::widgets::{color_wheel, param_row, slider_f32, ParamSpec};
 use eframe::egui::{self, Color32, Stroke};
 use nle_core::{
-    AudioRole, BlendMode, Clip, ClipKind, Command, CropMode, Direction, Effect, EffectKind, FadeShape, FrameBlendMode, FrameRate,
-    Interpolation, LutRef, ParamKind, Retime, TextAnimation, Time, TitleStyle, Transition, TransitionKind, VideoFormat,
+    AudioRole, BlendMode, Clip, ClipKind, Command, CropMode, Direction, Effect, EffectKind, FadeShape, FrameBlendMode, FrameRate, Interpolation, LutRef, ParamKind, Retime,
+    TextAnimation, Time, TitleStyle, Transition, TransitionKind, VideoFormat,
 };
 use nle_media::analysis::{normalize_gain_db, TARGET_LUFS};
 use nle_media::audio::eq::ThreeBandEq;
@@ -18,12 +18,9 @@ const INSPECTOR_TAG: u64 = 0x1f;
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
-        for (tab, label) in [
-            (InspectorTab::Video, "Video"),
-            (InspectorTab::Color, "Color"),
-            (InspectorTab::Audio, "Audio"),
-            (InspectorTab::TitlesTransitions, "Titles & Transitions"),
-        ] {
+        for (tab, label) in
+            [(InspectorTab::Video, "Video"), (InspectorTab::Color, "Color"), (InspectorTab::Audio, "Audio"), (InspectorTab::TitlesTransitions, "Titles & Transitions")]
+        {
             ui.selectable_value(&mut app.inspector_tab, tab, label);
         }
     });
@@ -44,11 +41,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         ui.add(egui::TextEdit::singleline(&mut c.name).desired_width(ui.available_width() - 70.0));
         ui.label(egui::RichText::new(crate::widgets::secs_label(c.duration)).color(theme::TEXT_DIM));
     });
-    ui.label(
-        egui::RichText::new(format!("{} · local {}", kind_label(&c), nle_core::format_timecode(local, app.project.timeline.format.rate)))
-            .small()
-            .color(theme::TEXT_DIM),
-    );
+    ui.label(egui::RichText::new(format!("{} · local {}", kind_label(&c), nle_core::format_timecode(local, app.project.timeline.format.rate))).small().color(theme::TEXT_DIM));
     if app.selection.len() > 1 {
         ui.label(egui::RichText::new(format!("{} clips selected — editing the first", app.selection.len())).small().color(theme::SNAP));
     }
@@ -69,7 +62,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match app.inspector_tab {
         InspectorTab::Video => video_tab(ui, &mut c, local, frame, &mut retime_action, &mut toggle_reframe_916, &mut app.punch, &mut punch_request),
         InspectorTab::Color => color_tab(ui, &mut c, local, frame),
-        InspectorTab::Audio => audio_tab(ui, &mut c, local, frame, asset_lufs, beat_busy, kill_busy, mb_busy, &mut analyze_beats, &mut multiband_beats, &mut scan_kills, &mut sync_beats),
+        InspectorTab::Audio => {
+            audio_tab(ui, &mut c, local, frame, asset_lufs, beat_busy, kill_busy, mb_busy, &mut analyze_beats, &mut multiband_beats, &mut scan_kills, &mut sync_beats)
+        }
         InspectorTab::TitlesTransitions => titles_tab(ui, &mut c, &mut add_title),
     });
 
@@ -198,7 +193,11 @@ fn video_tab(
                 });
             });
             let is_916 = c.effects.iter().any(|e| e.enabled && e.kind == EffectKind::GamingReframe916);
-            if ui.selectable_label(is_916, "📱 Gaming 9:16 Reframe").on_hover_text("Stretch-free vertical layouts: Split Stack, Center Fit + Blur, Full 9:16 Crop (+ aspect-locked killfeed PiP). Switches the sequence to 1080×1920.").clicked() {
+            if ui
+                .selectable_label(is_916, "📱 Gaming 9:16 Reframe")
+                .on_hover_text("Stretch-free vertical layouts: Split Stack, Center Fit + Blur, Full 9:16 Crop (+ aspect-locked killfeed PiP). Switches the sequence to 1080×1920.")
+                .clicked()
+            {
                 *toggle_reframe_916 = true;
             }
         }
@@ -333,7 +332,11 @@ fn zoom_punch_section(ui: &mut egui::Ui, punch: &mut PunchState, request: &mut O
         if let PunchAnchor::Custom { x, y } = punch.anchor {
             ui.label(egui::RichText::new(format!("Custom anchor {:+.0} %, {:+.0} %", x * 100.0, y * 100.0)).small().color(theme::TEXT_DIM));
         }
-        ui.label(egui::RichText::new("Scale is always uniform about the anchor. Drag ◆ in the Animation lane to retime, right-click to change ease, Delete to remove.").small().color(theme::TEXT_DIM));
+        ui.label(
+            egui::RichText::new("Scale is always uniform about the anchor. Drag ◆ in the Animation lane to retime, right-click to change ease, Delete to remove.")
+                .small()
+                .color(theme::TEXT_DIM),
+        );
     });
 }
 
@@ -370,126 +373,105 @@ fn effects_section(ui: &mut egui::Ui, effects: &mut Vec<Effect>, t: Time, f: Tim
             e.normalize();
             let id = e.id;
             ui.add_space(2.0);
-            egui::Frame::new()
-                .fill(theme::BG)
-                .stroke(Stroke::new(1.0_f32, theme::BORDER))
-                .corner_radius(4.0)
-                .inner_margin(egui::Margin::symmetric(6, 4))
-                .show(ui, |ui| {
-                    ui.push_id(id, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.checkbox(&mut e.enabled, "");
-                            let title = if e.kind.needs_motion() {
-                                format!("{}  [Flow]", e.kind.label())
-                            } else {
-                                e.kind.label().to_string()
-                            };
-                            ui.label(egui::RichText::new(title).strong());
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.small_button("✕").on_hover_text("Remove effect").clicked() {
-                                    remove = Some(idx);
-                                }
-                                if ui.add_enabled(idx + 1 < n, egui::Button::new("↓").small()).on_hover_text("Move down").clicked() {
-                                    swap = Some((idx, idx + 1));
-                                }
-                                if ui.add_enabled(idx > 0, egui::Button::new("↑").small()).on_hover_text("Move up").clicked() {
-                                    swap = Some((idx, idx - 1));
-                                }
-                            });
+            egui::Frame::new().fill(theme::BG).stroke(Stroke::new(1.0_f32, theme::BORDER)).corner_radius(4.0).inner_margin(egui::Margin::symmetric(6, 4)).show(ui, |ui| {
+                ui.push_id(id, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut e.enabled, "");
+                        let title = if e.kind.needs_motion() { format!("{}  [Flow]", e.kind.label()) } else { e.kind.label().to_string() };
+                        ui.label(egui::RichText::new(title).strong());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("✕").on_hover_text("Remove effect").clicked() {
+                                remove = Some(idx);
+                            }
+                            if ui.add_enabled(idx + 1 < n, egui::Button::new("↓").small()).on_hover_text("Move down").clicked() {
+                                swap = Some((idx, idx + 1));
+                            }
+                            if ui.add_enabled(idx > 0, egui::Button::new("↑").small()).on_hover_text("Move up").clicked() {
+                                swap = Some((idx, idx - 1));
+                            }
                         });
-                        if e.enabled {
-                            let defs = e.kind.params();
-                            let mut i = 0;
-                            while i < defs.len() {
-                                let d = &defs[i];
-                                if d.kind == ParamKind::Color
-                                    && i + 2 < defs.len()
-                                    && defs[i + 1].kind == ParamKind::Color
-                                    && defs[i + 2].kind == ParamKind::Color
-                                {
-                                    let label = d.name.strip_suffix(" R").unwrap_or(d.name);
-                                    ui.horizontal(|ui| {
-                                        ui.add_sized([96.0, 20.0], egui::Label::new(egui::RichText::new(label).color(theme::TEXT_DIM)));
-                                        let mut rgb = [
-                                            e.params[i].at_f32(t).clamp(0.0, 1.0),
-                                            e.params[i + 1].at_f32(t).clamp(0.0, 1.0),
-                                            e.params[i + 2].at_f32(t).clamp(0.0, 1.0),
-                                        ];
-                                        if ui.color_edit_button_rgb(&mut rgb).changed() {
-                                            for k in 0..3 {
-                                                e.params[i + k].set(t, rgb[k] as f64);
+                    });
+                    if e.enabled {
+                        let defs = e.kind.params();
+                        let mut i = 0;
+                        while i < defs.len() {
+                            let d = &defs[i];
+                            if d.kind == ParamKind::Color && i + 2 < defs.len() && defs[i + 1].kind == ParamKind::Color && defs[i + 2].kind == ParamKind::Color {
+                                let label = d.name.strip_suffix(" R").unwrap_or(d.name);
+                                ui.horizontal(|ui| {
+                                    ui.add_sized([96.0, 20.0], egui::Label::new(egui::RichText::new(label).color(theme::TEXT_DIM)));
+                                    let mut rgb = [e.params[i].at_f32(t).clamp(0.0, 1.0), e.params[i + 1].at_f32(t).clamp(0.0, 1.0), e.params[i + 2].at_f32(t).clamp(0.0, 1.0)];
+                                    if ui.color_edit_button_rgb(&mut rgb).changed() {
+                                        for k in 0..3 {
+                                            e.params[i + k].set(t, rgb[k] as f64);
+                                        }
+                                    }
+                                    let animated = (0..3).any(|k| e.params[i + k].is_animated());
+                                    let at_key = (0..3).any(|k| e.params[i + k].curve.as_ref().is_some_and(|cv| cv.key_near(t, f.div_i64(2)).is_some()));
+                                    let k_col = if at_key {
+                                        theme::SNAP
+                                    } else if animated {
+                                        theme::TEXT
+                                    } else {
+                                        theme::TEXT_DIM
+                                    };
+                                    if ui.small_button(egui::RichText::new(if at_key { "◆" } else { "◇" }).color(k_col)).on_hover_text("Toggle keyframe at playhead").clicked()
+                                    {
+                                        for k in 0..3 {
+                                            let pk = &mut e.params[i + k];
+                                            if at_key {
+                                                if let Some(cv) = &mut pk.curve {
+                                                    cv.remove_near(t, f.div_i64(2));
+                                                }
+                                            } else {
+                                                pk.add_keyframe(t);
                                             }
                                         }
-                                        let animated = (0..3).any(|k| e.params[i + k].is_animated());
-                                        let at_key = (0..3).any(|k| e.params[i + k].curve.as_ref().is_some_and(|cv| cv.key_near(t, f.div_i64(2)).is_some()));
-                                        let k_col = if at_key { theme::SNAP } else if animated { theme::TEXT } else { theme::TEXT_DIM };
-                                        if ui.small_button(egui::RichText::new(if at_key { "◆" } else { "◇" }).color(k_col))
-                                            .on_hover_text("Toggle keyframe at playhead")
-                                            .clicked()
-                                        {
-                                            for k in 0..3 {
-                                                let pk = &mut e.params[i + k];
-                                                if at_key {
-                                                    if let Some(cv) = &mut pk.curve {
-                                                        cv.remove_near(t, f.div_i64(2));
-                                                    }
-                                                } else {
-                                                    pk.add_keyframe(t);
+                                    }
+                                });
+                                i += 3;
+                                continue;
+                            }
+                            match d.kind {
+                                ParamKind::Choice(opts) => {
+                                    let cur = (e.params[i].at(t).round() as usize).min(opts.len().saturating_sub(1));
+                                    ui.horizontal(|ui| {
+                                        ui.add_sized([96.0, 20.0], egui::Label::new(egui::RichText::new(d.name).color(theme::TEXT_DIM)));
+                                        egui::ComboBox::from_id_salt(("fx-choice", id, i)).selected_text(opts.get(cur).copied().unwrap_or("")).show_ui(ui, |ui| {
+                                            for (oi, opt) in opts.iter().enumerate() {
+                                                let mut sel = cur;
+                                                if ui.selectable_value(&mut sel, oi, *opt).clicked() {
+                                                    e.params[i].set(t, oi as f64);
                                                 }
                                             }
-                                        }
-                                    });
-                                    i += 3;
-                                    continue;
-                                }
-                                match d.kind {
-                                    ParamKind::Choice(opts) => {
-                                        let cur = (e.params[i].at(t).round() as usize).min(opts.len().saturating_sub(1));
-                                        ui.horizontal(|ui| {
-                                            ui.add_sized([96.0, 20.0], egui::Label::new(egui::RichText::new(d.name).color(theme::TEXT_DIM)));
-                                            egui::ComboBox::from_id_salt(("fx-choice", id, i))
-                                                .selected_text(opts.get(cur).copied().unwrap_or(""))
-                                                .show_ui(ui, |ui| {
-                                                    for (oi, opt) in opts.iter().enumerate() {
-                                                        let mut sel = cur;
-                                                        if ui.selectable_value(&mut sel, oi, *opt).clicked() {
-                                                            e.params[i].set(t, oi as f64);
-                                                        }
-                                                    }
-                                                });
                                         });
-                                    }
-                                    ParamKind::Integer => {
-                                        let spec = ParamSpec::new(d.name, d.min, d.max, d.default)
-                                            .scaled(1.0, d.suffix)
-                                            .decimals(0)
-                                            .speed(0.25);
-                                        if param_row(ui, &spec, &mut e.params[i], t, f) {
-                                            let v = e.params[i].at(t).round();
-                                            e.params[i].set(t, v);
-                                        }
-                                    }
-                                    ParamKind::Number | ParamKind::Color => {
-                                        let span = (d.max - d.min).abs();
-                                        let (dec, spd) = if span <= 2.5 {
-                                            (2, 0.01)
-                                        } else if span <= 20.0 {
-                                            (2, 0.05)
-                                        } else {
-                                            (1, 0.5)
-                                        };
-                                        let spec = ParamSpec::new(d.name, d.min, d.max, d.default)
-                                            .scaled(1.0, d.suffix)
-                                            .decimals(dec)
-                                            .speed(spd);
-                                        param_row(ui, &spec, &mut e.params[i], t, f);
+                                    });
+                                }
+                                ParamKind::Integer => {
+                                    let spec = ParamSpec::new(d.name, d.min, d.max, d.default).scaled(1.0, d.suffix).decimals(0).speed(0.25);
+                                    if param_row(ui, &spec, &mut e.params[i], t, f) {
+                                        let v = e.params[i].at(t).round();
+                                        e.params[i].set(t, v);
                                     }
                                 }
-                                i += 1;
+                                ParamKind::Number | ParamKind::Color => {
+                                    let span = (d.max - d.min).abs();
+                                    let (dec, spd) = if span <= 2.5 {
+                                        (2, 0.01)
+                                    } else if span <= 20.0 {
+                                        (2, 0.05)
+                                    } else {
+                                        (1, 0.5)
+                                    };
+                                    let spec = ParamSpec::new(d.name, d.min, d.max, d.default).scaled(1.0, d.suffix).decimals(dec).speed(spd);
+                                    param_row(ui, &spec, &mut e.params[i], t, f);
+                                }
                             }
+                            i += 1;
                         }
-                    });
+                    }
                 });
+            });
         }
         if let Some((a, b)) = swap {
             effects.swap(a, b);
@@ -682,8 +664,7 @@ fn audio_tab(
         let is_voice = a.role == nle_core::AudioRole::Dialogue;
         let d = &mut a.ducking;
         ui.add_enabled_ui(!is_voice, |ui| {
-            ui.checkbox(&mut d.enabled, "Auto-Duck Under Voice")
-                .on_hover_text("Pull this clip down while Dialogue / VO clips are speaking (preview and export)");
+            ui.checkbox(&mut d.enabled, "Auto-Duck Under Voice").on_hover_text("Pull this clip down while Dialogue / VO clips are speaking (preview and export)");
         });
         if is_voice {
             ui.label(egui::RichText::new("Dialogue clips are the voice — set the role to Music / SFX / General to duck it.").small().color(theme::TEXT_DIM));
@@ -691,7 +672,14 @@ fn audio_tab(
         ui.add_enabled_ui(d.enabled && !is_voice, |ui| {
             // stored as positive attenuation; shown as the negative gain it applies
             let mut gain = -d.amount_db;
-            if ui.add(egui::Slider::new(&mut gain, -*nle_core::DuckingSettings::AMOUNT_RANGE_DB.end()..=-*nle_core::DuckingSettings::AMOUNT_RANGE_DB.start()).text("Duck").suffix(" dB")).changed() {
+            if ui
+                .add(
+                    egui::Slider::new(&mut gain, -*nle_core::DuckingSettings::AMOUNT_RANGE_DB.end()..=-*nle_core::DuckingSettings::AMOUNT_RANGE_DB.start())
+                        .text("Duck")
+                        .suffix(" dB"),
+                )
+                .changed()
+            {
                 d.amount_db = -gain;
             }
             slider_f32(ui, "Threshold", &mut d.threshold_db, -60.0..=0.0, " dB");
@@ -881,7 +869,9 @@ fn project_settings(app: &mut App, ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
         ui.label("Format");
         egui::ComboBox::from_id_salt("fmt").selected_text(format!("{}×{}", f.width, f.height)).show_ui(ui, |ui| {
-            for (w, h, l) in [(1280, 720, "720p HD"), (1920, 1080, "1080p HD"), (2560, 1440, "1440p"), (3840, 2160, "4K UHD"), (1080, 1920, "Vertical 1080×1920"), (1080, 1080, "Square 1080")] {
+            for (w, h, l) in
+                [(1280, 720, "720p HD"), (1920, 1080, "1080p HD"), (2560, 1440, "1440p"), (3840, 2160, "4K UHD"), (1080, 1920, "Vertical 1080×1920"), (1080, 1080, "Square 1080")]
+            {
                 if ui.selectable_label(f.width == w && f.height == h, l).clicked() {
                     nf.width = w;
                     nf.height = h;

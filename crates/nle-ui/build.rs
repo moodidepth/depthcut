@@ -23,11 +23,7 @@ fn main() {
         return;
     };
 
-    let status = Command::new(&rc_exe)
-        .args(["/nologo", "/fo"])
-        .arg(&res_file)
-        .arg(&rc_file)
-        .status();
+    let status = Command::new(&rc_exe).args(["/nologo", "/fo"]).arg(&res_file).arg(&rc_file).status();
 
     match status {
         Ok(s) if s.success() && res_file.exists() => {
@@ -85,10 +81,7 @@ fn find_rc_exe() -> Option<PathBuf> {
     for root in [r"C:\Program Files (x86)\Windows Kits\10\bin", r"C:\Program Files\Windows Kits\10\bin"] {
         let root_path = Path::new(root);
         let Ok(entries) = std::fs::read_dir(root_path) else { continue };
-        let mut versions: Vec<PathBuf> = entries
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.is_dir())
-            .collect();
+        let mut versions: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.is_dir()).collect();
         versions.sort();
         versions.reverse();
         for ver in versions {

@@ -114,10 +114,8 @@ fn animated_title_layers_carry_their_state() {
 fn captions_render_on_top_and_are_undoable() {
     let mut tl = Timeline::default();
     tl.append(clip("A", 6)).unwrap();
-    let words = [
-        CaptionWord { start: secs(1), end: Time::from_millis(1_400), text: "Hello".into() },
-        CaptionWord { start: Time::from_millis(1_400), end: secs(2), text: "world".into() },
-    ];
+    let words =
+        [CaptionWord { start: secs(1), end: Time::from_millis(1_400), text: "Hello".into() }, CaptionWord { start: Time::from_millis(1_400), end: secs(2), text: "world".into() }];
     let track = CaptionTrack { segments: CaptionTrack::from_words(&words, 42, Time::from_millis(700)), ..Default::default() };
     let mut h = History::new(10);
     h.execute(&mut tl, Command::SetCaptions { captions: Box::new(track) }).unwrap();
@@ -230,7 +228,6 @@ fn projects_from_before_these_features_still_load() {
     assert_eq!(t.animation, TextAnimation::None);
     assert!((t.anim_duration - 0.6).abs() < 1e-6);
 }
-
 
 // ---- Research-driven upgrades: roll edits, J/L split edits, expressive easing ----
 

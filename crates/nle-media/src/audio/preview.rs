@@ -42,20 +42,9 @@ pub fn decode_pcm_f32le_chunks(bytes: &[u8], carry: &mut Vec<u8>, out: &mut Vec<
 /// Build FFmpeg arguments for streaming an audio URL to 48 kHz (or device rate)
 /// interleaved `f32le` stereo PCM on stdout.
 pub fn ffmpeg_stream_args(url: &str, sample_rate: u32) -> Vec<String> {
-    let mut args = vec![
-        "-hide_banner".to_string(),
-        "-loglevel".to_string(),
-        "error".to_string(),
-    ];
+    let mut args = vec!["-hide_banner".to_string(), "-loglevel".to_string(), "error".to_string()];
     if url.starts_with("http://") || url.starts_with("https://") {
-        args.extend([
-            "-reconnect".to_string(),
-            "1".to_string(),
-            "-reconnect_streamed".to_string(),
-            "1".to_string(),
-            "-reconnect_delay_max".to_string(),
-            "2".to_string(),
-        ]);
+        args.extend(["-reconnect".to_string(), "1".to_string(), "-reconnect_streamed".to_string(), "1".to_string(), "-reconnect_delay_max".to_string(), "2".to_string()]);
     }
     args.extend([
         "-i".to_string(),
@@ -184,22 +173,12 @@ impl Drop for AudioPreview {
 }
 
 #[cfg(not(feature = "audio-out"))]
-fn run_preview_worker(
-    _url: &str,
-    _stop: &AtomicBool,
-    error: &Mutex<Option<String>>,
-    _child_slot: &Mutex<Option<Child>>,
-) {
+fn run_preview_worker(_url: &str, _stop: &AtomicBool, error: &Mutex<Option<String>>, _child_slot: &Mutex<Option<Child>>) {
     *error.lock() = Some("Audio output feature disabled".to_string());
 }
 
 #[cfg(feature = "audio-out")]
-fn run_preview_worker(
-    url: &str,
-    stop: &AtomicBool,
-    error: &Mutex<Option<String>>,
-    child_slot: &Mutex<Option<Child>>,
-) {
+fn run_preview_worker(url: &str, stop: &AtomicBool, error: &Mutex<Option<String>>, child_slot: &Mutex<Option<Child>>) {
     use std::io::Read;
     use std::process::Stdio;
     use std::time::{Duration, Instant};
@@ -226,27 +205,16 @@ fn run_preview_worker(
 
     let err_cb = |e: cpal::StreamError| log::warn!("audio preview stream error: {e}");
     let stream = match sample_format {
-        cpal::SampleFormat::F32 => device.build_output_stream(
-            &stream_cfg,
-            move |data: &mut [f32], _| write_cpal_frames(data, out_channels, &mut cons, |s| s),
-            err_cb,
-            None,
-        ),
+        cpal::SampleFormat::F32 => device.build_output_stream(&stream_cfg, move |data: &mut [f32], _| write_cpal_frames(data, out_channels, &mut cons, |s| s), err_cb, None),
         cpal::SampleFormat::I16 => device.build_output_stream(
             &stream_cfg,
-            move |data: &mut [i16], _| {
-                write_cpal_frames(data, out_channels, &mut cons, |s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)
-            },
+            move |data: &mut [i16], _| write_cpal_frames(data, out_channels, &mut cons, |s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16),
             err_cb,
             None,
         ),
         cpal::SampleFormat::U16 => device.build_output_stream(
             &stream_cfg,
-            move |data: &mut [u16], _| {
-                write_cpal_frames(data, out_channels, &mut cons, |s| {
-                    ((s.clamp(-1.0, 1.0) * 0.5 + 0.5) * u16::MAX as f32) as u16
-                })
-            },
+            move |data: &mut [u16], _| write_cpal_frames(data, out_channels, &mut cons, |s| ((s.clamp(-1.0, 1.0) * 0.5 + 0.5) * u16::MAX as f32) as u16),
             err_cb,
             None,
         ),
@@ -268,13 +236,7 @@ fn run_preview_worker(
     }
 
     let args = ffmpeg_stream_args(url, sample_rate);
-    let mut proc = match ffmpeg_cli::command(&ffmpeg_cli::ffmpeg_path())
-        .args(&args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
+    let mut proc = match ffmpeg_cli::command(&ffmpeg_cli::ffmpeg_path()).args(&args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
         Ok(c) => c,
         Err(e) => {
             *error.lock() = Some(format!("Failed to spawn ffmpeg: {e}"));
@@ -358,12 +320,7 @@ fn run_preview_worker(
 }
 
 #[cfg(feature = "audio-out")]
-fn write_cpal_frames<T: Copy>(
-    out: &mut [T],
-    channels: usize,
-    cons: &mut rtrb::Consumer<f32>,
-    convert: impl Fn(f32) -> T,
-) {
+fn write_cpal_frames<T: Copy>(out: &mut [T], channels: usize, cons: &mut rtrb::Consumer<f32>, convert: impl Fn(f32) -> T) {
     let ch = channels.max(1);
     let zero = convert(0.0);
     for frame in out.chunks_mut(ch) {
@@ -410,15 +367,7 @@ mod tests {
     fn builds_stream_args_and_preview_lifecycle() {
         let args = ffmpeg_stream_args("https://example.org/sound.mp3", 48_000);
         assert!(args.windows(2).any(|w| w == ["-reconnect", "1"]));
-        assert!(args.ends_with(&[
-            "-f".to_string(),
-            "f32le".to_string(),
-            "-ac".to_string(),
-            "2".to_string(),
-            "-ar".to_string(),
-            "48000".to_string(),
-            "pipe:1".to_string(),
-        ]));
+        assert!(args.ends_with(&["-f".to_string(), "f32le".to_string(), "-ac".to_string(), "2".to_string(), "-ar".to_string(), "48000".to_string(), "pipe:1".to_string(),]));
 
         let local_args = ffmpeg_stream_args("clip.mp3", 44_100);
         assert!(!local_args.contains(&"-reconnect".to_string()));

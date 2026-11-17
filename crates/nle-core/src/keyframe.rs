@@ -289,12 +289,7 @@ impl Curve {
 
     /// Index of the keyframe nearest to `t` within `tolerance`.
     pub fn key_near(&self, t: Time, tolerance: Time) -> Option<usize> {
-        self.keys
-            .iter()
-            .enumerate()
-            .filter(|(_, k)| (k.time - t).abs() <= tolerance)
-            .min_by_key(|(_, k)| (k.time - t).abs())
-            .map(|(i, _)| i)
+        self.keys.iter().enumerate().filter(|(_, k)| (k.time - t).abs() <= tolerance).min_by_key(|(_, k)| (k.time - t).abs()).map(|(i, _)| i)
     }
 }
 

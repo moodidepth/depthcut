@@ -419,12 +419,7 @@ impl Timeline {
     /// Blade the spine and every connected clip crossing `at`.
     pub fn blade_all(&mut self, at: Time) -> usize {
         let mut n = 0;
-        let crossing: Vec<ClipId> = self
-            .placed_clips()
-            .iter()
-            .filter(|p| p.lane != 0 && p.start < at && p.end() > at)
-            .map(|p| p.clip.id)
-            .collect();
+        let crossing: Vec<ClipId> = self.placed_clips().iter().filter(|p| p.lane != 0 && p.start < at && p.end() > at).map(|p| p.clip.id).collect();
         for id in crossing {
             if self.blade_clip(id, at).is_ok() {
                 n += 1;
@@ -494,31 +489,18 @@ impl Timeline {
 
     /// Align clip cuts and velocity minima to timeline beat markers (`Beat`, `SubBass`, `Snare`).
     pub fn sync_clips_to_beats(&mut self, ids: &[ClipId]) -> usize {
-        let beats: Vec<Time> = self
-            .markers
-            .iter()
-            .filter(|m| matches!(m.kind, MarkerKind::Beat | MarkerKind::SubBass | MarkerKind::Snare))
-            .map(|m| m.time)
-            .collect();
+        let beats: Vec<Time> = self.markers.iter().filter(|m| matches!(m.kind, MarkerKind::Beat | MarkerKind::SubBass | MarkerKind::Snare)).map(|m| m.time).collect();
         if beats.is_empty() {
             return 0;
         }
         let min_dur = Time::from_frames(4, self.format.rate);
         let mut synced = 0usize;
-        let target_ids: Vec<ClipId> = if ids.is_empty() {
-            self.spine.iter().filter(|c| !c.is_gap()).map(|c| c.id).collect()
-        } else {
-            ids.to_vec()
-        };
+        let target_ids: Vec<ClipId> = if ids.is_empty() { self.spine.iter().filter(|c| !c.is_gap()).map(|c| c.id).collect() } else { ids.to_vec() };
         for id in target_ids {
             let Some(start) = self.clip_start(id) else { continue };
             let Some(cur_dur) = self.clip(id).map(|c| c.duration) else { continue };
             let cur_end = start + cur_dur;
-            if let Some(&nearest_beat) = beats
-                .iter()
-                .filter(|&&b| b >= start + min_dur)
-                .min_by_key(|&&b| (b.0 - cur_end.0).abs())
-            {
+            if let Some(&nearest_beat) = beats.iter().filter(|&&b| b >= start + min_dur).min_by_key(|&&b| (b.0 - cur_end.0).abs()) {
                 let delta = nearest_beat - cur_end;
                 if !delta.is_zero() && self.trim_end(id, delta).is_ok() {
                     synced += 1;
@@ -753,13 +735,7 @@ impl Timeline {
         let _ = self.blade(start);
         let _ = self.blade(end);
         let starts = self.spine_starts();
-        let doomed: Vec<ClipId> = self
-            .spine
-            .iter()
-            .zip(starts)
-            .filter(|(c, s)| *s >= start && *s + c.duration <= end)
-            .map(|(c, _)| c.id)
-            .collect();
+        let doomed: Vec<ClipId> = self.spine.iter().zip(starts).filter(|(c, s)| *s >= start && *s + c.duration <= end).map(|(c, _)| c.id).collect();
         for id in &doomed {
             self.remove_ripple(*id)?;
         }
@@ -815,13 +791,7 @@ impl Timeline {
             let _ = inner.blade(hi);
         }
         let starts = inner.spine_starts();
-        let pieces: Vec<(Time, Clip)> = inner
-            .spine
-            .into_iter()
-            .zip(starts)
-            .filter(|(c, s)| *s >= lo && *s + c.duration <= hi)
-            .map(|(c, s)| (s - lo, c))
-            .collect();
+        let pieces: Vec<(Time, Clip)> = inner.spine.into_iter().zip(starts).filter(|(c, s)| *s >= lo && *s + c.duration <= hi).map(|(c, s)| (s - lo, c)).collect();
         let new_ids: Vec<ClipId> = pieces.iter().map(|(_, c)| c.id).collect();
 
         match loc {
@@ -879,8 +849,7 @@ impl Timeline {
     /// Add markers, replacing existing markers of the same kind within
     /// `tolerance` (re-analysing beats does not duplicate them).
     pub fn with_markers(&self, add: &[Marker], tolerance: Time) -> Vec<Marker> {
-        let mut out: Vec<Marker> =
-            self.markers.iter().filter(|m| !add.iter().any(|a| a.kind == m.kind && (a.time - m.time).abs() <= tolerance)).cloned().collect();
+        let mut out: Vec<Marker> = self.markers.iter().filter(|m| !add.iter().any(|a| a.kind == m.kind && (a.time - m.time).abs() <= tolerance)).cloned().collect();
         out.extend(add.iter().cloned());
         out.sort_by_key(|m| m.time);
         out
@@ -892,13 +861,7 @@ impl Timeline {
         if !self.snapping {
             return (t, false);
         }
-        let best = self
-            .snap_points(exclude)
-            .into_iter()
-            .chain(extra.iter().copied())
-            .map(|p| (p, (p - t).abs()))
-            .filter(|(_, d)| *d <= threshold)
-            .min_by_key(|(_, d)| *d);
+        let best = self.snap_points(exclude).into_iter().chain(extra.iter().copied()).map(|p| (p, (p - t).abs())).filter(|(_, d)| *d <= threshold).min_by_key(|(_, d)| *d);
         match best {
             Some((p, _)) => (p, true),
             None => (t, false),

@@ -131,10 +131,7 @@ fn quick_sync_decodes_hevc_10bit_and_av1() {
         return;
     }
     let dir = workdir("hwdec");
-    let cases = [
-        ("hevc_qsv", "p010le", vec!["-profile:v", "main10"], "hevc10.mp4", 10u8, PixelFormat::P010),
-        ("av1_qsv", "nv12", vec![], "av1.mp4", 8u8, PixelFormat::Nv12),
-    ];
+    let cases = [("hevc_qsv", "p010le", vec!["-profile:v", "main10"], "hevc10.mp4", 10u8, PixelFormat::P010), ("av1_qsv", "nv12", vec![], "av1.mp4", 8u8, PixelFormat::Nv12)];
     let mut ran = 0;
     for (enc, pix, extra, name, depth, fmt) in cases {
         if !encoder_works(enc) {

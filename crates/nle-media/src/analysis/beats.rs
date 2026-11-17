@@ -51,18 +51,11 @@ pub fn analyze_multiband(samples: &[f32], channels: usize, rate: u32, sensitivit
     let frame_time = |f: usize| f as f64 * hop_secs + (FFT_SIZE as f64 * 0.5 - HOP as f64 * 0.5) / rate as f64;
 
     let mut out = Vec::new();
-    for (band, sig, min_thr) in [
-        (BeatBand::SubBassKick, &sub_sig, 0.14 / sens),
-        (BeatBand::SnareTransient, &snare_sig, 0.16 / sens),
-    ] {
+    for (band, sig, min_thr) in [(BeatBand::SubBassKick, &sub_sig, 0.14 / sens), (BeatBand::SnareTransient, &snare_sig, 0.16 / sens)] {
         let env = band_flux_envelope(sig);
         let peaks = pick_peaks_with_delta(&env, hop_secs, min_thr);
         for p in peaks {
-            out.push(MultiBandBeat {
-                secs: frame_time(p).max(0.0),
-                band,
-                strength: env[p],
-            });
+            out.push(MultiBandBeat { secs: frame_time(p).max(0.0), band, strength: env[p] });
         }
     }
     out.sort_by(|a, b| a.secs.total_cmp(&b.secs));
@@ -258,7 +251,7 @@ pub fn analyze(samples: &[f32], channels: usize, rate: u32) -> BeatAnalysis {
         return BeatAnalysis { beats: onsets.clone(), onsets, bpm: 0.0 };
     };
     let period = 60.0 / bpm / hop_secs; // in envelope frames
-    // phase with the most onset energy on the grid
+                                        // phase with the most onset energy on the grid
     let steps = period.ceil() as usize;
     let mut best_phase = (0.0, f32::MIN);
     for ph in 0..steps {
@@ -277,12 +270,7 @@ pub fn analyze(samples: &[f32], channels: usize, rate: u32) -> BeatAnalysis {
     let mut x = best_phase.0;
     while x < env.len() as f64 {
         // snap to the strongest peak near the grid point
-        let snapped = peaks
-            .iter()
-            .filter(|&&p| (p as f64 - x).abs() <= tol)
-            .max_by(|a, b| env[**a].total_cmp(&env[**b]))
-            .map(|&p| p as f64)
-            .unwrap_or(x);
+        let snapped = peaks.iter().filter(|&&p| (p as f64 - x).abs() <= tol).max_by(|a, b| env[**a].total_cmp(&env[**b])).map(|&p| p as f64).unwrap_or(x);
         beats.push(frame_time(snapped).max(0.0));
         // follow tempo drift from the snapped position
         x = snapped + period;
@@ -368,8 +356,7 @@ mod tests {
         let snare_idx = (2.4 * rate as f64) as usize;
         for i in 0..(rate as usize / 10) {
             let t = i as f32 / rate as f32;
-            samples[snare_idx + i] += (-t * 35.0).exp()
-                * ((std::f32::consts::TAU * 3400.0 * t).sin() * 0.5 + (std::f32::consts::TAU * 4500.0 * t).sin() * 0.5);
+            samples[snare_idx + i] += (-t * 35.0).exp() * ((std::f32::consts::TAU * 3400.0 * t).sin() * 0.5 + (std::f32::consts::TAU * 4500.0 * t).sin() * 0.5);
         }
         let detected = analyze_multiband(&samples, 1, rate, 1.0);
         assert!(detected.iter().any(|b| b.band == BeatBand::SubBassKick && (b.secs - 1.0).abs() < 0.08));

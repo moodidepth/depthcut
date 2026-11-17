@@ -4,9 +4,7 @@ use crate::app::App;
 use crate::theme;
 use crate::widgets::slider_f32;
 use eframe::egui::{self, Color32};
-use nle_core::captions::{
-    parse_srt, CaptionTrack, WordFit, HEAVY_FONT, HIGHLIGHT_CORAL, HIGHLIGHT_GREEN, HIGHLIGHT_YELLOW, OUTLINE_MAX_PX, OUTLINE_MIN_PX, SYNC_OFFSET_MAX_MS,
-};
+use nle_core::captions::{parse_srt, CaptionTrack, WordFit, HEAVY_FONT, HIGHLIGHT_CORAL, HIGHLIGHT_GREEN, HIGHLIGHT_YELLOW, OUTLINE_MAX_PX, OUTLINE_MIN_PX, SYNC_OFFSET_MAX_MS};
 use nle_core::{Command, Time};
 use nle_media::audio::{mixdown, to_mono_16k};
 use nle_media::jobs::Job;
@@ -113,72 +111,61 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         return;
     }
     let mut open = app.show_captions;
-    egui::Window::new("Auto Captions & Whisper")
-        .open(&mut open)
-        .default_width(560.0)
-        .default_height(640.0)
-        .resizable(true)
-        .show(ctx, |ui| {
-            model_manager_ui(app, ui);
-            ui.add_space(6.0);
-            generate_ui(app, ui);
-            ui.separator();
-            track_and_style_ui(app, ui);
-        });
+    egui::Window::new("Auto Captions & Whisper").open(&mut open).default_width(560.0).default_height(640.0).resizable(true).show(ctx, |ui| {
+        model_manager_ui(app, ui);
+        ui.add_space(6.0);
+        generate_ui(app, ui);
+        ui.separator();
+        track_and_style_ui(app, ui);
+    });
     app.show_captions = open;
 }
 
 fn model_manager_ui(app: &mut App, ui: &mut egui::Ui) {
     let any_installed = MODELS.iter().any(WhisperModel::is_installed);
-    egui::CollapsingHeader::new("Whisper Model Manager")
-        .default_open(!any_installed)
-        .show(ui, |ui| {
-            let busy = app.captions.model_job.is_some() || app.captions.gen_job.is_some();
-            for m in MODELS {
-                let installed = m.is_installed();
-                let selected = app.captions.model_id == m.id;
-                ui.horizontal(|ui| {
-                    if ui.radio(selected, m.label).clicked() {
-                        app.captions.model_id = m.id;
-                    }
-                    ui.label(egui::RichText::new(m.size_label()).small().color(theme::TEXT_DIM));
-                    if installed {
-                        ui.label(egui::RichText::new("Installed").small().color(theme::AUDIO));
-                        if ui.add_enabled(!busy, egui::Button::new("Delete")).clicked() {
-                            if let Err(e) = m.delete() {
-                                app.status(format!("Could not delete model: {e}"));
-                            } else if let Some(other) = best_installed() {
-                                app.captions.model_id = other.id;
-                            }
+    egui::CollapsingHeader::new("Whisper Model Manager").default_open(!any_installed).show(ui, |ui| {
+        let busy = app.captions.model_job.is_some() || app.captions.gen_job.is_some();
+        for m in MODELS {
+            let installed = m.is_installed();
+            let selected = app.captions.model_id == m.id;
+            ui.horizontal(|ui| {
+                if ui.radio(selected, m.label).clicked() {
+                    app.captions.model_id = m.id;
+                }
+                ui.label(egui::RichText::new(m.size_label()).small().color(theme::TEXT_DIM));
+                if installed {
+                    ui.label(egui::RichText::new("Installed").small().color(theme::AUDIO));
+                    if ui.add_enabled(!busy, egui::Button::new("Delete")).clicked() {
+                        if let Err(e) = m.delete() {
+                            app.status(format!("Could not delete model: {e}"));
+                        } else if let Some(other) = best_installed() {
+                            app.captions.model_id = other.id;
                         }
-                    } else if ui.add_enabled(!busy, egui::Button::new("Download")).clicked() {
-                        app.captions.model_id = m.id;
-                        app.captions.model_job = Some(Job::spawn("whisper-model", move |jctx| {
-                            jctx.set_progress(0.0, format!("Downloading {}…", m.label));
-                            let c = jctx.cancel_flag();
-                            let p = m.download(|f| jctx.set_fraction(f), c)?;
-                            Ok((m.id, p))
-                        }));
                     }
-                });
-                ui.label(egui::RichText::new(format!("   {}", m.note)).small().color(theme::TEXT_DIM));
-            }
+                } else if ui.add_enabled(!busy, egui::Button::new("Download")).clicked() {
+                    app.captions.model_id = m.id;
+                    app.captions.model_job = Some(Job::spawn("whisper-model", move |jctx| {
+                        jctx.set_progress(0.0, format!("Downloading {}…", m.label));
+                        let c = jctx.cancel_flag();
+                        let p = m.download(|f| jctx.set_fraction(f), c)?;
+                        Ok((m.id, p))
+                    }));
+                }
+            });
+            ui.label(egui::RichText::new(format!("   {}", m.note)).small().color(theme::TEXT_DIM));
+        }
 
-            if let Some(job) = &app.captions.model_job {
-                let (frac, msg) = job.progress();
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.add(
-                        egui::ProgressBar::new(frac)
-                            .desired_width(ui.available_width() - 80.0)
-                            .text(format!("{msg} ({:.0}%)", frac * 100.0)),
-                    );
-                    if ui.button("Cancel").clicked() {
-                        job.cancel();
-                    }
-                });
-            }
-        });
+        if let Some(job) = &app.captions.model_job {
+            let (frac, msg) = job.progress();
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.add(egui::ProgressBar::new(frac).desired_width(ui.available_width() - 80.0).text(format!("{msg} ({:.0}%)", frac * 100.0)));
+                if ui.button("Cancel").clicked() {
+                    job.cancel();
+                }
+            });
+        }
+    });
 }
 
 fn generate_ui(app: &mut App, ui: &mut egui::Ui) {
@@ -202,22 +189,16 @@ fn generate_ui(app: &mut App, ui: &mut egui::Ui) {
 
     ui.horizontal(|ui| {
         ui.label("Language:");
-        ui.add(
-            egui::TextEdit::singleline(&mut app.captions.language)
-                .desired_width(110.0)
-                .hint_text("Auto (en, es, de…)"),
-        );
+        ui.add(egui::TextEdit::singleline(&mut app.captions.language).desired_width(110.0).hint_text("Auto (en, es, de…)"));
 
         let can_gen = transcribe::AVAILABLE && model_ready && has_tl_audio && app.captions.gen_job.is_none() && app.captions.model_job.is_none();
-        let btn = ui
-            .add_enabled(can_gen, egui::Button::new("🎙 Generate Captions"))
-            .on_disabled_hover_text(if !model_ready {
-                "Download a Whisper model first"
-            } else if !has_tl_audio {
-                "Timeline has no audio clips"
-            } else {
-                "Whisper job already running"
-            });
+        let btn = ui.add_enabled(can_gen, egui::Button::new("🎙 Generate Captions")).on_disabled_hover_text(if !model_ready {
+            "Download a Whisper model first"
+        } else if !has_tl_audio {
+            "Timeline has no audio clips"
+        } else {
+            "Whisper job already running"
+        });
 
         if btn.clicked() {
             if let Some(m) = model.filter(|m| match m.remove_if_corrupt() {
@@ -296,11 +277,7 @@ fn generate_ui(app: &mut App, ui: &mut egui::Ui) {
         let (frac, msg) = job.progress();
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            ui.add(
-                egui::ProgressBar::new(frac)
-                    .desired_width(ui.available_width() - 80.0)
-                    .text(format!("{msg} ({:.0}%)", frac * 100.0)),
-            );
+            ui.add(egui::ProgressBar::new(frac).desired_width(ui.available_width() - 80.0).text(format!("{msg} ({:.0}%)", frac * 100.0)));
             if ui.button("Cancel").clicked() {
                 job.cancel();
             }
@@ -318,11 +295,7 @@ fn track_and_style_ui(app: &mut App, ui: &mut egui::Ui) {
             discrete_edit = true;
         }
         let has_words = track.segments.iter().any(|s| !s.words.is_empty());
-        if ui
-            .add_enabled(has_words, egui::Button::new("Re-group"))
-            .on_hover_text("Re-split into 2–4 word phrases (breaks on pauses > 250 ms and punctuation)")
-            .clicked()
-        {
+        if ui.add_enabled(has_words, egui::Button::new("Re-group")).on_hover_text("Re-split into 2–4 word phrases (breaks on pauses > 250 ms and punctuation)").clicked() {
             let words: Vec<_> = track.segments.iter().flat_map(|s| s.words.iter().cloned()).collect();
             track.segments = CaptionTrack::phrases(&words);
             discrete_edit = true;
@@ -352,11 +325,7 @@ fn track_and_style_ui(app: &mut App, ui: &mut egui::Ui) {
             }
         }
         if ui.add_enabled(!track.is_empty(), egui::Button::new("Export .srt")).clicked() {
-            if let Some(path) = rfd::FileDialog::new()
-                .add_filter("SubRip Subtitles", &["srt"])
-                .set_file_name("captions.srt")
-                .save_file()
-            {
+            if let Some(path) = rfd::FileDialog::new().add_filter("SubRip Subtitles", &["srt"]).set_file_name("captions.srt").save_file() {
                 match std::fs::write(&path, track.to_srt()) {
                     Ok(()) => app.status(format!("Exported captions to {}", path.display())),
                     Err(e) => app.status(format!("Could not write .srt: {e}")),
@@ -455,8 +424,7 @@ fn track_and_style_ui(app: &mut App, ui: &mut egui::Ui) {
 
     ui.horizontal(|ui| {
         ui.label("Trim words:");
-        ui.radio_value(&mut app.captions.word_fit, WordFit::Scale, "Scale Words Proportionally")
-            .on_hover_text("Dragging a caption edge on the timeline stretches every word");
+        ui.radio_value(&mut app.captions.word_fit, WordFit::Scale, "Scale Words Proportionally").on_hover_text("Dragging a caption edge on the timeline stretches every word");
         ui.radio_value(&mut app.captions.word_fit, WordFit::Hold, "Hold / Extend First & Last Word")
             .on_hover_text("Inner words keep their timing; only the first / last word grows or shrinks");
     });
@@ -507,10 +475,7 @@ fn track_and_style_ui(app: &mut App, ui: &mut egui::Ui) {
 
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         if track.segments.is_empty() {
-            ui.label(
-                egui::RichText::new("No caption segments yet. Download a model above and click Generate Captions, or import an .srt file.")
-                    .color(theme::TEXT_DIM),
-            );
+            ui.label(egui::RichText::new("No caption segments yet. Download a model above and click Generate Captions, or import an .srt file.").color(theme::TEXT_DIM));
             return;
         }
         for (i, seg) in track.segments.iter_mut().enumerate() {
@@ -518,18 +483,11 @@ fn track_and_style_ui(app: &mut App, ui: &mut egui::Ui) {
             let selected = app.captions.selected_seg == Some(i);
             ui.horizontal(|ui| {
                 let tc = nle_core::format_timecode(seg.start, rate);
-                let label = egui::RichText::new(tc).monospace().size(11.0).color(if active {
-                    Color32::from_rgb(0x5E, 0xCE, 0xFF)
-                } else {
-                    theme::TEXT_DIM
-                });
+                let label = egui::RichText::new(tc).monospace().size(11.0).color(if active { Color32::from_rgb(0x5E, 0xCE, 0xFF) } else { theme::TEXT_DIM });
                 if ui.selectable_label(selected || active, label).clicked() {
                     seek_to = Some((i, seg.start));
                 }
-                let edit = ui.add(
-                    egui::TextEdit::singleline(&mut seg.text)
-                        .desired_width((ui.available_width() - 34.0).max(120.0)),
-                );
+                let edit = ui.add(egui::TextEdit::singleline(&mut seg.text).desired_width((ui.available_width() - 34.0).max(120.0)));
                 if edit.changed() {
                     seg.retime_words_evenly();
                     continuous_edit = true;

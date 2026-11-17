@@ -71,12 +71,7 @@ struct Inner<T> {
 impl<T> FrameQueue<T> {
     pub fn new(capacity: usize) -> Self {
         let capacity = capacity.max(1);
-        FrameQueue {
-            inner: Mutex::new(Inner { buf: VecDeque::with_capacity(capacity), closed: false, dropped: 0 }),
-            not_empty: Condvar::new(),
-            not_full: Condvar::new(),
-            capacity,
-        }
+        FrameQueue { inner: Mutex::new(Inner { buf: VecDeque::with_capacity(capacity), closed: false, dropped: 0 }), not_empty: Condvar::new(), not_full: Condvar::new(), capacity }
     }
 
     pub fn capacity(&self) -> usize {

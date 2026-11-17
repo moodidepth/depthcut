@@ -69,12 +69,7 @@ pub fn init_media_pool() -> ThreadBudget {
             })
             .build_global();
         match result {
-            Ok(()) => log::info!(
-                "media pool: {} workers pinned to CPUs {:?}, {} threads reserved for UI/audio/driver",
-                budget.workers,
-                budget.worker_cpus(),
-                budget.reserved
-            ),
+            Ok(()) => log::info!("media pool: {} workers pinned to CPUs {:?}, {} threads reserved for UI/audio/driver", budget.workers, budget.worker_cpus(), budget.reserved),
             Err(e) => log::warn!("rayon global pool already initialised: {e}"),
         }
         budget

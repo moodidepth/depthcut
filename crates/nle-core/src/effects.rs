@@ -89,12 +89,8 @@ const MOTION_BLUR: &[ParamDef] = &[
     num("Blur Amount", 0.0, 1.5, 0.5, ""),
     num("Motion Sensitivity", 0.0, 100.0, 75.0, "%"),
 ];
-const HALATION: &[ParamDef] = &[
-    num("Threshold", 0.0, 1.0, 0.72, ""),
-    num("Spread", 1.0, 120.0, 28.0, " px"),
-    num("Strength", 0.0, 2.0, 0.65, ""),
-    num("Warmth", 0.0, 1.0, 0.7, ""),
-];
+const HALATION: &[ParamDef] =
+    &[num("Threshold", 0.0, 1.0, 0.72, ""), num("Spread", 1.0, 120.0, 28.0, " px"), num("Strength", 0.0, 2.0, 0.65, ""), num("Warmth", 0.0, 1.0, 0.7, "")];
 const CAMERA_SHAKE: &[ParamDef] = &[
     num("Motion Scale", 0.0, 1.0, 0.3, ""),
     num("Speed", 0.0, 10.0, 1.5, ""),
@@ -109,12 +105,8 @@ const CAMERA_SHAKE: &[ParamDef] = &[
     choice("Edge Wrap", &["Mirror", "Tile"], 0.0),
     num("RGB Split", 0.0, 30.0, 0.0, " px"),
 ];
-const RGB_SPLIT_GLITCH: &[ParamDef] = &[
-    num("Intensity", 0.0, 40.0, 6.0, " px"),
-    num("Angle", 0.0, 360.0, 0.0, "°"),
-    num("Edge Falloff", 0.0, 1.0, 0.5, ""),
-    num("Glitch Burst", 0.0, 1.0, 0.0, ""),
-];
+const RGB_SPLIT_GLITCH: &[ParamDef] =
+    &[num("Intensity", 0.0, 40.0, 6.0, " px"), num("Angle", 0.0, 360.0, 0.0, "°"), num("Edge Falloff", 0.0, 1.0, 0.5, ""), num("Glitch Burst", 0.0, 1.0, 0.0, "")];
 const IMPACT_FLASH: &[ParamDef] = &[
     num("Flash Intensity", 0.0, 2.0, 0.35, ""),
     num("Flash Decay", 0.0, 40.0, 14.0, ""),
@@ -149,12 +141,8 @@ const GAMING_REFRAME_916: &[ParamDef] = &[
     num("Divider", 0.0, 16.0, 6.0, " px"),
     choice("Bottom Panel", &["HUD on Blur", "Cam Track (transparent)"], 0.0),
 ];
-const FILM_GRAIN: &[ParamDef] = &[
-    num("Grain Size", 0.5, 4.0, 1.2, ""),
-    num("Strength", 0.0, 1.0, 0.25, ""),
-    num("Saturation", 0.0, 1.0, 0.1, ""),
-    choice("Stock", &["35mm", "16mm"], 0.0),
-];
+const FILM_GRAIN: &[ParamDef] =
+    &[num("Grain Size", 0.5, 4.0, 1.2, ""), num("Strength", 0.0, 1.0, 0.25, ""), num("Saturation", 0.0, 1.0, 0.1, ""), choice("Stock", &["35mm", "16mm"], 0.0)];
 /// Order is fixed for old projects: Threshold, Radius, Intensity (was
 /// "Strength"), then the colour / blend parameters added later.
 const GLOW: &[ParamDef] = &[
@@ -167,8 +155,7 @@ const GLOW: &[ParamDef] = &[
     choice("Blend", &["Add", "Screen"], 0.0),
 ];
 const DIRECTIONAL_BLUR: &[ParamDef] = &[num("Angle", 0.0, 360.0, 0.0, "°"), num("Length", 0.0, 300.0, 40.0, " px"), int("Sample Count", 8.0, 32.0, 16.0)];
-const ZOOM_BLUR: &[ParamDef] =
-    &[num("Center X", -0.5, 0.5, 0.0, ""), num("Center Y", -0.5, 0.5, 0.0, ""), num("Amount", 0.0, 1.0, 0.2, ""), int("Sample Count", 8.0, 32.0, 16.0)];
+const ZOOM_BLUR: &[ParamDef] = &[num("Center X", -0.5, 0.5, 0.0, ""), num("Center Y", -0.5, 0.5, 0.0, ""), num("Amount", 0.0, 1.0, 0.2, ""), int("Sample Count", 8.0, 32.0, 16.0)];
 const CHROMA_KEY: &[ParamDef] = &[
     color("Key Red", 0.0),
     color("Key Green", 0.69),

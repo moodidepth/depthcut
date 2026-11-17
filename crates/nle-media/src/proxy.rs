@@ -30,24 +30,12 @@ pub fn proxy_encoder_args(platform: Platform, caps: &hwaccel::HwCaps) -> Vec<(St
     if caps.has_encoder("h264_qsv") {
         let mut pre = hwaccel::qsv_device_args(platform);
         pre.extend(["-filter_hw_device".into(), "hw".into()]);
-        v.push((
-            "h264_qsv".into(),
-            pre,
-            ["-c:v", "h264_qsv", "-preset", "veryfast", "-global_quality", "26", "-look_ahead", "0"].map(String::from).to_vec(),
-        ));
+        v.push(("h264_qsv".into(), pre, ["-c:v", "h264_qsv", "-preset", "veryfast", "-global_quality", "26", "-look_ahead", "0"].map(String::from).to_vec()));
     }
     if platform == Platform::Linux && caps.has_encoder("h264_vaapi") {
-        v.push((
-            "h264_vaapi".into(),
-            ["-vaapi_device", "/dev/dri/renderD128"].map(String::from).to_vec(),
-            ["-c:v", "h264_vaapi", "-qp", "26"].map(String::from).to_vec(),
-        ));
+        v.push(("h264_vaapi".into(), ["-vaapi_device", "/dev/dri/renderD128"].map(String::from).to_vec(), ["-c:v", "h264_vaapi", "-qp", "26"].map(String::from).to_vec()));
     }
-    v.push((
-        "libx264".into(),
-        Vec::new(),
-        ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-threads", "8"].map(String::from).to_vec(),
-    ));
+    v.push(("libx264".into(), Vec::new(), ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-threads", "8"].map(String::from).to_vec()));
     v
 }
 

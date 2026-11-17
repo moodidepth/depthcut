@@ -15,10 +15,7 @@ pub struct Affine {
 
 impl Affine {
     pub fn apply(&self, p: [f32; 2]) -> [f32; 2] {
-        [
-            self.m[0][0] * p[0] + self.m[0][1] * p[1] + self.m[0][2],
-            self.m[1][0] * p[0] + self.m[1][1] * p[1] + self.m[1][2],
-        ]
+        [self.m[0][0] * p[0] + self.m[0][1] * p[1] + self.m[0][2], self.m[1][0] * p[0] + self.m[1][1] * p[1] + self.m[1][2]]
     }
 
     pub fn inverse(&self) -> Option<Affine> {
@@ -53,10 +50,7 @@ pub fn layer_to_output(v: &ResolvedVideo, layer: [f32; 2], frame: [f32; 2]) -> A
     let rs = [[cos * sx, -sin * sy], [sin * sx, cos * sy]];
     // uv → q
     let q_m = [[fw, 0.0, -0.5 * fw], [0.0, fh, -0.5 * fh]];
-    let t = [
-        centre[0] + anchor[0] - (rs[0][0] * anchor[0] + rs[0][1] * anchor[1]),
-        centre[1] + anchor[1] - (rs[1][0] * anchor[0] + rs[1][1] * anchor[1]),
-    ];
+    let t = [centre[0] + anchor[0] - (rs[0][0] * anchor[0] + rs[0][1] * anchor[1]), centre[1] + anchor[1] - (rs[1][0] * anchor[0] + rs[1][1] * anchor[1])];
     let mut m = [[0.0f32; 3]; 2];
     for r in 0..2 {
         m[r][0] = rs[r][0] * q_m[0][0] + rs[r][1] * q_m[1][0];

@@ -30,11 +30,7 @@ const SPEECH_DELAY_MS: u64 = 1500;
 const MUSIC_HZ: f64 = 55.0;
 
 fn ffmpeg(args: &[&str]) {
-    let st = ffmpeg_cli::command(&ffmpeg_cli::ffmpeg_path())
-        .args(["-hide_banner", "-loglevel", "error", "-y"])
-        .args(args)
-        .status()
-        .expect("run ffmpeg");
+    let st = ffmpeg_cli::command(&ffmpeg_cli::ffmpeg_path()).args(["-hide_banner", "-loglevel", "error", "-y"]).args(args).status().expect("run ffmpeg");
     assert!(st.success(), "ffmpeg {args:?} failed");
 }
 
@@ -45,10 +41,7 @@ fn synth_speech(wav: &Path) {
         wav.display(),
         SPEECH
     );
-    let st = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .status()
-        .expect("run powershell");
+    let st = std::process::Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-Command", &script]).status().expect("run powershell");
     assert!(st.success() && wav.is_file(), "speech synthesis failed");
 }
 
@@ -92,17 +85,33 @@ fn e2e_import_trim_punch_captions_duck_export() {
     synth_speech(&p("speech.wav"));
     let delay = SPEECH_DELAY_MS.to_string();
     ffmpeg(&[
-        "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=60:duration=10",
-        "-i", p("speech.wav").to_str().unwrap(),
-        "-filter_complex", &format!("[1:a]adelay={delay}|{delay},apad,aformat=sample_rates=48000:channel_layouts=stereo[a]"),
-        "-map", "0:v", "-map", "[a]", "-t", "10",
-        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=size=1280x720:rate=60:duration=10",
+        "-i",
+        p("speech.wav").to_str().unwrap(),
+        "-filter_complex",
+        &format!("[1:a]adelay={delay}|{delay},apad,aformat=sample_rates=48000:channel_layouts=stereo[a]"),
+        "-map",
+        "0:v",
+        "-map",
+        "[a]",
+        "-t",
+        "10",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
         p("voice.mp4").to_str().unwrap(),
     ]);
-    ffmpeg(&[
-        "-f", "lavfi", "-i", &format!("sine=frequency={MUSIC_HZ}:sample_rate=48000:duration=10"),
-        "-af", "volume=0.25", "-ac", "2", p("music_bed.wav").to_str().unwrap(),
-    ]);
+    ffmpeg(&["-f", "lavfi", "-i", &format!("sine=frequency={MUSIC_HZ}:sample_rate=48000:duration=10"), "-af", "volume=0.25", "-ac", "2", p("music_bed.wav").to_str().unwrap()]);
 
     // ---- import
     let mut project = Project::new("E2E Smoke");
@@ -143,11 +152,7 @@ fn e2e_import_trim_punch_captions_duck_export() {
     assert!(peak > before * 1.05, "punch raises scale ({before} → {peak})");
 
     // ---- audio sources (as the UI's media library holds them)
-    let sources: HashMap<_, _> = project
-        .assets
-        .iter()
-        .map(|a| (a.id, Arc::new(nle_media::audio::decode::decode_audio(a).expect("decode audio"))))
-        .collect();
+    let sources: HashMap<_, _> = project.assets.iter().map(|a| (a.id, Arc::new(nle_media::audio::decode::decode_audio(a).expect("decode audio")))).collect();
 
     // ---- Whisper auto-captions on the timeline mix (same steps as captions_ui)
     let extent = project.timeline.extent();
@@ -156,14 +161,7 @@ fn e2e_import_trim_punch_captions_duck_export() {
     let mut opts = TranscribeOptions::new(model);
     opts.language = Some("en".into());
     let t0 = std::time::Instant::now();
-    let tr = transcribe::transcribe(
-        &mono16k,
-        &opts,
-        Arc::new(|_| {}),
-        Arc::new(|s| eprintln!("whisper: {s}")),
-        Arc::new(AtomicBool::new(false)),
-    )
-    .expect("transcribe");
+    let tr = transcribe::transcribe(&mono16k, &opts, Arc::new(|_| {}), Arc::new(|s| eprintln!("whisper: {s}")), Arc::new(AtomicBool::new(false))).expect("transcribe");
     let text: String = tr.words.iter().map(|w| w.text.trim()).collect::<Vec<_>>().join(" ");
     eprintln!("whisper ({}, {:.1}s): {text}", tr.backend, t0.elapsed().as_secs_f32());
     // Known issue (2026-11-17, Arc A750, base-q5_1): on this exact mix the
@@ -186,11 +184,7 @@ fn e2e_import_trim_punch_captions_duck_export() {
     assert!(tr.words.len() >= 8, "only {} words", tr.words.len());
     let first = tr.words.first().unwrap().start;
     // speech starts 1.5 s into the file (1.63 s measured), ≈1.1 s on the trimmed timeline
-    assert!(
-        (first.as_secs_f64() - 1.0).abs() < 0.6,
-        "first word at {:.2}s, expected ≈1.0s",
-        first.as_secs_f64()
-    );
+    assert!((first.as_secs_f64() - 1.0).abs() < 0.6, "first word at {:.2}s, expected ≈1.0s", first.as_secs_f64());
 
     let mut track = project.timeline.captions.clone();
     track.enabled = true;

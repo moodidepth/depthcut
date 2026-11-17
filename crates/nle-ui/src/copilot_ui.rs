@@ -388,12 +388,7 @@ pub fn submit_prompt(app: &mut App, prompt: String) {
     // a retry re-sends the same prompt; don't duplicate the user bubble
     let is_retry = app.copilot.retry_prompt.take().as_deref() == Some(trimmed.as_str());
     if !is_retry {
-        app.copilot.messages.push(ChatMessage {
-            role: "user".into(),
-            text: trimmed.clone(),
-            tool_calls: Vec::new(),
-            outcomes: Vec::new(),
-        });
+        app.copilot.messages.push(ChatMessage { role: "user".into(), text: trimmed.clone(), tool_calls: Vec::new(), outcomes: Vec::new() });
     }
 
     let active_video_path = app.target_clip().and_then(|cid| {
@@ -446,9 +441,7 @@ fn poll_settings_jobs(app: &mut App, ctx: &egui::Context) {
         match job.take() {
             Some(res) => {
                 app.copilot.test_job = None;
-                let report = res.unwrap_or_else(|e| ConnectionReport {
-                    lines: vec![nle_ai::connection::CheckLine { ok: false, text: e }],
-                });
+                let report = res.unwrap_or_else(|e| ConnectionReport { lines: vec![nle_ai::connection::CheckLine { ok: false, text: e }] });
                 app.status(if report.ok() { "AI connection OK".to_string() } else { "AI connection test found a problem — see Copilot settings".to_string() });
                 app.copilot.test_report = Some(report);
             }
@@ -481,13 +474,7 @@ pub fn poll(app: &mut App, ctx: &egui::Context) {
                 app.copilot.pending_prompt = None;
                 // Validate + apply against the *live* timeline as one atomic undo step.
                 let mut outcomes = resp.rejected.clone();
-                outcomes.extend(nle_ai::apply_copilot_actions(
-                    &resp.tool_calls,
-                    &mut app.project.timeline,
-                    &mut app.history,
-                    &mut app.playhead,
-                    &app.selection,
-                ));
+                outcomes.extend(nle_ai::apply_copilot_actions(&resp.tool_calls, &mut app.project.timeline, &mut app.history, &mut app.playhead, &app.selection));
                 let applied = outcomes.iter().filter(|o| o.applied).count();
                 let skipped = outcomes.len() - applied;
                 let mut body = resp.reply;
@@ -495,12 +482,7 @@ pub fn poll(app: &mut App, ctx: &egui::Context) {
                     body = if outcomes.is_empty() { "No timeline changes requested.".into() } else { String::new() };
                 }
                 app.copilot.last_notice = Some(format!("Provider: {}", resp.provider_label));
-                app.copilot.messages.push(ChatMessage {
-                    role: "assistant".into(),
-                    text: body,
-                    tool_calls: resp.tool_calls,
-                    outcomes,
-                });
+                app.copilot.messages.push(ChatMessage { role: "assistant".into(), text: body, tool_calls: resp.tool_calls, outcomes });
                 app.status(match (applied, skipped) {
                     (0, 0) => format!("AI Copilot replied ({})", resp.provider_label),
                     (a, 0) => format!("AI Copilot applied {a} action(s) — Ctrl+Z undoes all"),

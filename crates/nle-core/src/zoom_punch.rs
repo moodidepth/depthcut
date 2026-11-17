@@ -89,10 +89,7 @@ pub fn clamp_intensity(k: f64) -> f64 {
 /// the segment that *starts* at this key).
 fn punch_shape(intensity: f64, hard: bool) -> Vec<(Time, f64, Interpolation)> {
     if hard {
-        vec![
-            (Time::ZERO, 1.0, Interpolation::SnapPunch),
-            (Time::from_millis(HARD_RISE_MS), HARD_INTENSITY, Interpolation::Hold),
-        ]
+        vec![(Time::ZERO, 1.0, Interpolation::SnapPunch), (Time::from_millis(HARD_RISE_MS), HARD_INTENSITY, Interpolation::Hold)]
     } else {
         vec![
             (Time::from_millis(-PRE_MS), 1.0, Interpolation::SnapPunch),

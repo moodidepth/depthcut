@@ -172,8 +172,9 @@ fn unescape(s: &str, pos: usize) -> Result<String, XmlError> {
                 char::from_u32(u32::from_str_radix(&ent[2..], 16).map_err(|_| XmlError { pos, msg: format!("bad entity &{ent};") })?)
                     .ok_or_else(|| XmlError { pos, msg: "bad char".into() })?
             }
-            _ if ent.starts_with('#') => char::from_u32(ent[1..].parse().map_err(|_| XmlError { pos, msg: format!("bad entity &{ent};") })?)
-                .ok_or_else(|| XmlError { pos, msg: "bad char".into() })?,
+            _ if ent.starts_with('#') => {
+                char::from_u32(ent[1..].parse().map_err(|_| XmlError { pos, msg: format!("bad entity &{ent};") })?).ok_or_else(|| XmlError { pos, msg: "bad char".into() })?
+            }
             _ => return Err(XmlError { pos, msg: format!("unknown entity &{ent};") }),
         };
         out.push(ch);
@@ -239,11 +240,7 @@ impl<'a> Parser<'a> {
     }
     fn name(&mut self) -> Result<String, XmlError> {
         let r = self.rest();
-        let n = r
-            .char_indices()
-            .find(|(_, c)| !(c.is_alphanumeric() || matches!(c, '-' | '_' | ':' | '.')))
-            .map(|(i, _)| i)
-            .unwrap_or(r.len());
+        let n = r.char_indices().find(|(_, c)| !(c.is_alphanumeric() || matches!(c, '-' | '_' | ':' | '.'))).map(|(i, _)| i).unwrap_or(r.len());
         if n == 0 {
             return self.err("expected name");
         }

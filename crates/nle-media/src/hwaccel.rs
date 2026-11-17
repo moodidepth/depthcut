@@ -100,13 +100,7 @@ pub const INTEL_ARC_A750: GpuProfile = GpuProfile {
     name: "Intel Arc A750 (DG2)",
     vendor_id: 0x8086,
     vram_mb: 8192,
-    decode: &[
-        (VideoCodec::H264, 8),
-        (VideoCodec::Hevc, 12),
-        (VideoCodec::Av1, 12),
-        (VideoCodec::Vp9, 12),
-        (VideoCodec::Mpeg2, 8),
-    ],
+    decode: &[(VideoCodec::H264, 8), (VideoCodec::Hevc, 12), (VideoCodec::Av1, 12), (VideoCodec::Vp9, 12), (VideoCodec::Mpeg2, 8)],
     media_engines: 2,
 };
 
@@ -227,12 +221,7 @@ pub fn qsv_upload_filter(platform: Platform) -> &'static str {
 pub fn qsv_device_args(platform: Platform) -> Vec<String> {
     match platform {
         Platform::Windows => vec!["-init_hw_device".into(), "d3d11va=dx:,vendor_id=0x8086".into(), "-init_hw_device".into(), "qsv=hw@dx".into()],
-        _ => vec![
-            "-init_hw_device".into(),
-            "vaapi=va:/dev/dri/renderD128,driver=iHD".into(),
-            "-init_hw_device".into(),
-            "qsv=hw@va".into(),
-        ],
+        _ => vec!["-init_hw_device".into(), "vaapi=va:/dev/dri/renderD128,driver=iHD".into(), "-init_hw_device".into(), "qsv=hw@va".into()],
     }
 }
 
@@ -334,7 +323,8 @@ mod tests {
     #[test]
     fn parses_ffmpeg_listing() {
         let hw = "Hardware acceleration methods:\nvdpau\nqsv\nvaapi\n";
-        let enc = "Encoders:\n V..... = Video\n ------\n V....D av1_qsv              AV1 (Intel Quick Sync Video acceleration) (codec av1)\n V....D h264_qsv  H264\n A....D aac   AAC\n";
+        let enc =
+            "Encoders:\n V..... = Video\n ------\n V....D av1_qsv              AV1 (Intel Quick Sync Video acceleration) (codec av1)\n V....D h264_qsv  H264\n A....D aac   AAC\n";
         let caps = HwCaps::from_cli_output(hw, enc, "");
         assert!(caps.has_hwaccel("qsv") && caps.has_hwaccel("vaapi"));
         assert!(caps.has_encoder("av1_qsv") && caps.has_encoder("aac"));

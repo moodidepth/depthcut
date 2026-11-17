@@ -63,10 +63,7 @@ impl PeakBuffer {
         }
         let mut levels = vec![base];
         while levels.last().is_some_and(|l| l.len() > MAX_FOLD) {
-            let next: Vec<(i8, i8)> = levels[levels.len() - 1]
-                .chunks(MIP_FACTOR)
-                .map(|c| c.iter().fold((i8::MAX, i8::MIN), |(lo, hi), (a, b)| (lo.min(*a), hi.max(*b))))
-                .collect();
+            let next: Vec<(i8, i8)> = levels[levels.len() - 1].chunks(MIP_FACTOR).map(|c| c.iter().fold((i8::MAX, i8::MIN), |(lo, hi), (a, b)| (lo.min(*a), hi.max(*b)))).collect();
             levels.push(next);
         }
         PeakBuffer { sample_rate, levels }

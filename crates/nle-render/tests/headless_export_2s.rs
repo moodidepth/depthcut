@@ -38,7 +38,7 @@ fn headless_software_export_smoke_test() {
     project.timeline.format.width = 640;
     project.timeline.format.height = 360;
     project.timeline.format.rate = FrameRate::FPS_30;
-    
+
     let asset = probe::probe(&clip_path).expect("probe input");
     let asset_id = project.add_asset(asset);
     let asset = project.asset(asset_id).cloned().expect("asset registered");
@@ -52,17 +52,16 @@ fn headless_software_export_smoke_test() {
     settings.frame_rate = FrameRate::FPS_30;
     settings.audio = AudioExport::Aac { kbps: 128 };
 
-    let audio: HashMap<_, _> = project.assets.iter()
-        .filter_map(|a| nle_media::audio::decode::decode_audio(a).ok().map(|b| (a.id, std::sync::Arc::new(b))))
-        .collect();
+    let audio: HashMap<_, _> = project.assets.iter().filter_map(|a| nle_media::audio::decode::decode_audio(a).ok().map(|b| (a.id, std::sync::Arc::new(b)))).collect();
 
     let mut progress_frames = 0;
     run_export(&project, &settings, gpu, &audio, &AtomicBool::new(false), |p| {
         progress_frames = p.frame;
-    }).expect("export failed");
+    })
+    .expect("export failed");
 
     assert_eq!(progress_frames, 60);
-    
+
     let out_probe = probe::probe(&output_path).expect("probe output");
     let v = out_probe.video.as_ref().expect("video track");
     assert_eq!(v.width, 640);

@@ -684,7 +684,10 @@ fn fcpxml_round_trip() {
         assert_eq!(a.duration, b.duration);
         assert_eq!(a.kind, b.kind);
         assert_eq!(a.tags, b.tags);
-        assert_eq!(a.video.as_ref().map(|v| (v.width, v.height, v.frame_rate, v.codec.clone(), v.bit_depth)), b.video.as_ref().map(|v| (v.width, v.height, v.frame_rate, v.codec.clone(), v.bit_depth)));
+        assert_eq!(
+            a.video.as_ref().map(|v| (v.width, v.height, v.frame_rate, v.codec.clone(), v.bit_depth)),
+            b.video.as_ref().map(|v| (v.width, v.height, v.frame_rate, v.codec.clone(), v.bit_depth))
+        );
     }
     assert_eq!(q.timeline.duration(), p.timeline.duration());
     assert_clips_equivalent(&p.timeline.spine, &q.timeline.spine, &p, &q);

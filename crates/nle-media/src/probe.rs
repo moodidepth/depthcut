@@ -25,11 +25,8 @@ pub fn probe(path: &Path) -> Result<MediaAsset, MediaError> {
     if !ffmpeg_cli::available() {
         return Err(MediaError::FfmpegMissing);
     }
-    let out = ffmpeg_cli::run_capture(
-        &ffmpeg_cli::ffprobe_path(),
-        &["-v", "error", "-print_format", "json", "-show_format", "-show_streams", &path.to_string_lossy()],
-    )
-    .ok_or_else(|| MediaError::Decode(format!("ffprobe failed on {}", path.display())))?;
+    let out = ffmpeg_cli::run_capture(&ffmpeg_cli::ffprobe_path(), &["-v", "error", "-print_format", "json", "-show_format", "-show_streams", &path.to_string_lossy()])
+        .ok_or_else(|| MediaError::Decode(format!("ffprobe failed on {}", path.display())))?;
     let mut asset = parse_ffprobe_json(path, &out)?;
     if let Some(v) = &mut asset.video {
         if v.is_vfr || v.frame_rate.fps() >= 59.0 {
@@ -47,17 +44,7 @@ pub fn probe(path: &Path) -> Result<MediaAsset, MediaError> {
 fn probe_packet_pts(path: &Path) -> Option<Vec<Time>> {
     let raw = ffmpeg_cli::run_capture(
         &ffmpeg_cli::ffprobe_path(),
-        &[
-            "-v",
-            "error",
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "packet=pts_time",
-            "-of",
-            "csv=p=0",
-            &path.to_string_lossy(),
-        ],
+        &["-v", "error", "-select_streams", "v:0", "-show_entries", "packet=pts_time", "-of", "csv=p=0", &path.to_string_lossy()],
     )?;
     let mut pts = Vec::with_capacity(4096);
     for line in raw.lines() {
@@ -107,10 +94,13 @@ pub fn parse_ffprobe_json(path: &Path, json: &str) -> Result<MediaAsset, MediaEr
         let is_cover = s["disposition"]["attached_pic"].as_i64() == Some(1);
         if kind == "video" && asset.video.is_none() && !is_cover {
             let pix_fmt = s["pix_fmt"].as_str().unwrap_or("yuv420p").to_string();
-            let bit_depth = s["bits_per_raw_sample"]
-                .as_str()
-                .and_then(|b| b.parse::<u8>().ok())
-                .unwrap_or(if pix_fmt.contains("10") || pix_fmt.contains("p010") { 10 } else if pix_fmt.contains("12") { 12 } else { 8 });
+            let bit_depth = s["bits_per_raw_sample"].as_str().and_then(|b| b.parse::<u8>().ok()).unwrap_or(if pix_fmt.contains("10") || pix_fmt.contains("p010") {
+                10
+            } else if pix_fmt.contains("12") {
+                12
+            } else {
+                8
+            });
             let r_rate = s["r_frame_rate"].as_str().and_then(parse_rate);
             let avg_rate = s["avg_frame_rate"].as_str().and_then(parse_rate);
             let is_vfr = matches!((r_rate, avg_rate), (Some(r), Some(a)) if (r.fps() - a.fps()).abs() > 0.5);

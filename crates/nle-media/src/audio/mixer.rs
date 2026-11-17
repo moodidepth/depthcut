@@ -297,11 +297,8 @@ impl TimelineMixer {
                 let live_target = if span.params.mute_extreme_slowmo && clip_speed < 0.30 { 0.0 } else { 1.0 };
                 // Pitch-preserved stretch fades in smoothly as speed leaves 1.0×
                 // (no hard per-block switch → no clicks at speed keyframes).
-                let stretch_target = if span.params.preserve_pitch && span.retime.is_some() && clip_speed > 0.05 {
-                    smoothstep(0.02, 0.08, (clip_speed - 1.0).abs() as f32)
-                } else {
-                    0.0
-                };
+                let stretch_target =
+                    if span.params.preserve_pitch && span.retime.is_some() && clip_speed > 0.05 { smoothstep(0.02, 0.08, (clip_speed - 1.0).abs() as f32) } else { 0.0 };
                 let xfade = 1.0 - (-1.0 / (PATH_XFADE_SECS * sr as f32)).exp();
                 let st = self.retime.entry(span.clip).or_insert_with(|| RetimeState { stretch: stretch_target, live: live_target, grains: VecDeque::new() });
                 let grain_len = (GRAIN_SECS * sr).round().max(64.0);
@@ -527,10 +524,16 @@ mod tests {
 
     fn tone(secs: f64, amp: f32) -> Arc<AudioBuffer> {
         let n = (48_000.0 * secs) as usize;
-        Arc::new(AudioBuffer::new(48_000, 2, (0..n).flat_map(|i| {
-            let v = (i as f32 * 0.06).sin() * amp;
-            [v, v]
-        }).collect()))
+        Arc::new(AudioBuffer::new(
+            48_000,
+            2,
+            (0..n)
+                .flat_map(|i| {
+                    let v = (i as f32 * 0.06).sin() * amp;
+                    [v, v]
+                })
+                .collect(),
+        ))
     }
 
     #[test]
@@ -648,10 +651,16 @@ mod tests {
 
     fn sine(secs: f64, hz: f32, amp: f32) -> Arc<AudioBuffer> {
         let n = (48_000.0 * secs) as usize;
-        Arc::new(AudioBuffer::new(48_000, 2, (0..n).flat_map(|i| {
-            let v = (std::f32::consts::TAU * hz * i as f32 / 48_000.0).sin() * amp;
-            [v, v]
-        }).collect()))
+        Arc::new(AudioBuffer::new(
+            48_000,
+            2,
+            (0..n)
+                .flat_map(|i| {
+                    let v = (std::f32::consts::TAU * hz * i as f32 / 48_000.0).sin() * amp;
+                    [v, v]
+                })
+                .collect(),
+        ))
     }
 
     fn render_clip(c: Clip, a: &MediaAsset, buf: Arc<AudioBuffer>, gain: f32, secs: f64) -> Vec<f32> {
@@ -749,8 +758,7 @@ mod tests {
         assert_eq!(m.audio.role, AudioRole::Music, "audio-only files default to Music");
         assert!(m.audio.ducking.enabled, "music auto-ducks by default");
         tl.connect(m, Time::ZERO, -1).unwrap();
-        let sources: HashMap<AssetId, Arc<AudioBuffer>> =
-            [(voice.id, sine(2.0, 300.0, 0.2)), (music.id, sine(4.0, 110.0, 0.2))].into_iter().collect();
+        let sources: HashMap<AssetId, Arc<AudioBuffer>> = [(voice.id, sine(2.0, 300.0, 0.2)), (music.id, sine(4.0, 110.0, 0.2))].into_iter().collect();
         let spans = nle_core::audio_spans(&tl);
         assert!(needs_duck_envelope(&spans));
         let env = Arc::new(dialogue_envelope(&spans, &sources, Time::from_secs(3), &|| false).unwrap());
@@ -797,4 +805,3 @@ mod tests {
         assert!((ratio(3.7, 3.95) - 1.0).abs() < 0.01, "released after hold + release");
     }
 }
-

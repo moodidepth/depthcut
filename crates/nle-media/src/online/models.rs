@@ -14,13 +14,8 @@ pub struct WhisperModel {
     pub note: &'static str,
 }
 
-pub const BASE_Q5_1: WhisperModel = WhisperModel {
-    id: "base-q5_1",
-    label: "Base (fast)",
-    file: "ggml-base-q5_1.bin",
-    approx_bytes: 59_707_625,
-    note: "~60 MB · fast, good for clear speech",
-};
+pub const BASE_Q5_1: WhisperModel =
+    WhisperModel { id: "base-q5_1", label: "Base (fast)", file: "ggml-base-q5_1.bin", approx_bytes: 59_707_625, note: "~60 MB · fast, good for clear speech" };
 
 pub const LARGE_V3_TURBO_Q5_0: WhisperModel = WhisperModel {
     id: "large-v3-turbo-q5_0",

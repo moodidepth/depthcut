@@ -21,33 +21,15 @@ pub fn encode_proxy_480p15(source: &Path, out: &Path) -> Result<PathBuf, String>
     let src_s = source.to_string_lossy().into_owned();
     let out_s = out.to_string_lossy().into_owned();
 
-    let attempts: [(&str, &[&str]); 2] = [
-        ("h264_qsv", &["-c:v", "h264_qsv", "-b:v", "900k", "-maxrate", "1200k"]),
-        ("libx264", &["-c:v", "libx264", "-preset", "veryfast", "-crf", "28"]),
-    ];
+    let attempts: [(&str, &[&str]); 2] =
+        [("h264_qsv", &["-c:v", "h264_qsv", "-b:v", "900k", "-maxrate", "1200k"]), ("libx264", &["-c:v", "libx264", "-preset", "veryfast", "-crf", "28"])];
 
     let mut last_err = String::new();
     for (codec_name, v_args) in attempts {
-        let mut args: Vec<String> = vec![
-            "-hide_banner".into(),
-            "-loglevel".into(),
-            "error".into(),
-            "-y".into(),
-            "-i".into(),
-            src_s.clone(),
-            "-vf".into(),
-            "scale=-2:480,fps=15".into(),
-        ];
+        let mut args: Vec<String> =
+            vec!["-hide_banner".into(), "-loglevel".into(), "error".into(), "-y".into(), "-i".into(), src_s.clone(), "-vf".into(), "scale=-2:480,fps=15".into()];
         args.extend(v_args.iter().map(|s| (*s).to_string()));
-        args.extend([
-            "-c:a".into(),
-            "aac".into(),
-            "-b:a".into(),
-            "96k".into(),
-            "-movflags".into(),
-            "+faststart".into(),
-            out_s.clone(),
-        ]);
+        args.extend(["-c:a".into(), "aac".into(), "-b:a".into(), "96k".into(), "-movflags".into(), "+faststart".into(), out_s.clone()]);
         let output = ffmpeg_cli::command(&ffmpeg)
             .args(&args)
             .stdin(Stdio::null())
@@ -80,13 +62,8 @@ pub struct UploadedFile {
 /// protocol (start → `x-goog-upload-url` → upload+finalize), then wait until
 /// the server has processed it (`state == ACTIVE`).
 pub async fn upload_gemini_file(client: &reqwest::Client, api_key: &str, file_path: &Path, mime_type: &str) -> Result<UploadedFile, String> {
-    let bytes = tokio::fs::read(file_path)
-        .await
-        .map_err(|e| format!("read upload file {}: {e}", file_path.display()))?;
-    let display_name = file_path
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "rust_cut_pro_proxy.mp4".to_string());
+    let bytes = tokio::fs::read(file_path).await.map_err(|e| format!("read upload file {}: {e}", file_path.display()))?;
+    let display_name = file_path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "rust_cut_pro_proxy.mp4".to_string());
     let len = bytes.len();
 
     // 1. start: returns the session URL in a response header.
@@ -187,10 +164,7 @@ fn parse_file(file: &Value) -> Option<UploadedFile> {
 
 /// `error.message` from a Google API error body, else a short snippet.
 fn api_error(text: &str) -> String {
-    serde_json::from_str::<Value>(text)
-        .ok()
-        .and_then(|v| v.pointer("/error/message").and_then(Value::as_str).map(str::to_string))
-        .unwrap_or_else(|| clip_str(text, 200))
+    serde_json::from_str::<Value>(text).ok().and_then(|v| v.pointer("/error/message").and_then(Value::as_str).map(str::to_string)).unwrap_or_else(|| clip_str(text, 200))
 }
 
 fn clip_str(s: &str, max: usize) -> String {

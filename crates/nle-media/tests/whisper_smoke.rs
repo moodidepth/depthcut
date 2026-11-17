@@ -21,15 +21,7 @@ fn run(pcm: &[f32], model: &std::path::Path, use_gpu: bool) -> transcribe::Trans
     let tr = transcribe::transcribe(pcm, &opts, Arc::new(|_| {}), Arc::new(|m| eprintln!("  {m}")), Arc::new(AtomicBool::new(false)))
         .unwrap_or_else(|e| panic!("transcription failed (gpu={use_gpu}): {e}"));
     let text: Vec<&str> = tr.words.iter().take(12).map(|w| w.text.as_str()).collect();
-    eprintln!(
-        "  {} | {} words | lang {} | {:.1?} | fallback: {:?}\n  \"{}…\"",
-        tr.backend,
-        tr.words.len(),
-        tr.language,
-        started.elapsed(),
-        tr.fallback_reason,
-        text.join(" ")
-    );
+    eprintln!("  {} | {} words | lang {} | {:.1?} | fallback: {:?}\n  \"{}…\"", tr.backend, tr.words.len(), tr.language, started.elapsed(), tr.fallback_reason, text.join(" "));
     if std::env::var_os("RCP_WHISPER_TIMES").is_some() {
         for w in &tr.words {
             eprintln!("    {:>7.3}–{:<7.3} {}", w.start.as_secs_f64(), w.end.as_secs_f64(), w.text);
@@ -45,9 +37,7 @@ fn transcribes_real_speech_on_gpu_and_cpu() {
         eprintln!("RCP_WHISPER_PCM not set; skipping");
         return;
     };
-    let model = std::env::var_os("RCP_WHISPER_MODEL")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| nle_media::paths::models_dir().join("ggml-base-q5_1.bin"));
+    let model = std::env::var_os("RCP_WHISPER_MODEL").map(std::path::PathBuf::from).unwrap_or_else(|| nle_media::paths::models_dir().join("ggml-base-q5_1.bin"));
     let bytes = std::fs::read(&pcm_path).expect("read PCM");
     let pcm: Vec<f32> = bytes.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
     eprintln!("{:.1} s of audio, {} window(s)", pcm.len() as f64 / 16_000.0, transcribe::chunk_windows(pcm.len()).len());

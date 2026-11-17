@@ -249,12 +249,7 @@ async fn sleep_unless_cancelled(d: Duration, cancelled: CancelFn<'_>) -> Result<
 
 /// Send a JSON request with retries for transient failures. `build` makes a
 /// fresh request per attempt.
-async fn send_json(
-    label: &str,
-    build: impl Fn() -> reqwest::RequestBuilder,
-    cancelled: CancelFn<'_>,
-    status: StatusFn<'_>,
-) -> Result<Value, CopilotError> {
+async fn send_json(label: &str, build: impl Fn() -> reqwest::RequestBuilder, cancelled: CancelFn<'_>, status: StatusFn<'_>) -> Result<Value, CopilotError> {
     let mut delay = Duration::from_secs(1);
     for attempt in 1..=MAX_ATTEMPTS {
         if cancelled() {
@@ -265,11 +260,7 @@ async fn send_json(
         let err = match build().send().await.map_err(reqwest::Error::without_url) {
             Ok(resp) => {
                 let code = resp.status();
-                let retry_after = resp
-                    .headers()
-                    .get(reqwest::header::RETRY_AFTER)
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|s| s.trim().parse::<u64>().ok());
+                let retry_after = resp.headers().get(reqwest::header::RETRY_AFTER).and_then(|v| v.to_str().ok()).and_then(|s| s.trim().parse::<u64>().ok());
                 match resp.text().await {
                     Ok(text) if code.is_success() => match serde_json::from_str::<Value>(&text) {
                         Ok(v) => return Ok(v),
@@ -354,15 +345,9 @@ pub fn run_copilot_blocking(
     };
 
     let timeline_json = multimodal::build_timeline_json(&tl, &assets, playhead, &selection);
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| CopilotError::fatal(format!("could not start the async runtime: {e}")))?;
-    let client = reqwest::Client::builder()
-        .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(REQUEST_TIMEOUT)
-        .build()
-        .map_err(|e| CopilotError::fatal(format!("HTTP client init failed: {e}")))?;
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| CopilotError::fatal(format!("could not start the async runtime: {e}")))?;
+    let client =
+        reqwest::Client::builder().connect_timeout(CONNECT_TIMEOUT).timeout(REQUEST_TIMEOUT).build().map_err(|e| CopilotError::fatal(format!("HTTP client init failed: {e}")))?;
 
     let (parsed, label) = rt.block_on(async {
         match config.provider {

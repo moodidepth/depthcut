@@ -28,23 +28,64 @@ const CAPTION_BAR_KEY: u64 = 0xCC00_0002;
 #[derive(Clone, Debug)]
 pub enum Drag {
     Scrub,
-    Move { id: ClipId, grab: Time },
-    Trim { id: ClipId, start_edge: bool, origin: Time },
-    Slip { id: ClipId, origin: Time },
-    Slide { id: ClipId, origin: Time },
+    Move {
+        id: ClipId,
+        grab: Time,
+    },
+    Trim {
+        id: ClipId,
+        start_edge: bool,
+        origin: Time,
+    },
+    Slip {
+        id: ClipId,
+        origin: Time,
+    },
+    Slide {
+        id: ClipId,
+        origin: Time,
+    },
     /// Roll edit (Trim tool on a storyline edit point): moves the cut between
     /// `left` and its right neighbour without changing timeline length.
-    Roll { left: ClipId, edit: Time, origin: Time },
+    Roll {
+        left: ClipId,
+        edit: Time,
+        origin: Time,
+    },
     /// J/L split edit (Alt-drag a clip edge): extends audio past the picture cut.
-    Split { id: ClipId, start_edge: bool, origin: Time },
-    Range { anchor: Time },
-    Key { id: ClipId, key_time: Time, origin: Time },
-    VelocityKey { id: ClipId, index: usize, lane_top: f32, lane_height: f32 },
+    Split {
+        id: ClipId,
+        start_edge: bool,
+        origin: Time,
+    },
+    Range {
+        anchor: Time,
+    },
+    Key {
+        id: ClipId,
+        key_time: Time,
+        origin: Time,
+    },
+    VelocityKey {
+        id: ClipId,
+        index: usize,
+        lane_top: f32,
+        lane_height: f32,
+    },
     /// Trim a caption block edge in the captions row; `base` is the track
     /// at drag start (the drag is re-applied to it every frame).
-    CaptionTrim { index: usize, start_edge: bool, origin: Time, base: Box<CaptionTrack> },
+    CaptionTrim {
+        index: usize,
+        start_edge: bool,
+        origin: Time,
+        base: Box<CaptionTrack>,
+    },
     /// Slide a caption block (with its words) in the captions row.
-    CaptionSlide { index: usize, origin: Time, base: Box<CaptionTrack> },
+    CaptionSlide {
+        index: usize,
+        origin: Time,
+        base: Box<CaptionTrack>,
+    },
 }
 
 pub struct TimelineState {
@@ -573,7 +614,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     let x = geo.x(target);
                     painter.line_segment([Pos2::new(x, h.rect.top() - 6.0), Pos2::new(x, h.rect.bottom() + 6.0)], Stroke::new(3.0_f32, theme::SELECTION));
                     let d = target - edge;
-                    painter.text(Pos2::new(x, h.rect.top() - 8.0), egui::Align2::CENTER_BOTTOM, format!("{:+.2}s", d.as_secs_f64()), egui::FontId::proportional(11.0), theme::SELECTION);
+                    painter.text(
+                        Pos2::new(x, h.rect.top() - 8.0),
+                        egui::Align2::CENTER_BOTTOM,
+                        format!("{:+.2}s", d.as_secs_f64()),
+                        egui::FontId::proportional(11.0),
+                        theme::SELECTION,
+                    );
                     app.skimmer = Some(target);
                 }
             }
@@ -582,7 +629,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     let d = (raw_t - origin).snap_to_frame(rate);
                     let what = if matches!(app.tl.drag, Some(Drag::Slip { .. })) { "Slip" } else { "Slide" };
                     painter.rect_stroke(h.rect, CornerRadius::same(4), Stroke::new(2.0_f32, theme::SNAP), StrokeKind::Inside);
-                    painter.text(h.rect.center_top() - Vec2::new(0.0, 4.0), egui::Align2::CENTER_BOTTOM, format!("{what} {:+.2}s", d.as_secs_f64()), egui::FontId::proportional(11.0), theme::SNAP);
+                    painter.text(
+                        h.rect.center_top() - Vec2::new(0.0, 4.0),
+                        egui::Align2::CENTER_BOTTOM,
+                        format!("{what} {:+.2}s", d.as_secs_f64()),
+                        egui::FontId::proportional(11.0),
+                        theme::SNAP,
+                    );
                 }
             }
             Drag::Roll { edit, origin, .. } => {
@@ -594,7 +647,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 if top < bottom {
                     let x = geo.x(target);
                     painter.line_segment([Pos2::new(x, top - 6.0), Pos2::new(x, bottom + 6.0)], Stroke::new(3.0_f32, theme::SNAP));
-                    painter.text(Pos2::new(x, top - 8.0), egui::Align2::CENTER_BOTTOM, format!("Roll {:+.2}s", (target - edit).as_secs_f64()), egui::FontId::proportional(11.0), theme::SNAP);
+                    painter.text(
+                        Pos2::new(x, top - 8.0),
+                        egui::Align2::CENTER_BOTTOM,
+                        format!("Roll {:+.2}s", (target - edit).as_secs_f64()),
+                        egui::FontId::proportional(11.0),
+                        theme::SNAP,
+                    );
                 }
                 app.skimmer = Some(target);
             }
@@ -809,7 +868,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         if let Some(p) = pointer {
             if let Some(h) = hit_at(p) {
                 painter.rect_stroke(h.rect, CornerRadius::same(4), Stroke::new(2.5_f32, theme::SNAP), StrokeKind::Inside);
-                painter.text(h.rect.center_top() - Vec2::new(0.0, 4.0), egui::Align2::CENTER_BOTTOM, format!("⚡ Drop preset: {preset_name}"), egui::FontId::proportional(11.0), theme::SNAP);
+                painter.text(
+                    h.rect.center_top() - Vec2::new(0.0, 4.0),
+                    egui::Align2::CENTER_BOTTOM,
+                    format!("⚡ Drop preset: {preset_name}"),
+                    egui::FontId::proportional(11.0),
+                    theme::SNAP,
+                );
             }
         }
     }
@@ -998,23 +1063,16 @@ fn draw_ruler(p: &egui::Painter, r: Rect, geo: &Geo, rate: nle_core::FrameRate, 
                 p.line_segment([Pos2::new(x, r.bottom() - 10.0), Pos2::new(x, r.bottom())], Stroke::new(1.2_f32, col));
                 let cy = r.bottom() - 6.0;
                 let d = 3.0;
-                p.add(egui::Shape::convex_polygon(
-                    vec![Pos2::new(x, cy - d), Pos2::new(x + d, cy), Pos2::new(x, cy + d), Pos2::new(x - d, cy)],
-                    col,
-                    Stroke::NONE,
-                ));
+                p.add(egui::Shape::convex_polygon(vec![Pos2::new(x, cy - d), Pos2::new(x + d, cy), Pos2::new(x, cy + d), Pos2::new(x - d, cy)], col, Stroke::NONE));
             }
             MarkerKind::Standard | MarkerKind::Kill => {
-                let col = m
-                    .color
-                    .map(|c| Color32::from_rgb(c[0], c[1], c[2]))
-                    .unwrap_or_else(|| {
-                        if m.kind == MarkerKind::Kill {
-                            Color32::from_rgb(0xFF, 0x45, 0x3A)
-                        } else {
-                            Color32::from_rgb(0x32, 0xAD, 0xE6)
-                        }
-                    });
+                let col = m.color.map(|c| Color32::from_rgb(c[0], c[1], c[2])).unwrap_or_else(|| {
+                    if m.kind == MarkerKind::Kill {
+                        Color32::from_rgb(0xFF, 0x45, 0x3A)
+                    } else {
+                        Color32::from_rgb(0x32, 0xAD, 0xE6)
+                    }
+                });
                 p.line_segment([Pos2::new(x, r.top() + 2.0), Pos2::new(x, r.bottom())], Stroke::new(1.5_f32, col));
                 let flag = vec![Pos2::new(x, r.top() + 2.0), Pos2::new(x + 8.0, r.top() + 5.0), Pos2::new(x, r.top() + 9.0)];
                 p.add(egui::Shape::convex_polygon(flag, col, Stroke::NONE));
@@ -1198,30 +1256,32 @@ fn draw_clip(app: &App, p: &egui::Painter, rect: Rect, c: &Clip, selected: bool)
         }
         ClipKind::Title(tp) => {
             p.rect_filled(rect, radius, theme::clip_fill(theme::TITLE));
-            p.text(rect.left_center() + Vec2::new(8.0, 0.0), egui::Align2::LEFT_CENTER, format!("T  {}", tp.text.lines().next().unwrap_or("")), egui::FontId::proportional(12.0), Color32::WHITE);
+            p.text(
+                rect.left_center() + Vec2::new(8.0, 0.0),
+                egui::Align2::LEFT_CENTER,
+                format!("T  {}", tp.text.lines().next().unwrap_or("")),
+                egui::FontId::proportional(12.0),
+                Color32::WHITE,
+            );
         }
         ClipKind::Adjustment => {
             p.rect_filled(rect, radius, theme::clip_fill(theme::TITLE));
             let active_fx = c.effects.iter().filter(|e| e.enabled).count();
-            let label = if active_fx > 0 {
-                format!("fx  {} ({active_fx})", c.name)
-            } else {
-                format!("fx  {}", c.name)
-            };
+            let label = if active_fx > 0 { format!("fx  {} ({active_fx})", c.name) } else { format!("fx  {}", c.name) };
             if rect.width() > 28.0 {
-                p.text(
-                    rect.left_center() + Vec2::new(8.0, 0.0),
-                    egui::Align2::LEFT_CENTER,
-                    label,
-                    egui::FontId::proportional(12.0),
-                    Color32::WHITE,
-                );
+                p.text(rect.left_center() + Vec2::new(8.0, 0.0), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(12.0), Color32::WHITE);
             }
         }
         _ => {
             let has_v = c.has_video();
             let has_a = c.has_audio() && !c.audio.muted;
-            let split = if has_v && has_a { rect.top() + rect.height() * 0.64 } else if has_v { rect.bottom() } else { rect.top() };
+            let split = if has_v && has_a {
+                rect.top() + rect.height() * 0.64
+            } else if has_v {
+                rect.bottom()
+            } else {
+                rect.top()
+            };
             let vrect = Rect::from_min_max(rect.min, Pos2::new(rect.right(), split));
             let arect = Rect::from_min_max(Pos2::new(rect.left(), split), rect.max);
             if has_v {
@@ -1835,15 +1895,7 @@ fn vel_norm_to_speed(norm: f32) -> f64 {
     (MIN_VELOCITY * (norm.clamp(0.0, 1.0) as f64 * span).exp()).clamp(MIN_VELOCITY, MAX_VELOCITY)
 }
 
-fn draw_velocity_lane(
-    p: &egui::Painter,
-    r: Rect,
-    c: &Clip,
-    retime: &Retime,
-    geo: &Geo,
-    start: Time,
-    handles: &mut Vec<(ClipId, usize, Pos2, Rect)>,
-) {
+fn draw_velocity_lane(p: &egui::Painter, r: Rect, c: &Clip, retime: &Retime, geo: &Geo, start: Time, handles: &mut Vec<(ClipId, usize, Pos2, Rect)>) {
     if r.width() < 8.0 {
         return;
     }

@@ -23,13 +23,8 @@ pub enum PresetCategory {
 }
 
 impl PresetCategory {
-    pub const ALL: [PresetCategory; 5] = [
-        PresetCategory::RsmbMotionBlur,
-        PresetCategory::VelocityGraph,
-        PresetCategory::ShakeAndImpact,
-        PresetCategory::ColorAndSignatureFx,
-        PresetCategory::Transitions,
-    ];
+    pub const ALL: [PresetCategory; 5] =
+        [PresetCategory::RsmbMotionBlur, PresetCategory::VelocityGraph, PresetCategory::ShakeAndImpact, PresetCategory::ColorAndSignatureFx, PresetCategory::Transitions];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -108,7 +103,11 @@ impl<T: Clone + PartialEq> Change<T> {
     /// Value to go back to: `before` while `current` is still what the
     /// preset set; if the user edited it since, `current` wins.
     fn revert(&self, current: &T) -> T {
-        if *current == self.after { self.before.clone() } else { current.clone() }
+        if *current == self.after {
+            self.before.clone()
+        } else {
+            current.clone()
+        }
     }
 }
 
@@ -214,14 +213,7 @@ impl MontagePreset {
                 color: None,
                 effects: vec![effect_with(
                     EffectKind::MotionBlur,
-                    &[
-                        (0, Param::new(180.0)),
-                        (1, Param::new(16.0)),
-                        (2, Param::new(0.5)),
-                        (3, Param::new(1.0)),
-                        (4, Param::new(0.25)),
-                        (5, Param::new(82.0)),
-                    ],
+                    &[(0, Param::new(180.0)), (1, Param::new(16.0)), (2, Param::new(0.5)), (3, Param::new(1.0)), (4, Param::new(0.25)), (5, Param::new(82.0))],
                 )],
                 transition_in: None,
                 freeze_frames: None,
@@ -236,14 +228,7 @@ impl MontagePreset {
                 color: None,
                 effects: vec![effect_with(
                     EffectKind::MotionBlur,
-                    &[
-                        (0, Param::new(180.0)),
-                        (1, Param::new(24.0)),
-                        (2, Param::new(0.35)),
-                        (3, Param::new(1.0)),
-                        (4, Param::new(0.50)),
-                        (5, Param::new(72.0)),
-                    ],
+                    &[(0, Param::new(180.0)), (1, Param::new(24.0)), (2, Param::new(0.35)), (3, Param::new(1.0)), (4, Param::new(0.50)), (5, Param::new(72.0))],
                 )],
                 transition_in: None,
                 freeze_frames: None,
@@ -336,16 +321,10 @@ impl MontagePreset {
                             (11, Param::new(6.0)),
                         ],
                     ),
-                    effect_with(
-                        EffectKind::ImpactFlash,
-                        &[(0, Param::new(0.18)), (1, Param::new(24.0))],
-                    ),
+                    effect_with(EffectKind::ImpactFlash, &[(0, Param::new(0.18)), (1, Param::new(24.0))]),
                     effect_with(
                         EffectKind::RgbSplitGlitch,
-                        &[
-                            (0, anim_param(6.0, &[(0.0, 6.0, Interpolation::EaseOut), (f60(12), 0.0, Interpolation::Hold)])),
-                            (2, Param::new(0.85)),
-                        ],
+                        &[(0, anim_param(6.0, &[(0.0, 6.0, Interpolation::EaseOut), (f60(12), 0.0, Interpolation::Hold)])), (2, Param::new(0.85))],
                     ),
                 ],
                 transition_in: None,
@@ -382,14 +361,7 @@ impl MontagePreset {
                 color: None,
                 effects: vec![effect_with(
                     EffectKind::CameraShake,
-                    &[
-                        (0, Param::new(0.10)),
-                        (1, Param::new(1.8)),
-                        (2, Param::new(0.14)),
-                        (4, Param::new(0.0)),
-                        (8, Param::new(0.4)),
-                        (10, Param::new(0.0)),
-                    ],
+                    &[(0, Param::new(0.10)), (1, Param::new(1.8)), (2, Param::new(0.14)), (4, Param::new(0.0)), (8, Param::new(0.4)), (10, Param::new(0.0))],
                 )],
                 transition_in: None,
                 freeze_frames: None,
@@ -412,10 +384,7 @@ impl MontagePreset {
                     midtones: ColorWheel::default(),
                     highlights: ColorWheel { r: 0.04, g: 0.02, b: -0.02, master: -0.10 },
                 }),
-                effects: vec![effect_with(
-                    EffectKind::Glow,
-                    &[(0, Param::new(0.78)), (1, Param::new(32.0)), (2, Param::new(0.35))],
-                )],
+                effects: vec![effect_with(EffectKind::Glow, &[(0, Param::new(0.78)), (1, Param::new(32.0)), (2, Param::new(0.35))])],
                 transition_in: None,
                 freeze_frames: None,
                 zoom_push_scale: None,
@@ -437,14 +406,8 @@ impl MontagePreset {
                     highlights: ColorWheel { r: 0.09, g: 0.05, b: -0.04, master: 0.04 },
                 }),
                 effects: vec![
-                    effect_with(
-                        EffectKind::Halation,
-                        &[(0, Param::new(0.72)), (1, Param::new(28.0)), (2, Param::new(0.28)), (3, Param::new(0.85))],
-                    ),
-                    effect_with(
-                        EffectKind::ImpactFlash,
-                        &[(0, Param::new(0.0)), (5, Param::new(0.20)), (6, Param::new(1.0))],
-                    ),
+                    effect_with(EffectKind::Halation, &[(0, Param::new(0.72)), (1, Param::new(28.0)), (2, Param::new(0.28)), (3, Param::new(0.85))]),
+                    effect_with(EffectKind::ImpactFlash, &[(0, Param::new(0.0)), (5, Param::new(0.20)), (6, Param::new(1.0))]),
                 ],
                 transition_in: None,
                 freeze_frames: None,
@@ -555,7 +518,11 @@ impl MontagePreset {
     /// hand-edited or corrupt preset file can never push a clip out of bounds.
     pub fn sanitize(&mut self) {
         fn fin(v: f64, lo: f64, hi: f64, def: f64) -> f64 {
-            if v.is_finite() { v.clamp(lo, hi) } else { def }
+            if v.is_finite() {
+                v.clamp(lo, hi)
+            } else {
+                def
+            }
         }
         fn wheel(w: &mut ColorWheel) {
             for c in [&mut w.r, &mut w.g, &mut w.b, &mut w.master] {
@@ -696,7 +663,11 @@ impl MontagePreset {
             }
         }
         let s = s.trim_end_matches('_').to_string();
-        if s.is_empty() { "preset".into() } else { s }
+        if s.is_empty() {
+            "preset".into()
+        } else {
+            s
+        }
     }
 
     pub fn from_clip(name: impl Into<String>, category: PresetCategory, clip: &Clip) -> Self {
@@ -844,7 +815,14 @@ mod tests {
                 b.apply_to_clip(&mut only_b, Time::from_millis(400));
                 assert_eq!(strip(&ab).preset_base.map(|p| p.name), strip(&only_b).preset_base.map(|p| p.name));
                 let (x, y) = (strip(&ab), strip(&only_b));
-                assert_eq!((x.duration, x.retime, x.color, x.transition_in, x.video), (y.duration, y.retime, y.color, y.transition_in, y.video), "'{}' then '{}' must equal '{}' alone", a.name, b.name, b.name);
+                assert_eq!(
+                    (x.duration, x.retime, x.color, x.transition_in, x.video),
+                    (y.duration, y.retime, y.color, y.transition_in, y.video),
+                    "'{}' then '{}' must equal '{}' alone",
+                    a.name,
+                    b.name,
+                    b.name
+                );
                 assert_eq!(x.effects.len(), y.effects.len());
             }
         }

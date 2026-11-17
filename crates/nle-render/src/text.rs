@@ -14,24 +14,8 @@ pub struct FontBook {
     dirs: Vec<PathBuf>,
 }
 
-const REGULAR_CANDIDATES: &[&str] = &[
-    "segoeui.ttf",
-    "arial.ttf",
-    "DejaVuSans.ttf",
-    "NotoSans-Regular.ttf",
-    "LiberationSans-Regular.ttf",
-    "Cantarell-Regular.otf",
-    "Ubuntu-R.ttf",
-];
-const BOLD_CANDIDATES: &[&str] = &[
-    "segoeuib.ttf",
-    "arialbd.ttf",
-    "DejaVuSans-Bold.ttf",
-    "NotoSans-Bold.ttf",
-    "LiberationSans-Bold.ttf",
-    "Cantarell-Bold.otf",
-    "Ubuntu-B.ttf",
-];
+const REGULAR_CANDIDATES: &[&str] = &["segoeui.ttf", "arial.ttf", "DejaVuSans.ttf", "NotoSans-Regular.ttf", "LiberationSans-Regular.ttf", "Cantarell-Regular.otf", "Ubuntu-R.ttf"];
+const BOLD_CANDIDATES: &[&str] = &["segoeuib.ttf", "arialbd.ttf", "DejaVuSans-Bold.ttf", "NotoSans-Bold.ttf", "LiberationSans-Bold.ttf", "Cantarell-Bold.otf", "Ubuntu-B.ttf"];
 
 const HEAVY_CANDIDATES: &[&str] = &[
     "Montserrat-Black.ttf",

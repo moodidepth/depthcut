@@ -410,9 +410,7 @@ pub fn refine_onsets_to_valleys(words: &mut [CaptionWord], pcm16k: &[f32], offse
         }
         let peak = env[lo..=hi].iter().copied().fold(f32::MIN, f32::max);
         let is_min = |j: usize| (j == lo || env[j] <= env[j - 1]) && (j == hi || env[j] <= env[j + 1]);
-        let valley = (lo..=hi)
-            .filter(|&j| is_min(j) && env[j] <= peak - VALLEY_DEPTH_DB)
-            .min_by(|&a, &b| env[a].total_cmp(&env[b]).then(a.abs_diff(sf).cmp(&b.abs_diff(sf))));
+        let valley = (lo..=hi).filter(|&j| is_min(j) && env[j] <= peak - VALLEY_DEPTH_DB).min_by(|&a, &b| env[a].total_cmp(&env[b]).then(a.abs_diff(sf).cmp(&b.abs_diff(sf))));
         let Some(v) = valley else { continue };
         let rise = env[v] + 0.35 * (peak - env[v]);
         let Some(on) = (v + 1..=hi).find(|&j| env[j] >= rise) else { continue };
@@ -492,10 +490,7 @@ pub fn validate_model_file(path: &Path, min_bytes: u64) -> Result<(), ModelFileE
 /// Non-speech annotations Whisper emits ("[Music]", "(laughs)", "♪").
 fn is_annotation(t: &str) -> bool {
     let t = t.trim();
-    t.is_empty()
-        || (t.starts_with('[') && t.ends_with(']'))
-        || (t.starts_with('(') && t.ends_with(')'))
-        || t.chars().all(|c| c == '♪' || c == '*' || c.is_whitespace())
+    t.is_empty() || (t.starts_with('[') && t.ends_with(']')) || (t.starts_with('(') && t.ends_with(')')) || t.chars().all(|c| c == '♪' || c == '*' || c.is_whitespace())
 }
 
 /// Turn raw `(start_cs, end_cs, text)` word segments (centiseconds) into
@@ -601,13 +596,29 @@ mod engine {
         } else if has("large") {
             DtwModelPreset::LargeV1
         } else if has("medium") {
-            if en { DtwModelPreset::MediumEn } else { DtwModelPreset::Medium }
+            if en {
+                DtwModelPreset::MediumEn
+            } else {
+                DtwModelPreset::Medium
+            }
         } else if has("small") {
-            if en { DtwModelPreset::SmallEn } else { DtwModelPreset::Small }
+            if en {
+                DtwModelPreset::SmallEn
+            } else {
+                DtwModelPreset::Small
+            }
         } else if has("base") {
-            if en { DtwModelPreset::BaseEn } else { DtwModelPreset::Base }
+            if en {
+                DtwModelPreset::BaseEn
+            } else {
+                DtwModelPreset::Base
+            }
         } else if has("tiny") {
-            if en { DtwModelPreset::TinyEn } else { DtwModelPreset::Tiny }
+            if en {
+                DtwModelPreset::TinyEn
+            } else {
+                DtwModelPreset::Tiny
+            }
         } else {
             return None;
         })
@@ -656,7 +667,15 @@ mod engine {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn run(audio: &[f32], opts: &TranscribeOptions, gpu: bool, dtw: bool, threads: usize, progress: &Arc<dyn Fn(f32) + Send + Sync>, cancel: &Arc<AtomicBool>) -> Result<Run, String> {
+    fn run(
+        audio: &[f32],
+        opts: &TranscribeOptions,
+        gpu: bool,
+        dtw: bool,
+        threads: usize,
+        progress: &Arc<dyn Fn(f32) + Send + Sync>,
+        cancel: &Arc<AtomicBool>,
+    ) -> Result<Run, String> {
         let mut cp = WhisperContextParameters::default();
         cp.use_gpu(gpu);
         cp.gpu_device(0);
@@ -760,7 +779,14 @@ mod engine {
 
     /// DTW word timestamps first when [`dtw_enabled`]; if the DTW run fails,
     /// the same backend again without DTW.
-    fn run_dtw_or_plain(audio: &[f32], opts: &TranscribeOptions, gpu: bool, threads: usize, progress: &Arc<dyn Fn(f32) + Send + Sync>, cancel: &Arc<AtomicBool>) -> Result<Run, String> {
+    fn run_dtw_or_plain(
+        audio: &[f32],
+        opts: &TranscribeOptions,
+        gpu: bool,
+        threads: usize,
+        progress: &Arc<dyn Fn(f32) + Send + Sync>,
+        cancel: &Arc<AtomicBool>,
+    ) -> Result<Run, String> {
         let env = |k: &str| std::env::var(k).ok();
         let want = dtw_enabled(gpu, env("RCP_WHISPER_DTW").as_deref(), env("RCP_WHISPER_DTW_GPU").as_deref()) && dtw_preset(&opts.model).is_some();
         if want {
@@ -920,10 +946,10 @@ mod tests {
     fn silence_gate_drops_hallucinations_and_snaps_early_onsets() {
         let pcm = synth(8.0, &[(3.0, 3.5, 0.3), (3.6, 4.0, 0.3)]);
         let mut words = vec![
-            word(0.2, 0.9, "thanks"),      // pure silence → hallucination
-            word(2.3, 3.45, "nice"),       // starts 700 ms early
-            word(3.45, 4.6, "shot"),       // stretched 600 ms into silence
-            word(6.0, 7.5, "subscribe"),   // pure silence → hallucination
+            word(0.2, 0.9, "thanks"),    // pure silence → hallucination
+            word(2.3, 3.45, "nice"),     // starts 700 ms early
+            word(3.45, 4.6, "shot"),     // stretched 600 ms into silence
+            word(6.0, 7.5, "subscribe"), // pure silence → hallucination
         ];
         snap_words_to_energy(&mut words, &pcm, Time::ZERO);
         let texts: Vec<&str> = words.iter().map(|w| w.text.as_str()).collect();
@@ -987,12 +1013,7 @@ mod tests {
     #[test]
     fn identical_timestamps_are_spread_by_character_weight() {
         // "I", "absolutely", "won" all stamped at 2.00 s; next word at 3.00 s
-        let raw = vec![
-            (200, 200, " I".to_string()),
-            (200, 200, " absolutely".to_string()),
-            (200, 200, " won".to_string()),
-            (300, 340, " today".to_string()),
-        ];
+        let raw = vec![(200, 200, " I".to_string()), (200, 200, " absolutely".to_string()), (200, 200, " won".to_string()), (300, 340, " today".to_string())];
         let w = words_from_segments(&raw, Time::ZERO);
         let ms = |t: Time| (t.as_secs_f64() * 1000.0).round() as i64;
         assert_eq!(ms(w[0].start), 2000);

@@ -35,47 +35,42 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     let mut locate = false;
     let mut cancel = false;
     let mut later = false;
-    egui::TopBottomPanel::top("ffmpeg_setup")
-        .frame(egui::Frame::new().fill(Color32::from_rgb(0x3A, 0x2A, 0x10)).inner_margin(egui::Margin::symmetric(10, 6)))
-        .show(ctx, |ui| {
-            if let Some(job) = &app.ffmpeg_setup.job {
-                let (frac, msg) = job.progress();
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("⬇ Installing FFmpeg").strong());
-                    ui.add(egui::ProgressBar::new(frac).desired_width(260.0).text(msg));
-                    if ui.button("Cancel").clicked() {
-                        cancel = true;
-                    }
-                });
-                return;
-            }
-            ui.horizontal_wrapped(|ui| {
-                ui.label(egui::RichText::new("⚠ FFmpeg not found").strong().color(Color32::from_rgb(0xFF, 0xC8, 0x57)));
-                ui.label(
-                    egui::RichText::new("Rust Cut Pro needs ffmpeg.exe and ffprobe.exe to import and export video.")
-                        .color(theme::TEXT),
-                );
-                if ui
-                    .button("Download FFmpeg Automatically")
-                    .on_hover_text(format!(
-                        "Downloads the gyan.dev 'release essentials' build (~115 MB, GPL), checks its SHA-256 and installs it to\n{}",
-                        ffmpeg_cli::managed_bin_dir().display()
-                    ))
-                    .clicked()
-                {
-                    download = true;
-                }
-                if ui.button("Locate Existing ffmpeg.exe…").clicked() {
-                    locate = true;
-                }
-                if ui.small_button("Later").clicked() {
-                    later = true;
+    egui::TopBottomPanel::top("ffmpeg_setup").frame(egui::Frame::new().fill(Color32::from_rgb(0x3A, 0x2A, 0x10)).inner_margin(egui::Margin::symmetric(10, 6))).show(ctx, |ui| {
+        if let Some(job) = &app.ffmpeg_setup.job {
+            let (frac, msg) = job.progress();
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("⬇ Installing FFmpeg").strong());
+                ui.add(egui::ProgressBar::new(frac).desired_width(260.0).text(msg));
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
                 }
             });
-            if let Some(e) = &app.ffmpeg_setup.error {
-                ui.colored_label(Color32::from_rgb(0xFF, 0x8A, 0x80), egui::RichText::new(e).small());
+            return;
+        }
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new("⚠ FFmpeg not found").strong().color(Color32::from_rgb(0xFF, 0xC8, 0x57)));
+            ui.label(egui::RichText::new("Rust Cut Pro needs ffmpeg.exe and ffprobe.exe to import and export video.").color(theme::TEXT));
+            if ui
+                .button("Download FFmpeg Automatically")
+                .on_hover_text(format!(
+                    "Downloads the gyan.dev 'release essentials' build (~115 MB, GPL), checks its SHA-256 and installs it to\n{}",
+                    ffmpeg_cli::managed_bin_dir().display()
+                ))
+                .clicked()
+            {
+                download = true;
+            }
+            if ui.button("Locate Existing ffmpeg.exe…").clicked() {
+                locate = true;
+            }
+            if ui.small_button("Later").clicked() {
+                later = true;
             }
         });
+        if let Some(e) = &app.ffmpeg_setup.error {
+            ui.colored_label(Color32::from_rgb(0xFF, 0x8A, 0x80), egui::RichText::new(e).small());
+        }
+    });
 
     if cancel {
         if let Some(job) = &app.ffmpeg_setup.job {

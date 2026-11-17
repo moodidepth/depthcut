@@ -40,7 +40,11 @@ impl VideoStreamInfo {
             Err(i) => {
                 let d0 = (t.0 - self.pts_table[i - 1].0).abs();
                 let d1 = (self.pts_table[i].0 - t.0).abs();
-                if d0 <= d1 { i - 1 } else { i }
+                if d0 <= d1 {
+                    i - 1
+                } else {
+                    i
+                }
             }
         }
     }
@@ -175,9 +179,7 @@ impl MediaAsset {
         if q.is_empty() {
             return true;
         }
-        self.name.to_lowercase().contains(&q)
-            || self.tags.iter().any(|t| t.to_lowercase().contains(&q))
-            || self.video.as_ref().is_some_and(|v| v.codec.to_lowercase().contains(&q))
+        self.name.to_lowercase().contains(&q) || self.tags.iter().any(|t| t.to_lowercase().contains(&q)) || self.video.as_ref().is_some_and(|v| v.codec.to_lowercase().contains(&q))
     }
 
     /// Human-readable one-line metadata summary.

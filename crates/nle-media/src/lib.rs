@@ -39,9 +39,9 @@ pub mod transcribe;
 pub mod waveform;
 
 pub use analysis::{BeatAnalysis, BeatBand, KillPeak, MultiBandBeat};
+pub use encoder_probe::{EncoderBackend, EncoderProbe};
 pub use frame::{AudioBuffer, PixelFormat, VideoFrame};
 pub use frame_server::{DecodedFrame, FrameServer};
-pub use encoder_probe::{EncoderBackend, EncoderProbe};
 pub use hwaccel::{HwBackend, Platform};
 pub use peaks::PeakBuffer;
 pub use queue::FrameQueue;

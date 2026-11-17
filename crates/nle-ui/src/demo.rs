@@ -1,16 +1,12 @@
 //! Built-in demo project so the editor is usable with no media or FFmpeg.
 
-use nle_core::{Clip, DuckingSettings, AudioRole, Project, Time, TitleParams, Transition, TransitionKind};
+use nle_core::{AudioRole, Clip, DuckingSettings, Project, Time, TitleParams, Transition, TransitionKind};
 use nle_media::probe::{synthetic_asset, synthetic_music};
 
 pub fn demo_project() -> Project {
     let mut p = Project::new("Demo Project");
-    let assets = [
-        synthetic_asset("Golden Hour", 14, 0.08),
-        synthetic_asset("Ocean Drive", 12, 0.55),
-        synthetic_asset("City Lights", 16, 0.78),
-        synthetic_asset("Forest Walk", 10, 0.33),
-    ];
+    let assets =
+        [synthetic_asset("Golden Hour", 14, 0.08), synthetic_asset("Ocean Drive", 12, 0.55), synthetic_asset("City Lights", 16, 0.78), synthetic_asset("Forest Walk", 10, 0.33)];
     let music = synthetic_music("Score - Ambient Bed", 40);
     let ids: Vec<_> = assets.iter().map(|a| p.add_asset(a.clone())).collect();
     p.add_asset(music.clone());

@@ -1,5 +1,5 @@
-use nle_media::transcribe::*;
 use nle_core::Time;
+use nle_media::transcribe::*;
 use std::fs;
 
 #[test]
@@ -15,7 +15,7 @@ fn test_pcm_sanitization() {
     assert_eq!(prepared[4], -0.5);
     assert_eq!(prepared[5], 1.0);
     assert_eq!(prepared[6], -1.0);
-    
+
     let long_input = vec![0.1; 20000];
     let prepared_long = prepare_pcm(&long_input).unwrap();
     assert_eq!(prepared_long.len(), 20000);
@@ -45,23 +45,23 @@ fn test_sine_padding() {
 #[test]
 fn test_chunk_windows() {
     assert!(chunk_windows(0).is_empty());
-    
+
     let w100 = chunk_windows(100);
     assert_eq!(w100, vec![0..100]);
-    
+
     let w480k = chunk_windows(480000);
     assert_eq!(w480k, vec![0..480000]);
-    
+
     let w480001 = chunk_windows(480001);
     assert_eq!(w480001, vec![0..480000, 472000..480001]);
-    
+
     let len_20m = 20 * 60 * 16000;
     let w20m = chunk_windows(len_20m);
     assert!(!w20m.is_empty());
     for i in 0..w20m.len() {
         assert!(w20m[i].len() <= 480000);
         if i > 0 {
-            assert_eq!(w20m[i].start, w20m[i-1].end - 8000);
+            assert_eq!(w20m[i].start, w20m[i - 1].end - 8000);
         }
     }
     assert_eq!(w20m.last().unwrap().end, len_20m);
@@ -72,30 +72,30 @@ fn test_merge_chunk_words() {
     let len = 16000 * 50;
     let windows = chunk_windows(len);
     let offset = Time::from_secs(7);
-    
+
     // Window 0: 0..480000 (0s..30s)
     // Window 1: 472000..800000 (29.5s..50s)
     // Overlap: 472000..480000 (29.5s..30s), Midpoint: 476000 (29.75s)
-    
+
     let chunk0 = vec![
-        (100, 150, " hello".to_string()),     // 1.0s (rel: 1.0s). Kept (1.0 < 29.75)
+        (100, 150, " hello".to_string()),      // 1.0s (rel: 1.0s). Kept (1.0 < 29.75)
         (2970, 2980, " boundary".to_string()), // 29.7s (rel: 29.7s). Kept (29.7 < 29.75)
     ];
     let chunk1 = vec![
-        (20, 30, " boundary".to_string()),    // 29.5s + 0.2s = 29.7s (rel: 29.7s). Dropped (29.7 < 29.75)
-        (500, 560, " world".to_string()),     // 29.5s + 5.0s = 34.5s (rel: 34.5s). Kept (34.5 >= 29.75)
+        (20, 30, " boundary".to_string()), // 29.5s + 0.2s = 29.7s (rel: 29.7s). Dropped (29.7 < 29.75)
+        (500, 560, " world".to_string()),  // 29.5s + 5.0s = 34.5s (rel: 34.5s). Kept (34.5 >= 29.75)
     ];
-    
+
     let chunks = vec![chunk0, chunk1];
     let words = merge_chunk_words(&windows, &chunks, offset);
-    
+
     assert_eq!(words.len(), 3);
     assert_eq!(words[0].text, "hello");
     assert_eq!(words[0].start, offset + Time::from_secs(1));
-    
+
     assert_eq!(words[1].text, "boundary");
     assert_eq!(words[1].start, offset + Time::from_millis(29700));
-    
+
     assert_eq!(words[2].text, "world");
     assert_eq!(words[2].start, offset + Time::from_samples(472000, 16000) + Time::from_secs(5));
 }
@@ -131,28 +131,28 @@ fn test_normalize_language() {
 fn test_validate_model_file() {
     let temp_dir = std::env::temp_dir();
     let pid = std::process::id();
-    
+
     let path_missing = temp_dir.join(format!("missing_{}.bin", pid));
     assert!(matches!(validate_model_file(&path_missing, 1024), Err(ModelFileError::Missing)));
-    
+
     let path_truncated = temp_dir.join(format!("truncated_{}.bin", pid));
     fs::write(&path_truncated, b"lmgg padded content").unwrap();
     let err = validate_model_file(&path_truncated, 1024).unwrap_err();
     assert!(matches!(err, ModelFileError::Truncated { .. }));
     assert!(err.is_corrupt());
-    
+
     let path_bad_magic = temp_dir.join(format!("bad_magic_{}.bin", pid));
     fs::write(&path_bad_magic, b"GGUF more padding for length").unwrap();
     let err2 = validate_model_file(&path_bad_magic, 16).unwrap_err();
     assert!(matches!(err2, ModelFileError::BadMagic));
     assert!(err2.is_corrupt());
-    
+
     let path_ok = temp_dir.join(format!("ok_{}.bin", pid));
     let mut content = b"lmgg".to_vec();
     content.resize(2048, 0);
     fs::write(&path_ok, &content).unwrap();
     assert!(validate_model_file(&path_ok, 1024).is_ok());
-    
+
     let _ = fs::remove_file(path_truncated);
     let _ = fs::remove_file(path_bad_magic);
     let _ = fs::remove_file(path_ok);

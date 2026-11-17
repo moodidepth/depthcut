@@ -51,18 +51,11 @@ fn main() -> eframe::Result<()> {
                 .ok_or_else(|| "no compatible GPU adapter".to_string())
         })),
         device_descriptor: Arc::new(|adapter| {
-            let base_limits = if adapter.get_info().backend == wgpu::Backend::Gl {
-                wgpu::Limits::downlevel_webgl2_defaults()
-            } else {
-                wgpu::Limits::default()
-            };
+            let base_limits = if adapter.get_info().backend == wgpu::Backend::Gl { wgpu::Limits::downlevel_webgl2_defaults() } else { wgpu::Limits::default() };
             wgpu::DeviceDescriptor {
                 label: Some("egui wgpu device"),
                 required_features: nle_render::gpu::wanted_features(adapter),
-                required_limits: wgpu::Limits {
-                    max_texture_dimension_2d: 8192,
-                    ..base_limits
-                },
+                required_limits: wgpu::Limits { max_texture_dimension_2d: 8192, ..base_limits },
                 memory_hints: wgpu::MemoryHints::default(),
             }
         }),

@@ -75,12 +75,7 @@ fn pretty_source(s: &str) -> String {
 }
 
 async fn fetch(query: &str, page_size: u32) -> Result<(u16, Value), String> {
-    let resp = client()
-        .get(ENDPOINT)
-        .query(&[("q", query), ("page_size", &page_size.to_string()), ("license", LICENSES)])
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+    let resp = client().get(ENDPOINT).query(&[("q", query), ("page_size", &page_size.to_string()), ("license", LICENSES)]).send().await.map_err(|e| e.to_string())?;
     let status = resp.status().as_u16();
     let v: Value = resp.json().await.map_err(|e| e.to_string())?;
     Ok((status, v))

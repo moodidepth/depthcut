@@ -113,17 +113,12 @@ pub fn poll(app: &mut App, ctx: &egui::Context) {
 
 fn free_audio_lane_below(tl: &Timeline, at: Time, dur: Time) -> i32 {
     let placed = tl.placed_clips();
-    (1..=32)
-        .map(|l| -l)
-        .find(|&lane| !placed.iter().any(|p| p.lane == lane && p.start < at + dur && p.end() > at))
-        .unwrap_or(-1)
+    (1..=32).map(|l| -l).find(|&lane| !placed.iter().any(|p| p.lane == lane && p.start < at + dur && p.end() > at)).unwrap_or(-1)
 }
 
 fn free_video_lane_above(tl: &Timeline, at: Time, dur: Time) -> i32 {
     let placed = tl.placed_clips();
-    (1..=32)
-        .find(|&lane| !placed.iter().any(|p| p.lane == lane && p.start < at + dur && p.end() > at))
-        .unwrap_or(1)
+    (1..=32).find(|&lane| !placed.iter().any(|p| p.lane == lane && p.start < at + dur && p.end() > at)).unwrap_or(1)
 }
 
 fn add_downloaded_audio(app: &mut App, path: PathBuf, attr: Option<Attribution>) {
@@ -192,18 +187,11 @@ fn license_color(badge: &str) -> Color32 {
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let mut trigger_search = false;
     ui.horizontal(|ui| {
-        let edit = ui.add(
-            egui::TextEdit::singleline(&mut app.online.query)
-                .hint_text("Search CC0 / CC-BY music & SFX…")
-                .desired_width((ui.available_width() - 68.0).max(120.0)),
-        );
+        let edit = ui.add(egui::TextEdit::singleline(&mut app.online.query).hint_text("Search CC0 / CC-BY music & SFX…").desired_width((ui.available_width() - 68.0).max(120.0)));
         if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
             trigger_search = true;
         }
-        if ui
-            .add_enabled(app.online.search_job.is_none() && !app.online.query.trim().is_empty(), egui::Button::new("Search"))
-            .clicked()
-        {
+        if ui.add_enabled(app.online.search_job.is_none() && !app.online.query.trim().is_empty(), egui::Button::new("Search")).clicked() {
             trigger_search = true;
         }
     });
@@ -242,11 +230,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         let (frac, msg) = job.progress();
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            ui.add(
-                egui::ProgressBar::new(frac)
-                    .desired_width((ui.available_width() - 72.0).max(80.0))
-                    .text(format!("{msg} ({:.0}%)", frac * 100.0)),
-            );
+            ui.add(egui::ProgressBar::new(frac).desired_width((ui.available_width() - 72.0).max(80.0)).text(format!("{msg} ({:.0}%)", frac * 100.0)));
             if ui.small_button("Cancel").clicked() {
                 job.cancel();
             }
@@ -269,14 +253,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             }
         });
         ui.horizontal(|ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut app.online.ytdlp_url)
-                    .hint_text("https://…")
-                    .desired_width((ui.available_width() - 104.0).max(90.0)),
-            );
-            let can_dl = app.online.ytdlp_path.is_some()
-                && app.online.download_job.is_none()
-                && !app.online.ytdlp_url.trim().is_empty();
+            ui.add(egui::TextEdit::singleline(&mut app.online.ytdlp_url).hint_text("https://…").desired_width((ui.available_width() - 104.0).max(90.0)));
+            let can_dl = app.online.ytdlp_path.is_some() && app.online.download_job.is_none() && !app.online.ytdlp_url.trim().is_empty();
             if ui.add_enabled(can_dl, egui::Button::new("Download & Add")).clicked() {
                 let url = app.online.ytdlp_url.trim().to_string();
                 let dir = paths::downloads_dir();
@@ -299,96 +277,88 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     egui::ScrollArea::vertical().id_salt("online-results").auto_shrink([false, false]).show(ui, |ui| {
         if results.is_empty() {
             ui.label(
-                egui::RichText::new("Search royalty-free Creative Commons audio on Openverse (Freesound, Jamendo, Wikimedia) & Internet Archive.")
-                    .small()
-                    .color(theme::TEXT_DIM),
+                egui::RichText::new("Search royalty-free Creative Commons audio on Openverse (Freesound, Jamendo, Wikimedia) & Internet Archive.").small().color(theme::TEXT_DIM),
             );
             return;
         }
         for res in &results {
             let badge = license_badge(&res.license);
             let badge_col = license_color(&badge);
-            egui::Frame::new()
-                .fill(theme::BG)
-                .stroke(egui::Stroke::new(1.0_f32, theme::BORDER))
-                .corner_radius(4.0)
-                .inner_margin(egui::Margin::symmetric(8, 6))
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.vertical(|ui| {
-                            ui.set_max_width((ui.available_width() - 115.0).max(80.0));
-                            ui.label(egui::RichText::new(&res.title).strong());
-                            let mut meta = String::new();
-                            if !res.creator.is_empty() {
-                                meta.push_str(&res.creator);
-                                meta.push_str(" · ");
-                            }
-                            meta.push_str(&res.source);
-                            if let Some(secs) = res.duration_secs {
-                                let s = secs.round() as u64;
-                                meta.push_str(&format!(" · {}:{:02}", s / 60, s % 60));
-                            }
-                            ui.label(egui::RichText::new(meta).small().color(theme::TEXT_DIM));
-                            ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new(&badge).small().strong().color(badge_col))
-                                    .on_hover_text(&res.license_name);
-                                if !res.landing_url.is_empty() {
-                                    ui.hyperlink_to(egui::RichText::new("Source").small(), &res.landing_url);
-                                }
-                            });
-                        });
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.add_enabled(!busy_dl, egui::Button::new("⬇ Add")).on_hover_text("Download, add attribution, and insert at playhead").clicked() {
-                                let item = res.clone();
-                                app.online.download_id = Some(item.id.clone());
-                                app.online.download_job = Some(Job::spawn("online-download", move |jctx| {
-                                    jctx.set_progress(0.0, format!("Downloading {}…", item.title));
-                                    let cancel = jctx.cancel_flag();
-                                    let attr = Some(item.attribution());
-                                    let path = download::fetch_result(
-                                        &item,
-                                        |done, total| {
-                                            if let Some(t) = total.filter(|&t| t > 0) {
-                                                jctx.set_fraction((done as f64 / t as f64) as f32);
-                                            }
-                                        },
-                                        cancel,
-                                    )?;
-                                    Ok((path, attr))
-                                }));
-                            }
-                            let is_playing = app.online.preview.is_playing_id(&res.id);
-                            let resolving = app.online.preview_resolving_id.as_deref() == Some(res.id.as_str());
-                            let btn_text = if is_playing {
-                                "⏹"
-                            } else if resolving {
-                                "⏳"
-                            } else {
-                                "▶"
-                            };
-                            if ui.add_enabled(!resolving, egui::Button::new(btn_text)).on_hover_text(if is_playing { "Stop preview" } else { "Stream preview" }).clicked() {
-                                if is_playing {
-                                    app.online.preview.stop();
-                                } else {
-                                    if app.playback.playing {
-                                        app.stop();
-                                    }
-                                    if let Some(url) = &res.audio_url {
-                                        app.online.preview.play(&res.id, url);
-                                    } else {
-                                        let item = res.clone();
-                                        let id = item.id.clone();
-                                        app.online.preview_resolving_id = Some(id.clone());
-                                        app.online.preview_url_job = Some(Job::spawn("preview-url", move |_| {
-                                            let url = block_on(item.resolve_audio_url())?;
-                                            Ok((id, url))
-                                        }));
-                                    }
-                                }
+            egui::Frame::new().fill(theme::BG).stroke(egui::Stroke::new(1.0_f32, theme::BORDER)).corner_radius(4.0).inner_margin(egui::Margin::symmetric(8, 6)).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.set_max_width((ui.available_width() - 115.0).max(80.0));
+                        ui.label(egui::RichText::new(&res.title).strong());
+                        let mut meta = String::new();
+                        if !res.creator.is_empty() {
+                            meta.push_str(&res.creator);
+                            meta.push_str(" · ");
+                        }
+                        meta.push_str(&res.source);
+                        if let Some(secs) = res.duration_secs {
+                            let s = secs.round() as u64;
+                            meta.push_str(&format!(" · {}:{:02}", s / 60, s % 60));
+                        }
+                        ui.label(egui::RichText::new(meta).small().color(theme::TEXT_DIM));
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(&badge).small().strong().color(badge_col)).on_hover_text(&res.license_name);
+                            if !res.landing_url.is_empty() {
+                                ui.hyperlink_to(egui::RichText::new("Source").small(), &res.landing_url);
                             }
                         });
                     });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.add_enabled(!busy_dl, egui::Button::new("⬇ Add")).on_hover_text("Download, add attribution, and insert at playhead").clicked() {
+                            let item = res.clone();
+                            app.online.download_id = Some(item.id.clone());
+                            app.online.download_job = Some(Job::spawn("online-download", move |jctx| {
+                                jctx.set_progress(0.0, format!("Downloading {}…", item.title));
+                                let cancel = jctx.cancel_flag();
+                                let attr = Some(item.attribution());
+                                let path = download::fetch_result(
+                                    &item,
+                                    |done, total| {
+                                        if let Some(t) = total.filter(|&t| t > 0) {
+                                            jctx.set_fraction((done as f64 / t as f64) as f32);
+                                        }
+                                    },
+                                    cancel,
+                                )?;
+                                Ok((path, attr))
+                            }));
+                        }
+                        let is_playing = app.online.preview.is_playing_id(&res.id);
+                        let resolving = app.online.preview_resolving_id.as_deref() == Some(res.id.as_str());
+                        let btn_text = if is_playing {
+                            "⏹"
+                        } else if resolving {
+                            "⏳"
+                        } else {
+                            "▶"
+                        };
+                        if ui.add_enabled(!resolving, egui::Button::new(btn_text)).on_hover_text(if is_playing { "Stop preview" } else { "Stream preview" }).clicked() {
+                            if is_playing {
+                                app.online.preview.stop();
+                            } else {
+                                if app.playback.playing {
+                                    app.stop();
+                                }
+                                if let Some(url) = &res.audio_url {
+                                    app.online.preview.play(&res.id, url);
+                                } else {
+                                    let item = res.clone();
+                                    let id = item.id.clone();
+                                    app.online.preview_resolving_id = Some(id.clone());
+                                    app.online.preview_url_job = Some(Job::spawn("preview-url", move |_| {
+                                        let url = block_on(item.resolve_audio_url())?;
+                                        Ok((id, url))
+                                    }));
+                                }
+                            }
+                        }
+                    });
                 });
+            });
             ui.add_space(3.0);
         }
     });

@@ -18,7 +18,7 @@ fn discord_presets_bitrate_logic() {
             let total_bits = (video as f64 + audio as f64) * 1000.0 * d;
             assert!(total_bits / 8.0 <= target as f64 || video == 150);
             assert!(fits_size_budget(target, d, video, audio));
-            
+
             if video > 150 {
                 assert!(video <= last_video);
                 last_video = video;
@@ -58,14 +58,14 @@ fn apply_discord_settings() {
     let mut settings = ExportSettings::new("out.mp4", ExportPreset::H264Software, &Project::default());
     settings.start = Time::ZERO;
     settings.end = Time::from_secs(60);
-    
+
     let preset = GamingDeliveryPreset::DiscordUnder25Mb;
     preset.apply(&mut settings, VideoFormat::default(), &ExportPreset::ALL);
-    
+
     assert!(settings.size_capped);
     assert_eq!(settings.width, 1280);
     assert_eq!(settings.height, 720);
-    
+
     let args = settings.ffmpeg_args(nle_media::hwaccel::Platform::Windows, None).join(" ");
     if let RateControl::Bitrate(k) = settings.rate {
         assert!(args.contains(&format!("-maxrate {k}k")));

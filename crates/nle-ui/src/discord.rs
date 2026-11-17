@@ -34,13 +34,7 @@ pub struct DiscordConfig {
 
 impl Default for DiscordConfig {
     fn default() -> Self {
-        Self {
-            enabled: true,
-            app_id: String::new(),
-            asset_key: DEFAULT_ASSET_KEY.to_string(),
-            show_project_name: true,
-            show_timeline_stats: true,
-        }
+        Self { enabled: true, app_id: String::new(), asset_key: DEFAULT_ASSET_KEY.to_string(), show_project_name: true, show_timeline_stats: true }
     }
 }
 
@@ -50,10 +44,7 @@ impl DiscordConfig {
     }
 
     pub fn load() -> Self {
-        let mut cfg = std::fs::read_to_string(Self::path())
-            .ok()
-            .and_then(|s| serde_json::from_str::<DiscordConfig>(&s).ok())
-            .unwrap_or_default();
+        let mut cfg = std::fs::read_to_string(Self::path()).ok().and_then(|s| serde_json::from_str::<DiscordConfig>(&s).ok()).unwrap_or_default();
         if cfg.app_id.trim().is_empty() {
             // runtime override first, then the id compiled into release builds
             let id = std::env::var("RCP_DISCORD_APP_ID").ok().or_else(|| BUILT_IN_APP_ID.map(str::to_string));
@@ -147,20 +138,9 @@ impl DiscordPresence {
         let (tx, rx) = mpsc::channel();
         let worker_cfg = config.clone();
         let worker_status = status.clone();
-        let worker = thread::Builder::new()
-            .name("discord-rpc".into())
-            .spawn(move || run_worker(rx, worker_cfg, worker_status))
-            .ok();
+        let worker = thread::Builder::new().name("discord-rpc".into()).spawn(move || run_worker(rx, worker_cfg, worker_status)).ok();
 
-        Self {
-            tx,
-            status,
-            dialog: DiscordDialog::from_config(&config),
-            config,
-            last_snapshot: None,
-            last_sent: Instant::now() - Duration::from_secs(10),
-            worker,
-        }
+        Self { tx, status, dialog: DiscordDialog::from_config(&config), config, last_snapshot: None, last_sent: Instant::now() - Duration::from_secs(10), worker }
     }
 
     pub fn update(&mut self, snapshot: PresenceSnapshot) {
@@ -190,82 +170,68 @@ impl DiscordPresence {
         let status = self.status();
         let mut apply = false;
 
-        egui::Window::new("Discord Rich Presence")
-            .open(&mut open)
-            .resizable(false)
-            .default_width(470.0)
-            .show(ctx, |ui| {
+        egui::Window::new("Discord Rich Presence").open(&mut open).resizable(false).default_width(470.0).show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Status:");
+                let (label, color) = match &status {
+                    ConnectionStatus::Connected => ("Connected to Discord", theme::AUDIO),
+                    ConnectionStatus::WaitingForDiscord => ("Waiting for Discord desktop client…", theme::SNAP),
+                    ConnectionStatus::MissingAppId => ("Setup needed — add a Discord Application ID below", theme::SNAP),
+                    ConnectionStatus::Disabled => ("Disabled", theme::TEXT_DIM),
+                    ConnectionStatus::Error(err) => (err.as_str(), theme::PLAYHEAD),
+                };
+                ui.label(egui::RichText::new(label).strong().color(color));
+            });
+
+            ui.add_space(6.0);
+            ui.checkbox(&mut self.dialog.draft.enabled, "Show Rust Cut Pro activity on Discord");
+            ui.checkbox(&mut self.dialog.draft.show_project_name, "Display current project name");
+            ui.checkbox(&mut self.dialog.draft.show_timeline_stats, "Display clip count, duration & playback state");
+
+            ui.add_space(6.0);
+            egui::Grid::new("discord_cfg").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+                ui.label("Discord Application ID:");
+                ui.add(egui::TextEdit::singleline(&mut self.dialog.draft.app_id).hint_text("e.g. 1234567890123456789").desired_width(240.0));
+                ui.end_row();
+
+                ui.label("Icon Asset Key:");
+                ui.add(egui::TextEdit::singleline(&mut self.dialog.draft.asset_key).hint_text(DEFAULT_ASSET_KEY).desired_width(240.0));
+                ui.end_row();
+            });
+
+            ui.add_space(8.0);
+            egui::CollapsingHeader::new("One-time Discord setup (takes ~30 seconds)").default_open(self.config.valid_app_id().is_none()).show(ui, |ui| {
+                ui.label("1. Open the Discord Developer Portal and click New Application → name it \"Rust Cut Pro\".");
+                ui.label("2. Upload the Rust Cut Pro icon as the App Icon (and under Rich Presence → Art Assets as \"rust_cut_pro\").");
+                ui.label("3. Copy the Application ID from General Information and paste it above.");
+                ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    ui.label("Status:");
-                    let (label, color) = match &status {
-                        ConnectionStatus::Connected => ("Connected to Discord", theme::AUDIO),
-                        ConnectionStatus::WaitingForDiscord => ("Waiting for Discord desktop client…", theme::SNAP),
-                        ConnectionStatus::MissingAppId => ("Setup needed — add a Discord Application ID below", theme::SNAP),
-                        ConnectionStatus::Disabled => ("Disabled", theme::TEXT_DIM),
-                        ConnectionStatus::Error(err) => (err.as_str(), theme::PLAYHEAD),
-                    };
-                    ui.label(egui::RichText::new(label).strong().color(color));
-                });
-
-                ui.add_space(6.0);
-                ui.checkbox(&mut self.dialog.draft.enabled, "Show Rust Cut Pro activity on Discord");
-                ui.checkbox(&mut self.dialog.draft.show_project_name, "Display current project name");
-                ui.checkbox(&mut self.dialog.draft.show_timeline_stats, "Display clip count, duration & playback state");
-
-                ui.add_space(6.0);
-                egui::Grid::new("discord_cfg").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
-                    ui.label("Discord Application ID:");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.dialog.draft.app_id)
-                            .hint_text("e.g. 1234567890123456789")
-                            .desired_width(240.0),
-                    );
-                    ui.end_row();
-
-                    ui.label("Icon Asset Key:");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.dialog.draft.asset_key)
-                            .hint_text(DEFAULT_ASSET_KEY)
-                            .desired_width(240.0),
-                    );
-                    ui.end_row();
-                });
-
-                ui.add_space(8.0);
-                egui::CollapsingHeader::new("One-time Discord setup (takes ~30 seconds)")
-                    .default_open(self.config.valid_app_id().is_none())
-                    .show(ui, |ui| {
-                        ui.label("1. Open the Discord Developer Portal and click New Application → name it \"Rust Cut Pro\".");
-                        ui.label("2. Upload the Rust Cut Pro icon as the App Icon (and under Rich Presence → Art Assets as \"rust_cut_pro\").");
-                        ui.label("3. Copy the Application ID from General Information and paste it above.");
-                        ui.add_space(4.0);
-                        ui.horizontal(|ui| {
-                            if ui.button("Open Developer Portal").clicked() {
-                                ctx.open_url(egui::OpenUrl::new_tab("https://discord.com/developers/applications"));
-                            }
-                            if let Some(icon_dir) = discord_icon_dir() {
-                                if ui.button("Open Icon Folder").clicked() {
-                                    open_folder(&icon_dir);
-                                }
-                            }
-                        });
-                    });
-
-                if let Some(msg) = &self.dialog.feedback {
-                    ui.add_space(4.0);
-                    ui.label(egui::RichText::new(msg).small().color(theme::VIDEO));
-                }
-
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Save & Connect").clicked() {
-                        apply = true;
+                    if ui.button("Open Developer Portal").clicked() {
+                        ctx.open_url(egui::OpenUrl::new_tab("https://discord.com/developers/applications"));
                     }
-                    if ui.button("Close").clicked() {
-                        self.dialog.open = false;
+                    if let Some(icon_dir) = discord_icon_dir() {
+                        if ui.button("Open Icon Folder").clicked() {
+                            open_folder(&icon_dir);
+                        }
                     }
                 });
             });
+
+            if let Some(msg) = &self.dialog.feedback {
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new(msg).small().color(theme::VIDEO));
+            }
+
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Save & Connect").clicked() {
+                    apply = true;
+                }
+                if ui.button("Close").clicked() {
+                    self.dialog.open = false;
+                }
+            });
+        });
 
         if apply {
             let trimmed_id = self.dialog.draft.app_id.trim().to_string();

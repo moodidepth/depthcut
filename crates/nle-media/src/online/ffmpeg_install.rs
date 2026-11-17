@@ -53,9 +53,7 @@ impl InstallStep {
 
 /// Parse a `.sha256` file: the first 64-hex-digit token.
 pub fn parse_sha256(text: &str) -> Option<String> {
-    text.split_whitespace()
-        .find(|t| t.len() == 64 && t.chars().all(|c| c.is_ascii_hexdigit()))
-        .map(|t| t.to_ascii_lowercase())
+    text.split_whitespace().find(|t| t.len() == 64 && t.chars().all(|c| c.is_ascii_hexdigit())).map(|t| t.to_ascii_lowercase())
 }
 
 /// Hex SHA-256 of a file.
@@ -145,9 +143,7 @@ pub fn install_ffmpeg(mut progress: impl FnMut(InstallStep), cancelled: impl Fn(
         progress(InstallStep::Verifying);
         let got = sha256_file(&zip_path).map_err(|e| e.to_string())?;
         if got != expected {
-            return Err(format!(
-                "checksum mismatch (expected {expected}, got {got}). The build may have just been updated — try again."
-            ));
+            return Err(format!("checksum mismatch (expected {expected}, got {got}). The build may have just been updated — try again."));
         }
         progress(InstallStep::Extracting);
         extract_tools(&zip_path, &bin)

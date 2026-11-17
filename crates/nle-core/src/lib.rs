@@ -40,20 +40,20 @@ pub mod xml;
 pub mod zoom_punch;
 
 pub use asset::{AssetKind, Attribution, AudioStreamInfo, MediaAsset, VideoStreamInfo};
-pub use clip::{
-    AudioParams, AudioRole, AvFlags, BlendMode, Clip, ClipKind, ColorParams, ColorWheel, CompoundClip, CropMode, Direction, DuckingSettings,
-    EqSettings, FadeShape, LutRef, TitleParams, TitleStyle, Transition, TransitionKind, VideoParams,
-};
 pub use captions::{CaptionSegment, CaptionStyle, CaptionTrack, CaptionWord};
+pub use clip::{
+    AudioParams, AudioRole, AvFlags, BlendMode, Clip, ClipKind, ColorParams, ColorWheel, CompoundClip, CropMode, Direction, DuckingSettings, EqSettings, FadeShape, LutRef,
+    TitleParams, TitleStyle, Transition, TransitionKind, VideoParams,
+};
 pub use command::{Command, History};
 pub use effects::{Effect, EffectKind, ParamDef, ParamKind, ResolvedEffect};
-pub use keymap::{Action, ActionMap, KeyBinding, KeyCode};
-pub use text_anim::{TextAnimation, TitleAnim};
 pub use eval::{audio_spans, evaluate, AudioSpan, Composition, Layer, LayerSource, RenderNode};
 pub use ids::{AssetId, ClipId};
 pub use keyframe::{Curve, Handle, Interpolation, Keyframe, Param};
+pub use keymap::{Action, ActionMap, KeyBinding, KeyCode};
 pub use presets::{ColorPreset, MontagePreset, PresetCategory};
 pub use project::Project;
 pub use speed::{FrameBlendMode, Retime, RetimeSegment};
+pub use text_anim::{TextAnimation, TitleAnim};
 pub use time::{format_timecode, parse_timecode, FrameRate, Time, TICKS_PER_SECOND};
 pub use timeline::{ClipLoc, EditError, Marker, MarkerKind, Timeline, VideoFormat};

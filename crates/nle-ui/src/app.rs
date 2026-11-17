@@ -12,8 +12,8 @@ use nle_core::autosave::Autosaver;
 use nle_core::eval::{self, Composition, Layer, LayerSource, RenderNode};
 use nle_core::keymap::{Action, ActionMap, KeyBinding, KeyCode};
 use nle_core::{
-    AssetId, Clip, ClipId, ClipKind, Command, Effect, EffectKind, FrameBlendMode, History, Marker, MarkerKind, Project, Retime, RetimeSegment,
-    Time, TitleParams, Transition, TransitionKind,
+    AssetId, Clip, ClipId, ClipKind, Command, Effect, EffectKind, FrameBlendMode, History, Marker, MarkerKind, Project, Retime, RetimeSegment, Time, TitleParams, Transition,
+    TransitionKind,
 };
 use nle_media::analysis::{self, BeatBand};
 use nle_media::audio::output::AudioEngine;
@@ -277,15 +277,7 @@ impl App {
             viewer: ViewerState { zoom: None, safe_zones: false, wipe: None, gizmo: viewer::Gizmo::Transform, half_res: false, editing_tc: None, volume_pct: 100.0, muted: false },
             punch: PunchState::default(),
             inspector_tab: InspectorTab::Video,
-            browser: BrowserState {
-                search: String::new(),
-                tag: None,
-                selected: None,
-                favorites_only: false,
-                thumb_size: 132.0,
-                new_tag: String::new(),
-                skim: None,
-            },
+            browser: BrowserState { search: String::new(), tag: None, selected: None, favorites_only: false, thumb_size: 132.0, new_tag: String::new(), skim: None },
             export: ExportDialog::default(),
             beat_job: None,
             kill_job: None,
@@ -395,11 +387,7 @@ impl App {
         egui::Modal::new(egui::Id::new("save_changes")).show(ctx, |ui| {
             ui.set_width(380.0);
             ui.heading("Save changes?");
-            ui.label(format!(
-                "\u{201c}{}\u{201d} has unsaved changes. Save them before {}?",
-                self.project.name,
-                if quitting { "quitting" } else { "continuing" }
-            ));
+            ui.label(format!("\u{201c}{}\u{201d} has unsaved changes. Save them before {}?", self.project.name, if quitting { "quitting" } else { "continuing" }));
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 if ui.button(egui::RichText::new("Save").strong()).clicked() {
@@ -499,11 +487,7 @@ impl App {
         }
         let t = self.playhead;
         let placed = self.project.timeline.placed_clips();
-        placed
-            .iter()
-            .filter(|p| t >= p.start && t < p.end() && !p.clip.is_gap())
-            .max_by_key(|p| (p.lane.max(0), p.lane == 0))
-            .map(|p| p.clip.id)
+        placed.iter().filter(|p| t >= p.start && t < p.end() && !p.clip.is_gap()).max_by_key(|p| (p.lane.max(0), p.lane == 0)).map(|p| p.clip.id)
     }
 
     /// Clip-local time of the playhead for `id`.
@@ -601,40 +585,32 @@ impl App {
         let Some((idx, mut name, mut color)) = self.marker_dialog.clone() else { return };
         let mut keep_open = true;
         let mut save = false;
-        egui::Window::new("Edit Marker (Alt+M)")
-            .collapsible(false)
-            .resizable(false)
-            .open(&mut keep_open)
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Name");
-                    ui.text_edit_singleline(&mut name);
-                });
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("Color");
-                    for (label, rgb) in [
-                        ("Kill Red", [255, 69, 58]),
-                        ("Kick Orange", [255, 110, 48]),
-                        ("Snare Cyan", [64, 210, 255]),
-                        ("Highlight Gold", [255, 214, 10]),
-                        ("Blue", [50, 173, 230]),
-                    ] {
-                        let c = egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
-                        let txt = egui::RichText::new(format!("■ {label}")).color(c);
-                        if ui.selectable_label(color == rgb, txt).clicked() {
-                            color = rgb;
-                        }
-                    }
-                });
-                ui.horizontal(|ui| {
-                    if ui.button("Save Marker").clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                        save = true;
-                    }
-                    if ui.button("Cancel").clicked() {
-                        self.marker_dialog = None;
-                    }
-                });
+        egui::Window::new("Edit Marker (Alt+M)").collapsible(false).resizable(false).open(&mut keep_open).show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Name");
+                ui.text_edit_singleline(&mut name);
             });
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Color");
+                for (label, rgb) in
+                    [("Kill Red", [255, 69, 58]), ("Kick Orange", [255, 110, 48]), ("Snare Cyan", [64, 210, 255]), ("Highlight Gold", [255, 214, 10]), ("Blue", [50, 173, 230])]
+                {
+                    let c = egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+                    let txt = egui::RichText::new(format!("■ {label}")).color(c);
+                    if ui.selectable_label(color == rgb, txt).clicked() {
+                        color = rgb;
+                    }
+                }
+            });
+            ui.horizontal(|ui| {
+                if ui.button("Save Marker").clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    save = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    self.marker_dialog = None;
+                }
+            });
+        });
         if save {
             let mut markers = self.project.timeline.markers.clone();
             if let Some(m) = markers.get_mut(idx) {
@@ -726,11 +702,7 @@ impl App {
         };
         let start = self.project.timeline.clip_start(id).unwrap_or(Time::ZERO);
         let dur = clip.duration;
-        let speed = clip
-            .retime
-            .as_ref()
-            .and_then(|r| (r.segments.len() == 1 && r.segments[0].speed > 0.0).then_some(r.segments[0].speed))
-            .unwrap_or(1.0);
+        let speed = clip.retime.as_ref().and_then(|r| (r.segments.len() == 1 && r.segments[0].speed > 0.0).then_some(r.segments[0].speed)).unwrap_or(1.0);
         let src_in = clip.source_in + clip.retime.as_ref().map_or(Time::ZERO, |r| r.start_offset);
         self.beat_job = Some(Job::spawn("beats", move |ctx| {
             if ctx.cancelled() {
@@ -750,13 +722,7 @@ impl App {
                 return Err("Cancelled".into());
             }
             let end = start + dur;
-            let markers = res
-                .beats
-                .into_iter()
-                .map(|t| start + Time::from_secs_f64(t / speed))
-                .filter(|&t| t >= start && t <= end)
-                .map(Marker::beat)
-                .collect();
+            let markers = res.beats.into_iter().map(|t| start + Time::from_secs_f64(t / speed)).filter(|&t| t >= start && t <= end).map(Marker::beat).collect();
             Ok((markers, res.bpm))
         }));
         self.status("Analyzing beats…");
@@ -778,11 +744,7 @@ impl App {
         };
         let start = self.project.timeline.clip_start(id).unwrap_or(Time::ZERO);
         let dur = clip.duration;
-        let speed = clip
-            .retime
-            .as_ref()
-            .and_then(|r| (r.segments.len() == 1 && r.segments[0].speed > 0.0).then_some(r.segments[0].speed))
-            .unwrap_or(1.0);
+        let speed = clip.retime.as_ref().and_then(|r| (r.segments.len() == 1 && r.segments[0].speed > 0.0).then_some(r.segments[0].speed)).unwrap_or(1.0);
         let src_in = clip.source_in + clip.retime.as_ref().map_or(Time::ZERO, |r| r.start_offset);
         self.multiband_job = Some(Job::spawn("multiband-beats", move |ctx| {
             if ctx.cancelled() {
@@ -829,11 +791,7 @@ impl App {
         };
         let start = self.project.timeline.clip_start(id).unwrap_or(Time::ZERO);
         let dur = clip.duration;
-        let speed = clip
-            .retime
-            .as_ref()
-            .and_then(|r| (r.segments.len() == 1 && r.segments[0].speed > 0.0).then_some(r.segments[0].speed))
-            .unwrap_or(1.0);
+        let speed = clip.retime.as_ref().and_then(|r| (r.segments.len() == 1 && r.segments[0].speed > 0.0).then_some(r.segments[0].speed)).unwrap_or(1.0);
         let src_in = clip.source_in + clip.retime.as_ref().map_or(Time::ZERO, |r| r.start_offset);
         self.kill_job = Some(Job::spawn("kill-scan", move |ctx| {
             if ctx.cancelled() {
@@ -862,11 +820,7 @@ impl App {
     }
 
     pub fn sync_clips_to_beats(&mut self) {
-        let ids: Vec<ClipId> = if self.selection.is_empty() {
-            self.target_clip().into_iter().collect()
-        } else {
-            self.selection.clone()
-        };
+        let ids: Vec<ClipId> = if self.selection.is_empty() { self.target_clip().into_iter().collect() } else { self.selection.clone() };
         if ids.is_empty() {
             return self.status("Select clip(s) to sync to beat markers");
         }
@@ -1004,11 +958,7 @@ impl App {
         let ids = std::mem::take(&mut self.selection);
         let key = coalesce_key();
         for id in ids {
-            let cmd = if leave_gap && nle_core::command::is_spine(&self.project.timeline, id) {
-                Command::DeleteWithGap { id }
-            } else {
-                Command::DeleteRipple { id }
-            };
+            let cmd = if leave_gap && nle_core::command::is_spine(&self.project.timeline, id) { Command::DeleteWithGap { id } } else { Command::DeleteRipple { id } };
             self.exec_key(cmd, Some(key));
         }
         self.history.seal();
@@ -1082,11 +1032,7 @@ impl App {
             })
             .or_else(|| self.target_clip());
         let Some(id) = target else { return };
-        let cmd = if start_edge {
-            Command::RippleTrimStartTo { id, at }
-        } else {
-            Command::RippleTrimEndTo { id, at }
-        };
+        let cmd = if start_edge { Command::RippleTrimStartTo { id, at } } else { Command::RippleTrimEndTo { id, at } };
         if self.exec(cmd) && start_edge {
             if let Some(s) = self.project.timeline.clip_start(id) {
                 self.seek(s);
@@ -1197,8 +1143,13 @@ impl App {
     pub fn play(&mut self, speed: f64) {
         self.playback = Playback { playing: true, speed };
         if let Some(p) = &mut self.preview {
-            p.renderer.shuttle_proxy_scale =
-                if speed.abs() > 4.0 { 0.25 } else if speed.abs() > 1.0 { 0.5 } else { 1.0 };
+            p.renderer.shuttle_proxy_scale = if speed.abs() > 4.0 {
+                0.25
+            } else if speed.abs() > 1.0 {
+                0.5
+            } else {
+                1.0
+            };
         }
         self.audio.play(self.playhead, speed);
     }
@@ -1383,9 +1334,7 @@ impl App {
         }
         let sources: std::collections::HashMap<_, _> = key.loaded.iter().filter_map(|a| self.library.audio.get(a).map(|b| (*a, b.clone()))).collect();
         self.duck_key = Some(key);
-        self.duck_job = Some(Job::spawn("Voice envelope", move |ctx| {
-            dialogue_envelope(&voice, &sources, end, &|| ctx.cancelled()).ok_or_else(|| "cancelled".to_string())
-        }));
+        self.duck_job = Some(Job::spawn("Voice envelope", move |ctx| dialogue_envelope(&voice, &sources, end, &|| ctx.cancelled()).ok_or_else(|| "cancelled".to_string())));
     }
 
     fn set_duck_env(&mut self, env: Option<Arc<nle_media::audio::DuckEnvelope>>) {
@@ -1528,7 +1477,6 @@ impl App {
         ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Paste(_))))
     }
 
-
     fn dispatch_action(&mut self, action: Action) {
         match action {
             Action::PlayPause => self.toggle_play(),
@@ -1650,12 +1598,7 @@ impl App {
         let plain_ctrl_v = ctrl_v && ctx.input(|i| !i.modifiers.shift && !i.modifiers.alt);
         let mut fired_ctrl_v = false;
 
-        let mut entries: Vec<(Action, KeyBinding)> = self
-            .keymap
-            .bindings
-            .iter()
-            .flat_map(|(a, list)| list.iter().copied().map(move |b| (*a, b)))
-            .collect();
+        let mut entries: Vec<(Action, KeyBinding)> = self.keymap.bindings.iter().flat_map(|(a, list)| list.iter().copied().map(move |b| (*a, b))).collect();
         entries.sort_by_key(|(a, b)| {
             let specificity = (b.mods.ctrl as u8) + (b.mods.shift as u8) + (b.mods.alt as u8);
             (std::cmp::Reverse(specificity), *a)
@@ -1762,20 +1705,12 @@ impl App {
                 }
             });
             ui.menu_button("Edit", |ui| {
-                let undo = self
-                    .history
-                    .undo_label()
-                    .map(|l| self.menu_label(&format!("Undo {l}"), Action::Undo))
-                    .unwrap_or_else(|| self.menu_label("Undo", Action::Undo));
+                let undo = self.history.undo_label().map(|l| self.menu_label(&format!("Undo {l}"), Action::Undo)).unwrap_or_else(|| self.menu_label("Undo", Action::Undo));
                 if ui.add_enabled(self.history.can_undo(), egui::Button::new(undo)).clicked() {
                     self.undo();
                     ui.close_menu();
                 }
-                let redo = self
-                    .history
-                    .redo_label()
-                    .map(|l| self.menu_label(&format!("Redo {l}"), Action::Redo))
-                    .unwrap_or_else(|| self.menu_label("Redo", Action::Redo));
+                let redo = self.history.redo_label().map(|l| self.menu_label(&format!("Redo {l}"), Action::Redo)).unwrap_or_else(|| self.menu_label("Redo", Action::Redo));
                 if ui.add_enabled(self.history.can_redo(), egui::Button::new(redo)).clicked() {
                     self.redo();
                     ui.close_menu();
@@ -2059,7 +1994,9 @@ impl App {
                         ui.label(egui::RichText::new(short).monospace().small().color(theme::TEXT_DIM));
                     }
                     None => {
-                        ui.label("No error was recorded, so the app was stopped from outside it: a system crash, power loss, or a native component (GPU driver, FFmpeg, whisper.cpp).");
+                        ui.label(
+                            "No error was recorded, so the app was stopped from outside it: a system crash, power loss, or a native component (GPU driver, FFmpeg, whisper.cpp).",
+                        );
                     }
                 }
                 if self.recovery.is_some() {
@@ -2172,8 +2109,7 @@ impl App {
                 match res {
                     Ok((new_beats, bpm)) => {
                         let count = new_beats.len();
-                        let mut markers: Vec<Marker> =
-                            self.project.timeline.markers.iter().filter(|m| m.kind != MarkerKind::Beat).cloned().collect();
+                        let mut markers: Vec<Marker> = self.project.timeline.markers.iter().filter(|m| m.kind != MarkerKind::Beat).cloned().collect();
                         markers.extend(new_beats);
                         markers.sort_by_key(|m| m.time);
                         self.exec(Command::SetMarkers { markers });
@@ -2195,8 +2131,7 @@ impl App {
                 match res {
                     Ok(new_kills) => {
                         let count = new_kills.len();
-                        let mut markers: Vec<Marker> =
-                            self.project.timeline.markers.iter().filter(|m| m.kind != MarkerKind::Kill).cloned().collect();
+                        let mut markers: Vec<Marker> = self.project.timeline.markers.iter().filter(|m| m.kind != MarkerKind::Kill).cloned().collect();
                         markers.extend(new_kills);
                         markers.sort_by_key(|m| m.time);
                         self.exec(Command::SetMarkers { markers });
@@ -2214,14 +2149,8 @@ impl App {
                 match res {
                     Ok(new_mb) => {
                         let count = new_mb.len();
-                        let mut markers: Vec<Marker> = self
-                            .project
-                            .timeline
-                            .markers
-                            .iter()
-                            .filter(|m| !matches!(m.kind, MarkerKind::SubBass | MarkerKind::Snare))
-                            .cloned()
-                            .collect();
+                        let mut markers: Vec<Marker> =
+                            self.project.timeline.markers.iter().filter(|m| !matches!(m.kind, MarkerKind::SubBass | MarkerKind::Snare)).cloned().collect();
                         markers.extend(new_mb);
                         markers.sort_by_key(|m| m.time);
                         self.exec(Command::SetMarkers { markers });
@@ -2255,12 +2184,7 @@ impl App {
     }
 
     fn sync_discord(&mut self) {
-        let project_name = self
-            .project_path
-            .as_ref()
-            .and_then(|p| p.file_stem())
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| self.project.name.clone());
+        let project_name = self.project_path.as_ref().and_then(|p| p.file_stem()).map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| self.project.name.clone());
         let snap = PresenceSnapshot {
             project_name,
             clip_count: self.project.timeline.placed_clips().len(),

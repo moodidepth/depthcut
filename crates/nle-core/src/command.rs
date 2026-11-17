@@ -14,51 +14,147 @@ use crate::timeline::{ClipLoc, EditError, EditResult, Marker, Timeline};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
-    Append { clip: Clip },
-    Insert { at: Time, clip: Clip },
-    Overwrite { at: Time, clip: Clip },
-    Connect { clip: Clip, at: Time, lane: i32 },
-    DeleteRipple { id: ClipId },
-    DeleteWithGap { id: ClipId },
-    DeleteRange { start: Time, end: Time },
-    Blade { at: Time },
-    BladeClip { id: ClipId, at: Time },
-    BladeAll { at: Time },
-    TrimStart { id: ClipId, delta: Time },
-    TrimEnd { id: ClipId, delta: Time },
-    RippleTrimStartTo { id: ClipId, at: Time },
-    RippleTrimEndTo { id: ClipId, at: Time },
-    SyncClipsToBeats { ids: Vec<ClipId> },
-    Slip { id: ClipId, delta: Time },
-    Slide { id: ClipId, delta: Time },
+    Append {
+        clip: Clip,
+    },
+    Insert {
+        at: Time,
+        clip: Clip,
+    },
+    Overwrite {
+        at: Time,
+        clip: Clip,
+    },
+    Connect {
+        clip: Clip,
+        at: Time,
+        lane: i32,
+    },
+    DeleteRipple {
+        id: ClipId,
+    },
+    DeleteWithGap {
+        id: ClipId,
+    },
+    DeleteRange {
+        start: Time,
+        end: Time,
+    },
+    Blade {
+        at: Time,
+    },
+    BladeClip {
+        id: ClipId,
+        at: Time,
+    },
+    BladeAll {
+        at: Time,
+    },
+    TrimStart {
+        id: ClipId,
+        delta: Time,
+    },
+    TrimEnd {
+        id: ClipId,
+        delta: Time,
+    },
+    RippleTrimStartTo {
+        id: ClipId,
+        at: Time,
+    },
+    RippleTrimEndTo {
+        id: ClipId,
+        at: Time,
+    },
+    SyncClipsToBeats {
+        ids: Vec<ClipId>,
+    },
+    Slip {
+        id: ClipId,
+        delta: Time,
+    },
+    Slide {
+        id: ClipId,
+        delta: Time,
+    },
     /// Roll the edit point after spine clip `left` (length-neutral).
-    Roll { left: ClipId, delta: Time },
+    Roll {
+        left: ClipId,
+        delta: Time,
+    },
     /// J/L split edit: extend a clip's audio before / after its video.
-    SetAudioSplit { id: ClipId, lead: Time, tail: Time },
-    MoveClip { id: ClipId, at: Time, lane: i32 },
-    MoveSpine { id: ClipId, to_index: usize },
-    LiftToLane { id: ClipId, lane: i32 },
-    MakeCompound { ids: Vec<ClipId>, name: String },
-    BreakApart { id: ClipId },
-    SetRetime { id: ClipId, retime: Option<Retime> },
-    FreezeFrame { id: ClipId, at: Time, hold: Time },
-    SetTransition { id: ClipId, at_end: bool, transition: Option<Transition> },
+    SetAudioSplit {
+        id: ClipId,
+        lead: Time,
+        tail: Time,
+    },
+    MoveClip {
+        id: ClipId,
+        at: Time,
+        lane: i32,
+    },
+    MoveSpine {
+        id: ClipId,
+        to_index: usize,
+    },
+    LiftToLane {
+        id: ClipId,
+        lane: i32,
+    },
+    MakeCompound {
+        ids: Vec<ClipId>,
+        name: String,
+    },
+    BreakApart {
+        id: ClipId,
+    },
+    SetRetime {
+        id: ClipId,
+        retime: Option<Retime>,
+    },
+    FreezeFrame {
+        id: ClipId,
+        at: Time,
+        hold: Time,
+    },
+    SetTransition {
+        id: ClipId,
+        at_end: bool,
+        transition: Option<Transition>,
+    },
     /// Replace a clip's parameters (inspector edits, keyframes, titles...).
     /// Structural fields (id, kind's identity, connected clips, duration)
     /// are preserved from the timeline.
-    UpdateClip { clip: Box<Clip> },
+    UpdateClip {
+        clip: Box<Clip>,
+    },
     /// Replace a clip wholesale *including* its timing (duration, source in,
     /// retime) — montage presets. Lane, offset and connected clips are kept.
-    ReplaceClip { label: &'static str, clip: Box<Clip> },
-    ToggleEnabled { id: ClipId },
+    ReplaceClip {
+        label: &'static str,
+        clip: Box<Clip>,
+    },
+    ToggleEnabled {
+        id: ClipId,
+    },
     /// Replace all timeline markers.
-    SetMarkers { markers: Vec<Marker> },
+    SetMarkers {
+        markers: Vec<Marker>,
+    },
     /// Replace the captions track.
-    SetCaptions { captions: Box<CaptionTrack> },
+    SetCaptions {
+        captions: Box<CaptionTrack>,
+    },
     /// Insert a gap at `at` (splits the storyline clip under it).
-    InsertGap { at: Time, duration: Time },
+    InsertGap {
+        at: Time,
+        duration: Time,
+    },
     /// Several commands applied as one atomic undo step (all or nothing).
-    Batch { label: &'static str, commands: Vec<Command> },
+    Batch {
+        label: &'static str,
+        commands: Vec<Command>,
+    },
 }
 
 impl Command {

@@ -20,35 +20,13 @@ pub const QUICK_PROMPTS: [(&str, &str); 5] = [
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "tool", rename_all = "snake_case")]
 pub enum CopilotToolCall {
-    JumpToTimecode {
-        time_secs: f64,
-    },
-    ApplyVelocityPreset {
-        clip_id: Option<u64>,
-        preset_name: String,
-    },
-    AddEffectPreset {
-        clip_id: Option<u64>,
-        preset_name: String,
-    },
-    CutAndRipple {
-        clip_id: Option<u64>,
-        time_secs: f64,
-        trim_mode: String,
-    },
-    SyncToBeatMarkers {
-        clip_ids: Vec<u64>,
-    },
-    DropMarker {
-        time_secs: f64,
-        label: String,
-        kind: String,
-    },
-    AddTransition {
-        clip_id: Option<u64>,
-        transition_kind: String,
-        duration_frames: i64,
-    },
+    JumpToTimecode { time_secs: f64 },
+    ApplyVelocityPreset { clip_id: Option<u64>, preset_name: String },
+    AddEffectPreset { clip_id: Option<u64>, preset_name: String },
+    CutAndRipple { clip_id: Option<u64>, time_secs: f64, trim_mode: String },
+    SyncToBeatMarkers { clip_ids: Vec<u64> },
+    DropMarker { time_secs: f64, label: String, kind: String },
+    AddTransition { clip_id: Option<u64>, transition_kind: String, duration_frames: i64 },
 }
 
 impl CopilotToolCall {
@@ -332,11 +310,7 @@ fn lowercase_json_types(v: &Value) -> Value {
 /// the playhead → first clip.
 fn target_clip(tl: &Timeline, clip_id: Option<u64>, playhead: Time, selection: &[ClipId]) -> Result<ClipId, String> {
     match clip_id {
-        Some(raw) => tl
-            .clip(ClipId(raw))
-            .filter(|c| !c.is_gap())
-            .map(|c| c.id)
-            .ok_or_else(|| format!("clip {raw} does not exist on the timeline")),
+        Some(raw) => tl.clip(ClipId(raw)).filter(|c| !c.is_gap()).map(|c| c.id).ok_or_else(|| format!("clip {raw} does not exist on the timeline")),
         None => resolve_target_clip(tl, None, playhead, selection).ok_or_else(|| "timeline has no clips".to_string()),
     }
 }
@@ -411,11 +385,7 @@ fn plan_tool_call(call: &CopilotToolCall, tl: &Timeline, playhead: Time, selecti
             let id = target_clip(tl, *clip_id, playhead, selection)?;
             let clip = tl.clip(id).ok_or("clip missing")?;
             let retime = Retime::velocity_preset(preset_name, clip.duration)
-                .or_else(|| {
-                    MontagePreset::find(preset_name)
-                        .and_then(|p| p.velocity_preset)
-                        .and_then(|vp| Retime::velocity_preset(&vp, clip.duration))
-                })
+                .or_else(|| MontagePreset::find(preset_name).and_then(|p| p.velocity_preset).and_then(|vp| Retime::velocity_preset(&vp, clip.duration)))
                 .ok_or_else(|| format!("unknown velocity preset '{preset_name}' (known: {})", Retime::PRESET_NAMES.join(", ")))?;
             one(Command::SetRetime { id, retime: Some(retime) }, format!("Velocity '{preset_name}' on '{}'", clip.name))
         }
@@ -563,13 +533,7 @@ static COPILOT_RUN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64:
 /// Each action is atomic (it applies completely or not at all), and the whole
 /// run is a single undo step, so one Ctrl+Z reverts everything the Copilot did.
 /// Returns one `Applied` / `Skipped: reason` outcome per action, in order.
-pub fn apply_copilot_actions(
-    calls: &[CopilotToolCall],
-    tl: &mut Timeline,
-    history: &mut History,
-    playhead: &mut Time,
-    selection: &[ClipId],
-) -> Vec<ActionOutcome> {
+pub fn apply_copilot_actions(calls: &[CopilotToolCall], tl: &mut Timeline, history: &mut History, playhead: &mut Time, selection: &[ClipId]) -> Vec<ActionOutcome> {
     let key = Some(0xC0F1_0000_0000_0000 ^ COPILOT_RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
     let mut outcomes = Vec::with_capacity(calls.len());
     for call in calls {
@@ -606,13 +570,7 @@ pub fn apply_copilot_actions(
 }
 
 /// Execute a single `CopilotToolCall` through `history` as one undo step.
-pub fn execute_tool_call(
-    call: &CopilotToolCall,
-    tl: &mut Timeline,
-    history: &mut History,
-    playhead: &mut Time,
-    selection: &[ClipId],
-) -> Result<String, String> {
+pub fn execute_tool_call(call: &CopilotToolCall, tl: &mut Timeline, history: &mut History, playhead: &mut Time, selection: &[ClipId]) -> Result<String, String> {
     let outcome = apply_copilot_actions(std::slice::from_ref(call), tl, history, playhead, selection).remove(0);
     if outcome.applied || matches!(call, CopilotToolCall::SyncToBeatMarkers { .. }) && outcome.detail == nothing_reason(call) {
         Ok(outcome.detail)
@@ -654,74 +612,39 @@ pub fn offline_copilot_plan(prompt: &str, tl: &Timeline, playhead: Time, selecti
     let mut notes = Vec::new();
 
     if lower.contains("9:16") || lower.contains("tiktok") || lower.contains("shorts") {
-        calls.push(CopilotToolCall::AddEffectPreset {
-            clip_id: target,
-            preset_name: "Gaming 9:16 Split-Crop".into(),
-        });
+        calls.push(CopilotToolCall::AddEffectPreset { clip_id: target, preset_name: "Gaming 9:16 Split-Crop".into() });
         notes.push("Enabled dual-viewport 9:16 Split-Crop with killfeed PiP.");
     }
     if lower.contains("kill") && (lower.contains("marker") || lower.contains("find")) {
         // Place Kill markers at the centers of the first non-gap clips if no kill markers exist yet.
         let non_gap: Vec<_> = tl.placed_clips().into_iter().filter(|p| !p.clip.is_gap()).collect();
         if non_gap.is_empty() {
-            calls.push(CopilotToolCall::DropMarker {
-                time_secs: playhead.as_secs_f64(),
-                label: "Kill 1".into(),
-                kind: "kill".into(),
-            });
+            calls.push(CopilotToolCall::DropMarker { time_secs: playhead.as_secs_f64(), label: "Kill 1".into(), kind: "kill".into() });
         } else {
             for (i, p) in non_gap.iter().take(3).enumerate() {
                 let mid = (p.start + p.clip.duration.div_i64(2)).as_secs_f64();
-                calls.push(CopilotToolCall::DropMarker {
-                    time_secs: mid,
-                    label: format!("Kill {}", i + 1),
-                    kind: "kill".into(),
-                });
+                calls.push(CopilotToolCall::DropMarker { time_secs: mid, label: format!("Kill {}", i + 1), kind: "kill".into() });
             }
         }
         notes.push("Marked kill peaks on timeline.");
     }
     if lower.contains("beat") || lower.contains("sync") || lower.contains("fragmovie") {
         if tl.markers.is_empty() && tl.extent() > Time::from_secs(1) {
-            calls.push(CopilotToolCall::DropMarker {
-                time_secs: (tl.extent().as_secs_f64() * 0.5).max(0.5),
-                label: "Kick Drop".into(),
-                kind: "sub_bass".into(),
-            });
+            calls.push(CopilotToolCall::DropMarker { time_secs: (tl.extent().as_secs_f64() * 0.5).max(0.5), label: "Kick Drop".into(), kind: "sub_bass".into() });
         }
-        calls.push(CopilotToolCall::SyncToBeatMarkers {
-            clip_ids: target.into_iter().collect(),
-        });
+        calls.push(CopilotToolCall::SyncToBeatMarkers { clip_ids: target.into_iter().collect() });
         notes.push("Synced clips to timeline beat markers.");
     }
     if lower.contains("velocity") || lower.contains("flow sync") || lower.contains("fragmovie") {
-        let vp = if lower.contains("awp") || lower.contains("cs2") {
-            "CS2 AWP / Deagle Double-Pump"
-        } else {
-            "Valorant Flow Sync"
-        };
-        calls.push(CopilotToolCall::ApplyVelocityPreset {
-            clip_id: target,
-            preset_name: vp.into(),
-        });
+        let vp = if lower.contains("awp") || lower.contains("cs2") { "CS2 AWP / Deagle Double-Pump" } else { "Valorant Flow Sync" };
+        calls.push(CopilotToolCall::ApplyVelocityPreset { clip_id: target, preset_name: vp.into() });
         notes.push("Applied fragmovie cubic-Bezier velocity curve.");
     }
     if lower.contains("shake") || lower.contains("fragmovie") || lower.contains("vibrant") {
-        let fx = if lower.contains("vibrant") || lower.contains("fragmovie") {
-            "Valorant Vibrant Clean CC"
-        } else {
-            "Hard Kill Impact (S_Shake Decay)"
-        };
-        calls.push(CopilotToolCall::AddEffectPreset {
-            clip_id: target,
-            preset_name: fx.into(),
-        });
+        let fx = if lower.contains("vibrant") || lower.contains("fragmovie") { "Valorant Vibrant Clean CC" } else { "Hard Kill Impact (S_Shake Decay)" };
+        calls.push(CopilotToolCall::AddEffectPreset { clip_id: target, preset_name: fx.into() });
         if lower.contains("fragmovie") || lower.contains("whip") {
-            calls.push(CopilotToolCall::AddTransition {
-                clip_id: target,
-                transition_kind: "whip_pan".into(),
-                duration_frames: 8,
-            });
+            calls.push(CopilotToolCall::AddTransition { clip_id: target, transition_kind: "whip_pan".into(), duration_frames: 8 });
         }
         notes.push("Applied signature FX / transition preset.");
     }

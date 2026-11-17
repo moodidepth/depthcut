@@ -3,9 +3,9 @@
 
 use crate::clip::{AudioParams, BlendMode, Clip, ClipKind, Direction, LutRef, TitleParams, TransitionKind};
 use crate::effects::{resolve_stack, EffectKind, ResolvedEffect};
-use crate::text_anim::{title_anim, TitleAnim};
 use crate::ids::{AssetId, ClipId};
 use crate::speed::{FrameBlendMode, Retime};
+use crate::text_anim::{title_anim, TitleAnim};
 use crate::time::Time;
 use crate::timeline::Timeline;
 
@@ -54,24 +54,18 @@ pub struct ResolvedColor {
 
 impl Default for ResolvedColor {
     fn default() -> Self {
-        ResolvedColor {
-            enabled: false,
-            exposure: 0.0,
-            contrast: 0.0,
-            saturation: 1.0,
-            temperature: 0.0,
-            tint: 0.0,
-            lift: [0.0; 4],
-            gamma: [0.0; 4],
-            gain: [0.0; 4],
-            lut: None,
-        }
+        ResolvedColor { enabled: false, exposure: 0.0, contrast: 0.0, saturation: 1.0, temperature: 0.0, tint: 0.0, lift: [0.0; 4], gamma: [0.0; 4], gain: [0.0; 4], lut: None }
     }
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum LayerSource {
-    Media { asset: AssetId, source_time: Time, speed: f64, blend: FrameBlendMode },
+    Media {
+        asset: AssetId,
+        source_time: Time,
+        speed: f64,
+        blend: FrameBlendMode,
+    },
     /// A title with its animation state at this instant.
     Title(Box<TitleParams>, TitleAnim),
     Solid([f32; 4]),
@@ -130,7 +124,11 @@ pub struct ResolvedTransition {
 pub enum RenderNode {
     Layer(Layer),
     /// `None` on either side means black.
-    Transition { from: Option<Box<Layer>>, to: Option<Box<Layer>>, transition: ResolvedTransition },
+    Transition {
+        from: Option<Box<Layer>>,
+        to: Option<Box<Layer>>,
+        transition: ResolvedTransition,
+    },
 }
 
 /// Everything visible at one instant, bottom to top.
@@ -231,12 +229,7 @@ fn resolve_video(c: &Clip, t: Time) -> ResolvedVideo {
         rotation: v.rotation.at_f32(t),
         anchor: [v.anchor_x.at_f32(t), v.anchor_y.at_f32(t)],
         opacity: v.opacity.at_f32(t).clamp(0.0, 1.0),
-        crop: [
-            v.crop_left.at_f32(t).clamp(0.0, 1.0),
-            v.crop_right.at_f32(t).clamp(0.0, 1.0),
-            v.crop_top.at_f32(t).clamp(0.0, 1.0),
-            v.crop_bottom.at_f32(t).clamp(0.0, 1.0),
-        ],
+        crop: [v.crop_left.at_f32(t).clamp(0.0, 1.0), v.crop_right.at_f32(t).clamp(0.0, 1.0), v.crop_top.at_f32(t).clamp(0.0, 1.0), v.crop_bottom.at_f32(t).clamp(0.0, 1.0)],
         source_rect,
         blend: v.blend_mode,
     }
@@ -270,12 +263,7 @@ pub fn clip_layer(c: &Clip, local: Time, lane: i32) -> Option<Layer> {
             if let Some(md) = c.media_duration {
                 st = st.min((md - Time(1)).max(Time::ZERO));
             }
-            LayerSource::Media {
-                asset: *asset,
-                source_time: st,
-                speed: c.speed_at(local),
-                blend: c.frame_quality(),
-            }
+            LayerSource::Media { asset: *asset, source_time: st, speed: c.speed_at(local), blend: c.frame_quality() }
         }
         ClipKind::Title(p) => LayerSource::Title(p.clone(), title_anim(p, local, c.duration)),
         ClipKind::Adjustment => LayerSource::Solid([0.0; 4]),
@@ -297,12 +285,7 @@ pub fn clip_layer(c: &Clip, local: Time, lane: i32) -> Option<Layer> {
 
 fn transition_progress(tr: &crate::clip::Transition, elapsed: Time) -> ResolvedTransition {
     let u = if tr.duration.is_positive() { elapsed.as_secs_f64() / tr.duration.as_secs_f64() } else { 1.0 };
-    ResolvedTransition {
-        kind: tr.kind,
-        direction: tr.direction,
-        softness: tr.softness,
-        progress: tr.easing.ease(u.clamp(0.0, 1.0)) as f32,
-    }
+    ResolvedTransition { kind: tr.kind, direction: tr.direction, softness: tr.softness, progress: tr.easing.ease(u.clamp(0.0, 1.0)) as f32 }
 }
 
 fn spine_node(spine: &[Clip], starts: &[Time], t: Time) -> Option<RenderNode> {

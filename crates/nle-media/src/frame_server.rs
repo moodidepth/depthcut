@@ -53,12 +53,7 @@ impl FrameServer {
     /// `max_height` downscales preview decoding (e.g. 1080 for a 4K
     /// timeline on a 1440p monitor); `None` decodes full resolution.
     pub fn new(queue_capacity: usize, max_height: Option<u32>) -> Self {
-        FrameServer {
-            workers: Mutex::new(HashMap::new()),
-            out: Arc::new(SpscFrameRing::new(queue_capacity)),
-            max_height,
-            sync_decoders: Mutex::new(HashMap::new()),
-        }
+        FrameServer { workers: Mutex::new(HashMap::new()), out: Arc::new(SpscFrameRing::new(queue_capacity)), max_height, sync_decoders: Mutex::new(HashMap::new()) }
     }
 
     /// Ask for the frame of `asset` at source time `t`.
@@ -133,9 +128,7 @@ impl FrameServer {
         let opts = DecodeOptions { use_proxy: proxy, max_height: self.max_height };
         let st = state.clone();
         let be = backend.clone();
-        let handle = std::thread::Builder::new()
-            .name(format!("rcp-decode-{}", asset.id.0))
-            .spawn(move || worker_loop(asset, proxy, opts, st, be, out))?;
+        let handle = std::thread::Builder::new().name(format!("rcp-decode-{}", asset.id.0)).spawn(move || worker_loop(asset, proxy, opts, st, be, out))?;
         Ok(Worker { state, backend, handle: Some(handle) })
     }
 }

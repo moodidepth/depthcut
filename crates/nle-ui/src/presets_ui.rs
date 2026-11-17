@@ -21,14 +21,7 @@ pub struct PresetsUiState {
 
 impl Default for PresetsUiState {
     fn default() -> Self {
-        Self {
-            category: None,
-            search: String::new(),
-            new_name: String::new(),
-            new_cat: PresetCategory::ShakeAndImpact,
-            user_presets: Vec::new(),
-            loaded: false,
-        }
+        Self { category: None, search: String::new(), new_name: String::new(), new_cat: PresetCategory::ShakeAndImpact, user_presets: Vec::new(), loaded: false }
     }
 }
 
@@ -42,11 +35,7 @@ pub fn user_presets_dir() -> PathBuf {
 
 pub fn find_preset_with_user(name: &str, user_presets: &[MontagePreset]) -> Option<MontagePreset> {
     let q = name.trim().to_lowercase();
-    user_presets
-        .iter()
-        .find(|p| p.name.to_lowercase() == q)
-        .cloned()
-        .or_else(|| MontagePreset::find(name))
+    user_presets.iter().find(|p| p.name.to_lowercase() == q).cloned().or_else(|| MontagePreset::find(name))
 }
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
@@ -63,11 +52,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             }
         });
     });
-    ui.label(
-        egui::RichText::new("Drag a preset onto any timeline clip / Adjustment Clip, or click Apply at playhead.")
-            .small()
-            .color(theme::TEXT_DIM),
-    );
+    ui.label(egui::RichText::new("Drag a preset onto any timeline clip / Adjustment Clip, or click Apply at playhead.").small().color(theme::TEXT_DIM));
 
     ui.add(egui::TextEdit::singleline(&mut app.presets_ui.search).hint_text("🔍 Filter presets (e.g. RSMB, Flow Sync, Shake, Halo…)").desired_width(ui.available_width()));
 
@@ -91,13 +76,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         }
         ui.horizontal(|ui| {
             ui.add(egui::TextEdit::singleline(&mut app.presets_ui.new_name).hint_text("My Signature Shake"));
-            egui::ComboBox::from_id_salt("new-preset-cat")
-                .selected_text(app.presets_ui.new_cat.label())
-                .show_ui(ui, |ui| {
-                    for cat in PresetCategory::ALL {
-                        ui.selectable_value(&mut app.presets_ui.new_cat, cat, cat.label());
-                    }
-                });
+            egui::ComboBox::from_id_salt("new-preset-cat").selected_text(app.presets_ui.new_cat.label()).show_ui(ui, |ui| {
+                for cat in PresetCategory::ALL {
+                    ui.selectable_value(&mut app.presets_ui.new_cat, cat, cat.label());
+                }
+            });
         });
         if ui.add_enabled(has_sel && !app.presets_ui.new_name.trim().is_empty(), egui::Button::new("Save to presets/user/")).clicked() {
             save_clicked = true;

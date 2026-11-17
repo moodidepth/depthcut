@@ -7,10 +7,7 @@
 //! audio fades and a "Color Adjustments" video filter.
 
 use crate::asset::{AssetKind, AudioStreamInfo, MediaAsset, VideoStreamInfo};
-use crate::clip::{
-    AudioRole, AvFlags, BlendMode, Clip, ClipKind, ColorWheel, CompoundClip, Direction, FadeShape, LutRef, TitleParams, TitleStyle, Transition,
-    TransitionKind,
-};
+use crate::clip::{AudioRole, AvFlags, BlendMode, Clip, ClipKind, ColorWheel, CompoundClip, Direction, FadeShape, LutRef, TitleParams, TitleStyle, Transition, TransitionKind};
 use crate::ids::AssetId;
 use crate::keyframe::{Curve, Interpolation, Keyframe, Param};
 use crate::project::Project;
@@ -291,13 +288,7 @@ fn adjustments(c: &Clip, origin: Time, fmt: &VideoFormat, ctx: &mut ExportCtx) -
             if !col.enabled {
                 f = f.set("enabled", "0");
             }
-            for (name, p) in [
-                ("Exposure", &col.exposure),
-                ("Contrast", &col.contrast),
-                ("Saturation", &col.saturation),
-                ("Temperature", &col.temperature),
-                ("Tint", &col.tint),
-            ] {
+            for (name, p) in [("Exposure", &col.exposure), ("Contrast", &col.contrast), ("Saturation", &col.saturation), ("Temperature", &col.temperature), ("Tint", &col.tint)] {
                 let mut pe = Element::new("param").set("name", name).set("value", num(p.value));
                 if let Some(a) = keyframe_anim(p, origin, num) {
                     pe.push(a);
@@ -397,8 +388,17 @@ fn clip_el(c: &Clip, offset: Time, fmt: &VideoFormat, ctx: &mut ExportCtx) -> El
             ctx.text_style_seq += 1;
             let id = format!("ts{}", ctx.text_style_seq);
             let col = |c: [f32; 4]| format!("{} {} {} {}", num(c[0] as f64), num(c[1] as f64), num(c[2] as f64), num(c[3] as f64));
-            e.push(Element::new("param").set("name", "Position").set("key", "9999/999166631/999166633/1/100/101").set("value", format!("{} {}", num(p.position[0] as f64), num(p.position[1] as f64))));
-            e.push(Element::new("param").set("name", "rcp.pill").set("value", format!("{} {} {} {}", u8::from(p.pill_enabled), col(p.pill_color), num(p.pill_padding as f64), num(p.pill_radius as f64))));
+            e.push(
+                Element::new("param")
+                    .set("name", "Position")
+                    .set("key", "9999/999166631/999166633/1/100/101")
+                    .set("value", format!("{} {}", num(p.position[0] as f64), num(p.position[1] as f64))),
+            );
+            e.push(
+                Element::new("param")
+                    .set("name", "rcp.pill")
+                    .set("value", format!("{} {} {} {}", u8::from(p.pill_enabled), col(p.pill_color), num(p.pill_padding as f64), num(p.pill_radius as f64))),
+            );
             e.push(Element::new("param").set("name", "rcp.shadowBlur").set("value", num(p.shadow_blur as f64)));
             e.push(Element::new("text").with_child(Element::new("text-style").set("ref", id.clone()).with_text(p.text.clone())));
             if !p.subtitle.is_empty() {
@@ -737,10 +737,8 @@ fn apply_adjustments(el: &Element, c: &mut Clip, origin: Time, fmt: &VideoFormat
                 c.color.lut = lut_path.map(|path| LutRef { path, intensity: lut_int });
             }
             "timeMap" => {
-                let pts: Vec<(Time, Time, bool)> = adj
-                    .children_named("timept")
-                    .filter_map(|p| Some((attr_time(p, "time")?, attr_time(p, "value")?, p.attr("interp") == Some("smooth2"))))
-                    .collect();
+                let pts: Vec<(Time, Time, bool)> =
+                    adj.children_named("timept").filter_map(|p| Some((attr_time(p, "time")?, attr_time(p, "value")?, p.attr("interp") == Some("smooth2")))).collect();
                 if pts.len() >= 2 {
                     let mut segs = Vec::new();
                     for w in pts.windows(2) {
@@ -1020,20 +1018,13 @@ pub fn import(src: &str) -> Result<Project, FcpxmlError> {
         }
         for r in res.children_named("asset") {
             let id = r.attr("id").unwrap_or("").to_string();
-            let src = r
-                .children_named("media-rep")
-                .find(|m| m.attr("kind") != Some("proxy-media"))
-                .and_then(|m| m.attr("src"))
-                .or_else(|| r.attr("src"))
-                .unwrap_or("");
+            let src = r.children_named("media-rep").find(|m| m.attr("kind") != Some("proxy-media")).and_then(|m| m.attr("src")).or_else(|| r.attr("src")).unwrap_or("");
             let proxy = r.children_named("media-rep").find(|m| m.attr("kind") == Some("proxy-media")).and_then(|m| m.attr("src"));
             let duration = attr_time(r, "duration").unwrap_or_default();
             let mut a = MediaAsset::new(r.attr("name").unwrap_or("Media"), url_to_path(src), duration);
             a.proxy_path = proxy.map(url_to_path);
-            let md: HashMap<String, String> = r
-                .child("metadata")
-                .map(|m| m.children_named("md").filter_map(|e| Some((e.attr("key")?.to_string(), e.attr("value")?.to_string()))).collect())
-                .unwrap_or_default();
+            let md: HashMap<String, String> =
+                r.child("metadata").map(|m| m.children_named("md").filter_map(|e| Some((e.attr("key")?.to_string(), e.attr("value")?.to_string()))).collect()).unwrap_or_default();
             let mdv = |k: &str| md.get(k).cloned();
             a.kind = match mdv("com.rustcutpro.kind").as_deref() {
                 Some("audio") => AssetKind::Audio,

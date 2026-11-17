@@ -41,35 +41,30 @@ pub fn show(state: &mut AboutState, ctx: &egui::Context) {
         return;
     }
     let mut open = state.open;
-    egui::Window::new("About Rust Cut Pro")
-        .open(&mut open)
-        .default_size([720.0, 560.0])
-        .resizable(true)
-        .collapsible(false)
-        .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut state.tab, Tab::About, "About");
-                ui.selectable_value(&mut state.tab, Tab::Notices, "Licenses & Notices");
-                ui.selectable_value(&mut state.tab, Tab::Mit, "LICENSE-MIT");
-                ui.selectable_value(&mut state.tab, Tab::Apache, "LICENSE-APACHE");
-            });
-            ui.separator();
-            match state.tab {
-                Tab::About => about(ui, &mut state.ffmpeg_version),
-                Tab::Notices => {
-                    ui.horizontal(|ui| {
-                        ui.label("Filter");
-                        ui.add(egui::TextEdit::singleline(&mut state.filter).hint_text("crate name or text").desired_width(240.0));
-                        if !state.filter.is_empty() && ui.small_button("✕").clicked() {
-                            state.filter.clear();
-                        }
-                    });
-                    text_view(ui, NOTICES, &state.filter);
-                }
-                Tab::Mit => text_view(ui, LICENSE_MIT, ""),
-                Tab::Apache => text_view(ui, LICENSE_APACHE, ""),
-            }
+    egui::Window::new("About Rust Cut Pro").open(&mut open).default_size([720.0, 560.0]).resizable(true).collapsible(false).show(ctx, |ui| {
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut state.tab, Tab::About, "About");
+            ui.selectable_value(&mut state.tab, Tab::Notices, "Licenses & Notices");
+            ui.selectable_value(&mut state.tab, Tab::Mit, "LICENSE-MIT");
+            ui.selectable_value(&mut state.tab, Tab::Apache, "LICENSE-APACHE");
         });
+        ui.separator();
+        match state.tab {
+            Tab::About => about(ui, &mut state.ffmpeg_version),
+            Tab::Notices => {
+                ui.horizontal(|ui| {
+                    ui.label("Filter");
+                    ui.add(egui::TextEdit::singleline(&mut state.filter).hint_text("crate name or text").desired_width(240.0));
+                    if !state.filter.is_empty() && ui.small_button("✕").clicked() {
+                        state.filter.clear();
+                    }
+                });
+                text_view(ui, NOTICES, &state.filter);
+            }
+            Tab::Mit => text_view(ui, LICENSE_MIT, ""),
+            Tab::Apache => text_view(ui, LICENSE_APACHE, ""),
+        }
+    });
     state.open = open;
 }
 
@@ -84,9 +79,7 @@ fn about(ui: &mut egui::Ui, version_cache: &mut Option<Option<String>>) {
     if ffmpeg_cli::available() {
         let ff = ffmpeg_cli::ffmpeg_path();
         ui.label(format!("Using {}", ff.display()));
-        let version = version_cache.get_or_insert_with(|| {
-            ffmpeg_cli::run_capture(&ff, &["-hide_banner", "-version"]).and_then(|v| v.lines().next().map(str::to_string))
-        });
+        let version = version_cache.get_or_insert_with(|| ffmpeg_cli::run_capture(&ff, &["-hide_banner", "-version"]).and_then(|v| v.lines().next().map(str::to_string)));
         if let Some(v) = version {
             ui.label(egui::RichText::new(v.as_str()).small().color(theme::TEXT_DIM));
         }
@@ -94,11 +87,9 @@ fn about(ui: &mut egui::Ui, version_cache: &mut Option<Option<String>>) {
         ui.label("Not found — use the banner at the top of the window to install or locate it.");
     }
     ui.label(
-        egui::RichText::new(
-            "FFmpeg is not part of Rust Cut Pro; it runs as a separate program under its own license (GPL for the builds the editor downloads).",
-        )
-        .small()
-        .color(theme::TEXT_DIM),
+        egui::RichText::new("FFmpeg is not part of Rust Cut Pro; it runs as a separate program under its own license (GPL for the builds the editor downloads).")
+            .small()
+            .color(theme::TEXT_DIM),
     );
     let lic = ffmpeg_cli::managed_bin_dir().join("FFMPEG-LICENSE.txt");
     if lic.is_file() && ui.button("Show downloaded FFmpeg license").clicked() {
@@ -109,11 +100,7 @@ fn about(ui: &mut egui::Ui, version_cache: &mut Option<Option<String>>) {
 /// Monospace, virtualised view of a long text (the notices are ~11k lines).
 fn text_view(ui: &mut egui::Ui, text: &str, filter: &str) {
     let needle = filter.trim().to_lowercase();
-    let lines: Vec<&str> = if needle.is_empty() {
-        text.lines().collect()
-    } else {
-        text.lines().filter(|l| l.to_lowercase().contains(&needle)).collect()
-    };
+    let lines: Vec<&str> = if needle.is_empty() { text.lines().collect() } else { text.lines().filter(|l| l.to_lowercase().contains(&needle)).collect() };
     let row_h = ui.text_style_height(&egui::TextStyle::Monospace);
     egui::ScrollArea::both().auto_shrink([false, false]).show_rows(ui, row_h, lines.len(), |ui, range| {
         for line in &lines[range] {

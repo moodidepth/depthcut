@@ -154,7 +154,11 @@ pub fn peak_limit(samples: &mut [f32], channels: usize, rate: u32, ceiling: f32)
         .chunks_exact(ch)
         .map(|f| {
             let peak = f.iter().fold(0.0f32, |m, x| m.max(x.abs()));
-            if peak > ceiling { ceiling / peak } else { 1.0 }
+            if peak > ceiling {
+                ceiling / peak
+            } else {
+                1.0
+            }
         })
         .collect();
     if need.iter().all(|g| *g >= 1.0) {

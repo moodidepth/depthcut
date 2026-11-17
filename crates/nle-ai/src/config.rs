@@ -27,11 +27,7 @@ pub enum AiProviderKind {
 }
 
 impl AiProviderKind {
-    pub const ALL: [AiProviderKind; 3] = [
-        AiProviderKind::Gemini4,
-        AiProviderKind::OpenAiCompatible,
-        AiProviderKind::Ollama,
-    ];
+    pub const ALL: [AiProviderKind; 3] = [AiProviderKind::Gemini4, AiProviderKind::OpenAiCompatible, AiProviderKind::Ollama];
 
     pub fn label(self) -> &'static str {
         match self {

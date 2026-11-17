@@ -51,10 +51,7 @@ pub struct Autosaver {
 impl Autosaver {
     /// Autosave `project_name` into `dir`.
     pub fn new(dir: impl Into<PathBuf>, project_name: &str) -> Self {
-        let safe: String = project_name
-            .chars()
-            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
-            .collect();
+        let safe: String = project_name.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
         let path = dir.into().join(format!("{safe}.autosave.json"));
         Autosaver { path, interval: AUTOSAVE_INTERVAL, last_save: None, last_hash: None }
     }

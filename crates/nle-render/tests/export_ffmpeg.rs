@@ -52,11 +52,7 @@ fn export_every_working_encoder() {
     project.timeline.append(c0).unwrap();
     project.timeline.append(Clip::from_asset_range(&b, Time::ZERO, Time::from_millis(1500))).unwrap();
 
-    let audio: HashMap<_, _> = project
-        .assets
-        .iter()
-        .filter_map(|x| nle_media::audio::decode::decode_audio(x).ok().map(|buf| (x.id, std::sync::Arc::new(buf))))
-        .collect();
+    let audio: HashMap<_, _> = project.assets.iter().filter_map(|x| nle_media::audio::decode::decode_audio(x).ok().map(|buf| (x.id, std::sync::Arc::new(buf)))).collect();
     assert_eq!(audio.len(), 2, "audio decoded for both clips");
 
     // Only encoders that passed the hardware probe: each one must then

@@ -14,8 +14,7 @@ pub mod tools;
 pub use config::{AiConfig, AiProviderKind, ThinkingLevel, DEFAULT_GEMINI_MODEL};
 pub use multimodal::{build_timeline_json, encode_proxy_480p15, upload_gemini_file};
 pub use providers::{
-    build_gemini_request_body, parse_gemini_response, parse_ollama_response, parse_openai_response, run_copilot_blocking, ChatMessage, CopilotError,
-    CopilotResponse,
+    build_gemini_request_body, parse_gemini_response, parse_ollama_response, parse_openai_response, run_copilot_blocking, ChatMessage, CopilotError, CopilotResponse,
 };
 pub use tools::{apply_copilot_actions, execute_tool_call, offline_copilot_plan, ActionOutcome, CopilotToolCall, QUICK_PROMPTS};
 
@@ -64,11 +63,7 @@ mod tests {
         assert_eq!(snapshot["clips"].as_array().unwrap().len(), 1);
         assert_eq!(snapshot["markers"][0]["kind"], "Kill");
 
-        let cfg = AiConfig {
-            gemini_model: DEFAULT_GEMINI_MODEL.into(),
-            thinking_level: ThinkingLevel::High,
-            ..Default::default()
-        };
+        let cfg = AiConfig { gemini_model: DEFAULT_GEMINI_MODEL.into(), thinking_level: ThinkingLevel::High, ..Default::default() };
         let req = build_gemini_request_body(&cfg, "Apply flow sync", &snapshot, Some("https://example.invalid/files/123"));
         assert_eq!(req["generationConfig"]["thinkingConfig"]["thinkingLevel"], "HIGH");
         assert_eq!(req["contents"][0]["parts"][0]["fileData"]["fileUri"], "https://example.invalid/files/123");
@@ -174,11 +169,7 @@ mod tests {
 
     #[test]
     fn unreachable_provider_returns_retryable_error_without_editing() {
-        let cfg = AiConfig {
-            provider: AiProviderKind::Ollama,
-            ollama_url: "http://127.0.0.1:9".into(),
-            ..Default::default()
-        };
+        let cfg = AiConfig { provider: AiProviderKind::Ollama, ollama_url: "http://127.0.0.1:9".into(), ..Default::default() };
         let mut tl = Timeline::default();
         let asset = MediaAsset::new("c.mp4", "/c.mp4", Time::from_secs(5));
         tl.append(Clip::from_asset(&asset)).unwrap();
@@ -207,30 +198,12 @@ mod tests {
 
         let calls = vec![
             CopilotToolCall::JumpToTimecode { time_secs: 3.0 },
-            CopilotToolCall::ApplyVelocityPreset {
-                clip_id: Some(id.0),
-                preset_name: "Valorant Flow Sync".into(),
-            },
-            CopilotToolCall::AddEffectPreset {
-                clip_id: Some(id.0),
-                preset_name: "Hard Kill Impact (S_Shake Decay)".into(),
-            },
-            CopilotToolCall::DropMarker {
-                time_secs: 4.5,
-                label: "Ace".into(),
-                kind: "kill".into(),
-            },
-            CopilotToolCall::AddTransition {
-                clip_id: Some(id.0),
-                transition_kind: "whip_pan".into(),
-                duration_frames: 8,
-            },
+            CopilotToolCall::ApplyVelocityPreset { clip_id: Some(id.0), preset_name: "Valorant Flow Sync".into() },
+            CopilotToolCall::AddEffectPreset { clip_id: Some(id.0), preset_name: "Hard Kill Impact (S_Shake Decay)".into() },
+            CopilotToolCall::DropMarker { time_secs: 4.5, label: "Ace".into(), kind: "kill".into() },
+            CopilotToolCall::AddTransition { clip_id: Some(id.0), transition_kind: "whip_pan".into(), duration_frames: 8 },
             CopilotToolCall::SyncToBeatMarkers { clip_ids: vec![id.0] },
-            CopilotToolCall::CutAndRipple {
-                clip_id: Some(id.0),
-                time_secs: 2.0,
-                trim_mode: "blade".into(),
-            },
+            CopilotToolCall::CutAndRipple { clip_id: Some(id.0), time_secs: 2.0, trim_mode: "blade".into() },
         ];
 
         for call in &calls {
