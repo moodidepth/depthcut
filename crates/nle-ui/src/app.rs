@@ -188,15 +188,30 @@ pub struct App {
     pub duck_env: Option<Arc<nle_media::audio::DuckEnvelope>>,
     pub duck_overlay: std::cell::RefCell<std::collections::HashMap<nle_core::ClipId, (nle_core::DuckingSettings, Arc<nle_media::audio::DuckCurve>)>>,
     pub gpu_label: String,
-    /// History revision when the project was loaded; autosave only runs once
-    /// the user has actually changed something.
-    base_revision: u64,
+    /// History state when the project was loaded or last saved; autosave and
+    /// the "Save changes?" prompt only kick in once the project differs from it.
+    saved_state: u64,
     pub assets_changed: bool,
+    /// A project switch (or quit) waiting on the "Save changes?" answer.
+    pending_switch: Option<ProjectSwitch>,
+    /// Quit was confirmed; let the next close request through.
+    allow_close: bool,
     #[cfg(windows)]
     ctrl_v_was_down: bool,
 }
 
 static COALESCE: AtomicU64 = AtomicU64::new(1);
+
+/// Something that replaces the open project (or closes the app).
+#[derive(Clone, Debug)]
+pub enum ProjectSwitch {
+    New,
+    Open,
+    Demo,
+    ImportFcpxml,
+    DroppedFcpxml(PathBuf),
+    Quit(egui::Context),
+}
 
 /// A fresh key for grouping several commands into one undo step.
 pub fn coalesce_key() -> u64 {
@@ -287,8 +302,10 @@ impl App {
             duck_env: None,
             duck_overlay: Default::default(),
             gpu_label,
-            base_revision: 0,
+            saved_state: 0,
             assets_changed: false,
+            pending_switch: None,
+            allow_close: false,
             #[cfg(windows)]
             ctrl_v_was_down: false,
         };
@@ -308,8 +325,7 @@ impl App {
         self.selection.clear();
         self.playhead = Time::ZERO;
         self.history.clear();
-        self.base_revision = self.history.revision();
-        self.assets_changed = false;
+        self.mark_saved();
         for a in self.project.assets.clone() {
             self.library.ensure(&a);
         }
@@ -327,9 +343,92 @@ impl App {
         self.after_project_loaded();
     }
 
-    /// True once the user changed the project since it was loaded.
+    /// True when the project differs from what was loaded or last saved.
     pub fn is_edited(&self) -> bool {
-        self.history.revision() != self.base_revision || self.assets_changed
+        self.history.state_id() != self.saved_state || self.assets_changed
+    }
+
+    /// The current state matches the file on disk (after load or save).
+    fn mark_saved(&mut self) {
+        self.saved_state = self.history.state_id();
+        self.assets_changed = false;
+    }
+
+    /// Run `switch` now, or first ask to save when there are unsaved changes.
+    pub fn request_switch(&mut self, switch: ProjectSwitch) {
+        if self.is_edited() {
+            self.pending_switch = Some(switch);
+        } else {
+            self.perform_switch(switch);
+        }
+    }
+
+    fn perform_switch(&mut self, switch: ProjectSwitch) {
+        match switch {
+            ProjectSwitch::New => self.new_project(),
+            ProjectSwitch::Open => self.open_dialog(),
+            ProjectSwitch::Demo => self.set_project(demo::demo_project(), None),
+            ProjectSwitch::ImportFcpxml => self.import_fcpxml(),
+            ProjectSwitch::DroppedFcpxml(path) => self.load_fcpxml_file(&path),
+            ProjectSwitch::Quit(ctx) => {
+                self.allow_close = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+    }
+
+    /// "Save changes?" modal shown before replacing an edited project.
+    fn save_changes_window(&mut self, ctx: &egui::Context) {
+        if self.pending_switch.is_none() {
+            return;
+        }
+        let mut choice = None;
+        let quitting = matches!(self.pending_switch, Some(ProjectSwitch::Quit(_)));
+        egui::Modal::new(egui::Id::new("save_changes")).show(ctx, |ui| {
+            ui.set_width(380.0);
+            ui.heading("Save changes?");
+            ui.label(format!(
+                "\u{201c}{}\u{201d} has unsaved changes. Save them before {}?",
+                self.project.name,
+                if quitting { "quitting" } else { "continuing" }
+            ));
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button(egui::RichText::new("Save").strong()).clicked() {
+                    choice = Some(0);
+                }
+                if ui.button("Don\u{2019}t Save").clicked() {
+                    choice = Some(1);
+                }
+                if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    choice = Some(2);
+                }
+            });
+        });
+        match choice {
+            Some(0) => {
+                self.save(false);
+                // the save dialog was cancelled or the write failed: stay put
+                if self.is_edited() {
+                    self.pending_switch = None;
+                    return;
+                }
+                if let Some(s) = self.pending_switch.take() {
+                    self.perform_switch(s);
+                }
+            }
+            Some(1) => {
+                if let Some(s) = self.pending_switch.take() {
+                    // the user threw these edits away: don't offer them back
+                    // as "recovered work" (Drop would autosave them on quit)
+                    self.mark_saved();
+                    self.autosaver.discard();
+                    self.perform_switch(s);
+                }
+            }
+            Some(_) => self.pending_switch = None,
+            None => {}
+        }
     }
 
     pub fn status(&mut self, msg: impl Into<String>) {
@@ -1338,6 +1437,10 @@ impl App {
         match self.project.save(&path) {
             Ok(()) => {
                 self.project_path = Some(path.clone());
+                self.mark_saved();
+                // the saved file now holds this work; a stale autosave would
+                // otherwise be offered as "recovery" on the next launch
+                self.autosaver.discard();
                 self.status(format!("Saved {}", path.display()));
             }
             Err(e) => self.status(format!("Save failed: {e}")),
@@ -1346,6 +1449,10 @@ impl App {
 
     pub fn import_fcpxml(&mut self) {
         let Some(path) = rfd::FileDialog::new().add_filter("Final Cut Pro XML", &["fcpxml", "xml"]).pick_file() else { return };
+        self.load_fcpxml_file(&path);
+    }
+
+    fn load_fcpxml_file(&mut self, path: &std::path::Path) {
         let res = std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|s| nle_core::fcpxml::import(&s).map_err(|e| e.to_string()));
         match res {
             Ok(p) => {
@@ -1498,8 +1605,8 @@ impl App {
             Action::ZoomToFit => self.tl.fit_pending = true,
             Action::AutoCaptions => self.show_captions = !self.show_captions,
             Action::Import => self.import_dialog(),
-            Action::ImportFcpxml => self.import_fcpxml(),
-            Action::Open => self.open_dialog(),
+            Action::ImportFcpxml => self.request_switch(ProjectSwitch::ImportFcpxml),
+            Action::Open => self.request_switch(ProjectSwitch::Open),
             Action::Save => self.save(false),
             Action::SaveAs => self.save(true),
             Action::Export => self.export.open = true,
@@ -1599,12 +1706,12 @@ impl App {
             ui.add_space(8.0);
             ui.menu_button("File", |ui| {
                 if ui.button("New Project").clicked() {
-                    self.new_project();
                     ui.close_menu();
+                    self.request_switch(ProjectSwitch::New);
                 }
                 if ui.button(self.menu_label("Open Project…", Action::Open)).clicked() {
                     ui.close_menu();
-                    self.open_dialog();
+                    self.request_switch(ProjectSwitch::Open);
                 }
                 if ui.button(self.menu_label("Save", Action::Save)).clicked() {
                     ui.close_menu();
@@ -1621,7 +1728,7 @@ impl App {
                 }
                 if ui.button(self.menu_label("Import FCPXML…", Action::ImportFcpxml)).clicked() {
                     ui.close_menu();
-                    self.import_fcpxml();
+                    self.request_switch(ProjectSwitch::ImportFcpxml);
                 }
                 if ui.button("Export FCPXML…").clicked() {
                     ui.close_menu();
@@ -1634,8 +1741,8 @@ impl App {
                 }
                 ui.separator();
                 if ui.button("Load Demo Project").clicked() {
-                    self.set_project(demo::demo_project(), None);
                     ui.close_menu();
+                    self.request_switch(ProjectSwitch::Demo);
                 }
             });
             ui.menu_button("Edit", |ui| {
@@ -1971,7 +2078,10 @@ impl App {
             Some(true) => {
                 if let Some((p, _)) = self.recovery.take() {
                     self.set_project(p, None);
-                    self.status("Recovered autosaved project");
+                    // recovered work exists only in the autosave: keep it
+                    // "unsaved" so autosave, the save prompt and Drop protect it
+                    self.assets_changed = true;
+                    self.status("Recovered autosaved project \u{2014} save it to keep it");
                 }
             }
             Some(false) => {
@@ -1989,10 +2099,7 @@ impl App {
         }
         let (xml, media): (Vec<_>, Vec<_>) = files.into_iter().partition(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("fcpxml")));
         if let Some(x) = xml.first() {
-            match std::fs::read_to_string(x).map_err(|e| e.to_string()).and_then(|s| nle_core::fcpxml::import(&s).map_err(|e| e.to_string())) {
-                Ok(p) => self.set_project(p, None),
-                Err(e) => self.status(format!("FCPXML import failed: {e}")),
-            }
+            self.request_switch(ProjectSwitch::DroppedFcpxml(x.clone()));
         }
         if !media.is_empty() {
             self.library.import(media);
@@ -2179,6 +2286,12 @@ impl eframe::App for App {
         self.marker_edit_window(ctx);
         self.recovery_window(ctx);
         self.crash_notice(ctx);
+        // closing the window with unsaved changes asks first
+        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_close && self.is_edited() && self.recovery.is_none() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.pending_switch = Some(ProjectSwitch::Quit(ctx.clone()));
+        }
+        self.save_changes_window(ctx);
 
         // A minimised window has a 0×0 surface: skip GPU preview work until
         // it is restored (transport, audio and autosave keep running).

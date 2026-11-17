@@ -98,9 +98,28 @@ impl Command {
         }
     }
 
+    /// Whether this command can move clips (and so the speech under captions).
+    fn moves_media(&self) -> bool {
+        // a Batch re-anchors around each of its sub-commands instead
+        !matches!(self, Command::SetCaptions { .. } | Command::SetMarkers { .. } | Command::Batch { .. })
+    }
+
     /// Apply to `tl`. On error the timeline may be partially modified; the
     /// [`History`] restores the snapshot in that case.
+    ///
+    /// Captions follow the speech they transcribe through every edit
+    /// (see [`crate::caption_follow`]).
     pub fn apply(&self, tl: &mut Timeline) -> EditResult<()> {
+        if !self.moves_media() || tl.captions.segments.is_empty() {
+            return self.apply_inner(tl);
+        }
+        let anchors = crate::caption_follow::anchor_captions(tl);
+        self.apply_inner(tl)?;
+        crate::caption_follow::follow_edit(tl, &anchors);
+        Ok(())
+    }
+
+    fn apply_inner(&self, tl: &mut Timeline) -> EditResult<()> {
         match self {
             Command::Append { clip } => tl.append(clip.clone()).map(drop),
             Command::Insert { at, clip } => tl.insert(*at, clip.clone()).map(drop),
@@ -242,6 +261,8 @@ pub struct AppliedCommand {
     pub before: Timeline,
     pub after: Timeline,
     coalesce_key: Option<u64>,
+    /// Identifies the `after` state (see [`History::state_id`]).
+    state: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -249,8 +270,12 @@ pub struct History {
     undo: Vec<AppliedCommand>,
     redo: Vec<AppliedCommand>,
     limit: usize,
-    /// Monotonic counter bumped on every change (for "dirty" tracking).
+    /// Monotonic counter bumped on every change (cache invalidation).
     revision: u64,
+    /// Source of fresh state ids.
+    next_state: u64,
+    /// State id of the timeline below the oldest undo entry.
+    floor_state: u64,
 }
 
 impl Default for History {
@@ -261,7 +286,19 @@ impl Default for History {
 
 impl History {
     pub fn new(limit: usize) -> Self {
-        History { undo: Vec::new(), redo: Vec::new(), limit: limit.max(1), revision: 0 }
+        History { undo: Vec::new(), redo: Vec::new(), limit: limit.max(1), revision: 0, next_state: 1, floor_state: 0 }
+    }
+
+    fn fresh_state(&mut self) -> u64 {
+        self.next_state += 1;
+        self.next_state
+    }
+
+    /// Identifies the current timeline state: undoing back to a state gives
+    /// the same id again, so comparing against the id stored at save time
+    /// tells whether the project differs from what is on disk.
+    pub fn state_id(&self) -> u64 {
+        self.undo.last().map(|e| e.state).unwrap_or(self.floor_state)
     }
 
     pub fn revision(&self) -> u64 {
@@ -305,12 +342,16 @@ impl History {
             if top.coalesce_key == Some(k) {
                 top.after = tl.clone();
                 top.command = cmd;
+                self.next_state += 1;
+                top.state = self.next_state;
                 return Ok(());
             }
         }
-        self.undo.push(AppliedCommand { command: cmd, before, after: tl.clone(), coalesce_key: key });
+        let state = self.fresh_state();
+        self.undo.push(AppliedCommand { command: cmd, before, after: tl.clone(), coalesce_key: key, state });
         if self.undo.len() > self.limit {
             let excess = self.undo.len() - self.limit;
+            self.floor_state = self.undo[excess - 1].state;
             self.undo.drain(..excess);
         }
         Ok(())
@@ -352,6 +393,7 @@ impl History {
         self.undo.clear();
         self.redo.clear();
         self.revision += 1;
+        self.floor_state = self.fresh_state();
     }
 }
 

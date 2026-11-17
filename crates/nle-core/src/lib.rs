@@ -20,6 +20,7 @@
 pub mod asset;
 pub mod audio_polish;
 pub mod autosave;
+pub mod caption_follow;
 pub mod captions;
 pub mod clip;
 pub mod command;

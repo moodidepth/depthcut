@@ -442,12 +442,21 @@ impl Timeline {
         let min = self.frame();
         let c = self.top_clip_mut(id)?;
         let mut new_d = (c.duration + delta).max(min);
+        let bounded = !matches!(c.kind, ClipKind::Gap | ClipKind::Title(_) | ClipKind::Adjustment);
+        let (source_in, media) = (c.source_in, c.media_duration);
         if let Some(r) = &mut c.retime {
             if new_d < r.timeline_duration() {
                 let (l, _) = r.split_at(new_d);
                 *r = l;
-            } else if let Some(last) = r.segments.last_mut() {
-                last.duration += new_d - (c.duration);
+            } else if !r.segments.is_empty() {
+                let mut extra = new_d - c.duration;
+                if bounded {
+                    // cannot play past either end of the media
+                    extra = retime_tail_limit(r, source_in, media, extra);
+                }
+                if let Some(last) = r.segments.last_mut() {
+                    last.duration += extra;
+                }
             }
             new_d = r.timeline_duration();
         } else if let Some(md) = c.media_duration {
@@ -521,14 +530,22 @@ impl Timeline {
 
     /// Ripple-trim the start of a clip: positive `delta` removes media from
     /// the head, negative reveals more. Downstream clips ripple.
+    ///
+    /// On a connected clip (B-roll, titles, music) the end stays put and the
+    /// start moves; storyline clips keep their start and ripple everything after.
     pub fn trim_start(&mut self, id: ClipId, delta: Time) -> EditResult<Time> {
         let min = self.frame();
+        let connected = matches!(self.locate(id), Some(ClipLoc::Connected { .. }));
         let c = self.top_clip_mut(id)?;
         let unbounded = matches!(c.kind, ClipKind::Gap | ClipKind::Title(_) | ClipKind::Adjustment);
         let mut d = delta.min(c.duration - min);
-        if c.retime.is_none() && !unbounded {
-            // cannot reveal media before the start of the source
-            d = d.max(-c.source_in);
+        if !unbounded && d.is_negative() {
+            // cannot reveal media before the start (or, reversed, past the end) of the source
+            d = match &c.retime {
+                None => d.max(-c.source_in),
+                Some(r) if !r.segments.is_empty() => -retime_head_limit(r, c.source_in, c.media_duration, -d),
+                Some(_) => d,
+            };
         }
         if d.is_zero() {
             return Ok(Time::ZERO);
@@ -538,9 +555,14 @@ impl Timeline {
                 let (_, right) = r.split_at(d);
                 *r = right;
             }
+            Some(r) if r.segments.is_empty() => {}
             Some(r) => {
                 let extra = -d;
-                let s0 = r.segments[0].speed;
+                let s0 = retime_head_speed(r);
+                if let Some(curve) = r.velocity_curve.as_mut().filter(|cv| !cv.is_empty()) {
+                    // keep the existing frames on the same source times
+                    curve.shift(extra);
+                }
                 r.segments[0].duration += extra;
                 r.segments[0].ramp = Time::ZERO;
                 r.segments[0].ramp_offset = Time::ZERO;
@@ -557,6 +579,9 @@ impl Timeline {
         c.for_each_param_mut(|p| p.shift(-d));
         for cc in &mut c.connected {
             cc.offset -= d;
+        }
+        if connected {
+            c.offset += d;
         }
         Ok(d)
     }
@@ -913,4 +938,65 @@ fn find_in_mut(clips: &mut [Clip], id: ClipId) -> Option<&mut Clip> {
         }
     }
     None
+}
+
+/// Source speed used when a retimed clip's head is extended (the speed the
+/// new head frames play at).
+fn retime_head_speed(r: &crate::speed::Retime) -> f64 {
+    if r.has_velocity_curve() {
+        r.speed_at_secs(0.0)
+    } else {
+        r.segments.first().map_or(1.0, |s| s.speed)
+    }
+}
+
+/// Largest head extension (at most `want`) of a retimed clip that keeps its
+/// first frame inside the media: not before source 0 and, when the media
+/// length is known, not past its end (reverse playback).
+fn retime_head_limit(r: &crate::speed::Retime, source_in: Time, media: Option<Time>, want: Time) -> Time {
+    let speed = retime_head_speed(r);
+    let head = (source_in + r.start_offset).as_secs_f64();
+    let room = if speed > 0.0 {
+        head / speed
+    } else if speed < 0.0 {
+        match media {
+            Some(md) => (md.as_secs_f64() - head) / -speed,
+            None => return want,
+        }
+    } else {
+        return want; // freeze frame: the head shows the same frame
+    };
+    want.min(Time::from_secs_f64(room.max(0.0)))
+}
+
+/// Largest tail extension (at most `want`) of a retimed clip that keeps its
+/// last frame inside the media (`0 ..= media length`). Found by bisection on
+/// the real mapping, so ramps and velocity curves are handled exactly.
+fn retime_tail_limit(r: &crate::speed::Retime, source_in: Time, media: Option<Time>, want: Time) -> Time {
+    const EPS: f64 = 1e-6;
+    let fits = |extra: Time| {
+        let total = (r.timeline_duration() + extra).as_secs_f64();
+        let mut probe = r.clone();
+        if let Some(last) = probe.segments.last_mut() {
+            last.duration += extra;
+        }
+        let end = source_in.as_secs_f64() + probe.map_secs(total);
+        end >= -EPS && media.is_none_or(|md| end <= md.as_secs_f64() + EPS)
+    };
+    if want <= Time::ZERO || fits(want) {
+        return want.max(Time::ZERO);
+    }
+    if !fits(Time::ZERO) {
+        return Time::ZERO;
+    }
+    let (mut lo, mut hi) = (0_i64, want.0);
+    while hi - lo > 1 {
+        let mid = lo + (hi - lo) / 2;
+        if fits(Time(mid)) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    Time(lo)
 }

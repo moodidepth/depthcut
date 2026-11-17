@@ -761,3 +761,89 @@ fn ripple_trim_q_w_and_sync_clips_to_beats() {
     assert!(synced >= 1);
     assert_eq!(tl.clip(c1).unwrap().duration, Time::from_millis(2500));
 }
+
+// ----- regressions from the 2026-11-17 bug hunt ------------------------------
+
+fn slow_or_fast_clip(asset: &MediaAsset, dur: i64, speed: f64) -> Clip {
+    let mut c = Clip::from_asset(asset);
+    c.duration = Time::from_secs(dur);
+    c.retime = Some(Retime {
+        segments: vec![RetimeSegment::new(Time::from_secs(dur), speed)],
+        start_offset: Time::ZERO,
+        lead_speed: None,
+        blend: FrameBlendMode::FrameBlend,
+        velocity_curve: None,
+    });
+    c
+}
+
+#[test]
+fn retimed_head_trim_cannot_reveal_media_before_source_start() {
+    let a = MediaAsset::new("a", "/m/a.mp4", Time::from_secs(10));
+    let mut tl = Timeline::default();
+    let id = tl.append(slow_or_fast_clip(&a, 4, 0.5)).unwrap();
+    tl.trim_start(id, -Time::from_secs(2)).unwrap();
+    let c = tl.clip(id).unwrap();
+    let src0 = c.source_in.as_secs_f64() + c.retime.as_ref().unwrap().map_secs(0.0);
+    assert!(src0 >= -1e-6, "head trim revealed source before 0: {src0}s");
+}
+
+#[test]
+fn retimed_tail_trim_stops_at_media_end() {
+    let a = MediaAsset::new("a", "/m/a.mp4", Time::from_secs(10));
+    let mut tl = Timeline::default();
+    let id = tl.append(slow_or_fast_clip(&a, 4, 2.0)).unwrap();
+    tl.trim_end(id, Time::from_secs(20)).unwrap();
+    let c = tl.clip(id).unwrap();
+    let src_end = c.source_in.as_secs_f64() + c.retime.as_ref().unwrap().map_secs(c.duration.as_secs_f64());
+    assert!(src_end <= 10.0 + 1e-3, "tail trim ran past media end: {src_end}s of 10s");
+    assert!(src_end > 9.9, "tail trim should reach the media end, got {src_end}s");
+}
+
+#[test]
+fn undoing_back_to_saved_state_is_clean() {
+    let a = MediaAsset::new("a", "/m/a.mp4", Time::from_secs(10));
+    let mut tl = Timeline::default();
+    tl.append(Clip::from_asset(&a)).unwrap();
+    let mut h = History::new(10);
+    let saved = h.state_id();
+    h.execute(&mut tl, Command::Blade { at: Time::from_secs(3) }).unwrap();
+    assert_ne!(h.state_id(), saved);
+    h.undo(&mut tl);
+    assert_eq!(h.state_id(), saved, "undo back to the saved state");
+    h.redo(&mut tl);
+    assert_ne!(h.state_id(), saved);
+    // a different edit from the saved state is not "clean"
+    h.undo(&mut tl);
+    h.execute(&mut tl, Command::Blade { at: Time::from_secs(5) }).unwrap();
+    assert_ne!(h.state_id(), saved);
+}
+
+#[test]
+fn connected_clip_left_edge_trim_keeps_its_end() {
+    let a = MediaAsset::new("a", "/m/a.mp4", Time::from_secs(20));
+    let mut tl = Timeline::default();
+    tl.append(Clip::from_asset(&a)).unwrap();
+    let mut b = Clip::from_asset(&a);
+    b.duration = Time::from_secs(5);
+    let id = tl.connect(b, Time::from_secs(2), 1).unwrap();
+    let end_before = tl.clip_start(id).unwrap() + tl.clip(id).unwrap().duration;
+    tl.trim_start(id, Time::from_secs(1)).unwrap();
+    let start = tl.clip_start(id).unwrap();
+    assert_eq!(start, Time::from_secs(3));
+    assert_eq!(start + tl.clip(id).unwrap().duration, end_before);
+}
+
+#[test]
+fn captions_follow_ripple_delete() {
+    let a = MediaAsset::new("a", "/m/a.mp4", Time::from_secs(10));
+    let mut tl = Timeline::default();
+    let first = tl.append(Clip::from_asset(&a)).unwrap();
+    tl.append(Clip::from_asset(&a)).unwrap();
+    tl.captions.segments.push(CaptionSegment::new(Time::from_secs(12), Time::from_secs(13), "hello"));
+    let mut h = History::new(10);
+    h.execute(&mut tl, Command::DeleteRipple { id: first }).unwrap();
+    assert_eq!(tl.captions.segments[0].start, Time::from_secs(2));
+    h.undo(&mut tl);
+    assert_eq!(tl.captions.segments[0].start, Time::from_secs(12), "undo restores caption timing");
+}
