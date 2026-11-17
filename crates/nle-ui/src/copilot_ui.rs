@@ -6,7 +6,7 @@ use crate::app::App;
 use crate::theme;
 use eframe::egui::{self, Color32, CornerRadius, Stroke};
 use nle_ai::connection::{ConnectionReport, ModelInfo};
-use nle_ai::{AiConfig, AiProviderKind, ChatMessage, CopilotError, CopilotResponse, ThinkingLevel, GEMINI_4_MODELS, QUICK_PROMPTS};
+use nle_ai::{AiConfig, AiProviderKind, ChatMessage, CopilotError, CopilotResponse, ThinkingLevel, DEFAULT_GEMINI_MODEL, QUICK_PROMPTS};
 use nle_core::ClipKind;
 use nle_media::jobs::Job;
 use std::time::Duration;
@@ -114,14 +114,21 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                                         .selected_text(&cfg.gemini_model)
                                         .width(170.0)
                                         .show_ui(ui, |ui| {
-                                            for (id, desc) in GEMINI_4_MODELS {
-                                                ui.selectable_value(&mut cfg.gemini_model, id.to_string(), desc);
+                                            // the saved choice and the default stay pickable even before the live list loads
+                                            let mut pinned = vec![cfg.gemini_model.clone()];
+                                            if cfg.gemini_model != DEFAULT_GEMINI_MODEL {
+                                                pinned.push(DEFAULT_GEMINI_MODEL.to_string());
                                             }
-                                            let extra: Vec<_> = live_models.iter().filter(|m| !GEMINI_4_MODELS.iter().any(|(id, _)| *id == m.id)).collect();
-                                            if !extra.is_empty() {
+                                            for id in pinned.iter().filter(|id| !live_models.iter().any(|m| &m.id == *id)) {
+                                                let hint = if id == DEFAULT_GEMINI_MODEL { "default" } else { "saved choice" };
+                                                ui.selectable_value(&mut cfg.gemini_model, id.clone(), format!("{id} ({hint})"));
+                                            }
+                                            if live_models.is_empty() {
+                                                ui.label(egui::RichText::new("Press ⟳ to list the models your key can use").small().color(theme::TEXT_DIM));
+                                            } else {
                                                 ui.separator();
                                                 ui.label(egui::RichText::new("Available to your key").small().color(theme::TEXT_DIM));
-                                                for m in extra {
+                                                for m in live_models.iter() {
                                                     ui.selectable_value(&mut cfg.gemini_model, m.id.clone(), &m.id).on_hover_text(&m.display_name);
                                                 }
                                             }

@@ -1,7 +1,7 @@
 //! Argon Cloud & Local AI Video Editing Copilot (`nle-ai`).
 //!
-//! Supports Google Gemini 4 (`gemini-4-hydrogen`, `gemini-4-argon`, `gemini-4-carbon`)
-//! with configurable `thinkingLevel` (`LOW` / `MEDIUM` / `HIGH`) and 480p/15fps
+//! Supports Google Gemini (default `gemini-4-argon`; the model picker is filled
+//! from the key's live model list) with configurable `thinkingLevel` (`LOW` / `MEDIUM` / `HIGH`) and 480p/15fps
 //! proxy upload via Gemini File API, OpenAI/OpenRouter Chat Completions, Local
 //! Ollama, structured undoable timeline tools, and an offline deterministic fallback.
 
@@ -11,7 +11,7 @@ pub mod multimodal;
 pub mod providers;
 pub mod tools;
 
-pub use config::{AiConfig, AiProviderKind, ThinkingLevel, GEMINI_4_MODELS};
+pub use config::{AiConfig, AiProviderKind, ThinkingLevel, DEFAULT_GEMINI_MODEL};
 pub use multimodal::{build_timeline_json, encode_proxy_480p15, upload_gemini_file};
 pub use providers::{
     build_gemini_request_body, parse_gemini_response, parse_ollama_response, parse_openai_response, run_copilot_blocking, ChatMessage, CopilotError,
@@ -32,7 +32,7 @@ mod tests {
         let cfg = AiConfig {
             provider: AiProviderKind::Gemini4,
             gemini_api_key: "test-key-123".into(),
-            gemini_model: "gemini-4-carbon".into(),
+            gemini_model: "gemini-flash-latest".into(),
             thinking_level: ThinkingLevel::High,
             attach_video_proxy: true,
             ..Default::default()
@@ -41,9 +41,9 @@ mod tests {
         let loaded = AiConfig::load_from_path(&path);
         assert_eq!(loaded, cfg);
         assert_eq!(loaded.thinking_level.as_gemini_str(), "HIGH");
-        assert_eq!(GEMINI_4_MODELS[0].0, "gemini-4-hydrogen");
-        assert_eq!(GEMINI_4_MODELS[1].0, "gemini-4-argon");
-        assert_eq!(GEMINI_4_MODELS[2].0, "gemini-4-carbon");
+        assert_eq!(loaded.gemini_model, "gemini-flash-latest");
+        assert_eq!(AiConfig::default().gemini_model, DEFAULT_GEMINI_MODEL);
+        assert_eq!(DEFAULT_GEMINI_MODEL, "gemini-4-argon");
         // the key went to the (test-only) credential store, not the file
         let text = std::fs::read_to_string(&path).unwrap();
         assert_eq!(text.contains("test-key-123"), !crate::config::secrets::SECURE);
@@ -65,7 +65,7 @@ mod tests {
         assert_eq!(snapshot["markers"][0]["kind"], "Kill");
 
         let cfg = AiConfig {
-            gemini_model: "gemini-4-argon".into(),
+            gemini_model: DEFAULT_GEMINI_MODEL.into(),
             thinking_level: ThinkingLevel::High,
             ..Default::default()
         };

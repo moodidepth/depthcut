@@ -12,11 +12,10 @@ pub const KEYRING_SERVICE: &str = "RustCutPro";
 /// Model tried when the chosen Gemini model is overloaded (HTTP 503/429).
 pub const DEFAULT_GEMINI_FALLBACK: &str = "gemini-flash-latest";
 
-pub const GEMINI_4_MODELS: [(&str, &str); 3] = [
-    ("gemini-4-hydrogen", "Gemini 4 Hydrogen — Ultra-fast & low latency"),
-    ("gemini-4-argon", "Gemini 4 Argon — Balanced multimodal flagship"),
-    ("gemini-4-carbon", "Gemini 4 Carbon — Deepest reasoning & complex edits"),
-];
+/// Gemini model used until the user picks another one. Which models a key can
+/// actually call comes from the live list (`connection::list_gemini_models`),
+/// not from a hardcoded catalogue.
+pub const DEFAULT_GEMINI_MODEL: &str = "gemini-4-argon";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -101,7 +100,7 @@ impl Default for AiConfig {
         Self {
             provider: AiProviderKind::Gemini4,
             gemini_api_key: String::new(),
-            gemini_model: "gemini-4-argon".to_string(),
+            gemini_model: DEFAULT_GEMINI_MODEL.to_string(),
             gemini_custom_model: String::new(),
             gemini_fallback_model: DEFAULT_GEMINI_FALLBACK.to_string(),
             thinking_level: ThinkingLevel::Medium,
@@ -190,7 +189,7 @@ impl AiConfig {
             Err(_) => AiConfig::default(),
         };
         if cfg.gemini_model.trim().is_empty() {
-            cfg.gemini_model = "gemini-4-argon".to_string();
+            cfg.gemini_model = DEFAULT_GEMINI_MODEL.to_string();
         }
         if secrets::SECURE {
             cfg.migrate_plaintext_keys(path, service);
@@ -315,7 +314,7 @@ mod tests {
     #[test]
     fn custom_model_overrides_picker_and_fallback_skips_same_model() {
         let mut c = AiConfig::default();
-        assert_eq!(c.effective_gemini_model(), "gemini-4-argon");
+        assert_eq!(c.effective_gemini_model(), DEFAULT_GEMINI_MODEL);
         assert_eq!(c.gemini_fallback().as_deref(), Some(DEFAULT_GEMINI_FALLBACK));
         c.gemini_custom_model = " models/gemini-flash-latest ".into();
         assert_eq!(c.effective_gemini_model(), "gemini-flash-latest");
