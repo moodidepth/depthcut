@@ -21,7 +21,7 @@ use nle_media::jobs::Job;
 use nle_media::FrameServer;
 use nle_render::{FrameKey, FrameSource, GpuContext, RenderOptions, Renderer};
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -1422,12 +1422,20 @@ impl App {
 
     pub fn open_dialog(&mut self) {
         if let Some(path) = rfd::FileDialog::new().add_filter("Rust Cut Pro project", &["rcp", "json"]).pick_file() {
-            match Project::load(&path) {
-                Ok(p) => {
-                    self.set_project(p, Some(path.clone()));
-                    self.status(format!("Opened {}", path.display()));
-                }
-                Err(e) => self.status(format!("Open failed: {e}")),
+            self.open_path(&path);
+        }
+    }
+
+    /// Open a project file (File > Open, or a `.rcp` passed on the command line).
+    pub fn open_path(&mut self, path: &Path) {
+        match Project::load(path) {
+            Ok(p) => {
+                self.set_project(p, Some(path.to_path_buf()));
+                self.status(format!("Opened {}", path.display()));
+            }
+            Err(e) => {
+                log::error!("open {}: {e}", path.display());
+                self.status(format!("Open failed: {e}"));
             }
         }
     }

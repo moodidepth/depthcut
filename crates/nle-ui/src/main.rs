@@ -84,7 +84,18 @@ fn main() -> eframe::Result<()> {
         },
         ..Default::default()
     };
-    let result = eframe::run_native("Rust Cut Pro", options, Box::new(|cc| Ok(Box::new(app::App::new(cc)))));
+    let result = eframe::run_native(
+        "Rust Cut Pro",
+        options,
+        Box::new(|cc| {
+            let mut app = app::App::new(cc);
+            // "Open with" / double-clicked .rcp file
+            if let Some(path) = std::env::args_os().nth(1).map(std::path::PathBuf::from).filter(|p| p.is_file()) {
+                app.open_path(&path);
+            }
+            Ok(Box::new(app))
+        }),
+    );
     if let Err(e) = &result {
         log::error!("UI failed to start: {e}");
     }

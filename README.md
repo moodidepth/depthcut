@@ -1,16 +1,208 @@
 # Rust Cut Pro
 
-A clean-room, Final Cut Pro-style non-linear video editor written in Rust.
-It is tuned for an **AMD Ryzen 7 5800X** (8 cores / 16 threads) with an
-**Intel Arc A750** (8 GB VRAM), on Linux (Vulkan + Quick Sync over VA-API
-`iHD`) and Windows (DX12 / Vulkan + Quick Sync over D3D11VA).
+A fast, GPU-accelerated video editor for gaming montages and short-form edits,
+written in Rust. It has a magnetic timeline in the style of Final Cut Pro, plus
+montage tools built for CS2 and Valorant clips: zoom punches, beat sync, kill
+scanning, 9:16 reframing, Whisper auto-captions and an optional AI Copilot.
 
-The editor starts with a built-in demo project (procedural colour bars and
-tone), so it works with no media files and without FFmpeg installed.
+> **Status: v0.1.0, early release.** Windows 10/11 x64 is the supported
+> platform. Linux builds from source but is experimental. macOS is not supported.
 
 ---
 
-## Workspace
+## Install (Windows)
+
+1. Download `RustCutPro-v0.1.0-win64-setup.exe` (installer) **or**
+   `RustCutPro-v0.1.0-win64-portable.zip` (unzip anywhere and run `rust-cut-pro.exe`).
+   You can check the download against `SHA256SUMS.txt`:
+   `Get-FileHash .\RustCutPro-v0.1.0-win64-portable.zip`
+2. **SmartScreen warning.** Builds are **not code-signed yet**, so Windows may say
+   *"Windows protected your PC"*. Click **More info → Run anyway**. If you'd rather
+   not, build from source (see [Build & run](#build--run)).
+3. **First launch: FFmpeg.** Rust Cut Pro uses FFmpeg to import, proxy and export
+   video, but does not ship it. If FFmpeg isn't found, a banner at the top offers:
+   - **Download FFmpeg Automatically**: fetches the gyan.dev "release essentials"
+     build (about 100 MB), checks its SHA-256 and puts it in
+     `%LOCALAPPDATA%\RustCutPro\bin`. That build is GPL-licensed; its license is
+     saved next to it.
+   - **Locate Existing ffmpeg.exe…**: use one you already have.
+   - Or install it yourself (`winget install Gyan.FFmpeg`) and restart.
+
+   Without FFmpeg the editor still opens and the demo project plays, but you
+   can't import real media or export.
+
+The installer adds a Start-menu shortcut, an optional desktop icon and an
+optional `.rcp` file association (double-click a project to open it), plus a
+normal uninstaller under *Settings → Apps*.
+
+### System requirements
+
+| | Minimum | Tested on |
+|---|---|---|
+| OS | Windows 10 1809+ or Windows 11, 64-bit | Windows 11 Pro |
+| GPU | DirectX 12 GPU **with a Vulkan 1.2 driver** (the exe needs `vulkan-1.dll`, which every current AMD / NVIDIA / Intel driver installs) | Intel Arc A750 8 GB |
+| CPU | 4 cores, x86-64 | Ryzen 7 5800X |
+| RAM | 8 GB (16 GB for 1440p/4K timelines or the large Whisper model) | 32 GB |
+| Disk | 200 MB for the app, plus about 100 MB for FFmpeg, 60 MB to 550 MB per Whisper model, and space for proxies | |
+
+Hardware video encode/decode (Quick Sync) is used on Intel GPUs. Other GPUs fall
+back to software encoding (`libx264`), which works but is slower.
+
+**If the app won't start:** update your graphics driver first (a missing
+`vulkan-1.dll` means no Vulkan driver is installed). The VC++ runtime DLLs are
+already included next to the exe.
+
+### Where your data lives
+
+| What | Where |
+|---|---|
+| Autosaves, logs, keybindings, proxies, Discord settings | `%APPDATA%\RustCutPro\` |
+| Whisper models, downloaded audio, downloaded FFmpeg (`bin\`) | `%LOCALAPPDATA%\RustCutPro\` |
+| AI Copilot settings | `%LOCALAPPDATA%\Argon\ai_config.toml` (no keys in it) |
+| AI API keys | **Windows Credential Manager** → *Windows Credentials* → entries starting `RustCutPro` |
+
+Uninstalling leaves these in place so a reinstall keeps your settings. To remove
+everything, delete those two `RustCutPro` folders and the `RustCutPro` entries in
+Credential Manager.
+
+**Logs.** *Help → Show Log File* opens the log folder. It holds this session's
+log and the previous session's. If the app crashed, the next launch notices
+and tells you where the log is. Please attach it to bug reports.
+
+---
+
+## Features
+
+- **Magnetic timeline.** Ripple editing, connected clips, compound clips, gaps,
+  adjustment clips, blade/trim/slip/slide, markers, snapping, skimming, and
+  unlimited undo with 30-second crash-safe autosave.
+- **Montage tools.**
+  - **Zoom Punch** (`Z`) and **Hard Zoom Punch** (`Shift+Z`) at the playhead.
+  - **16 built-in CS2 / Valorant presets**: RSMB-style motion blur, AWP/Operator
+    scope pulse, kill-impact shake, bullet-time ramps, flow sync, freeze-frame
+    outline and colour looks.
+  - Beat detection with **Sync to Beats** (`Alt+S`), **Scan VOD for kills /
+    action peaks** (`Shift+Alt+K`) and **Gaming 9:16 split-crop** (`Alt+9`).
+- **Keyframes everywhere.** Every continuous parameter has a keyframe diamond in
+  the inspector. Bézier easing; an animation lane (`Ctrl+V`) and a retime editor
+  (`Ctrl+R`) with speed ramps, reverse, hold frames, frame blending and optical
+  flow.
+- **GPU effects and colour.** 16 effects (blurs, glow, grain, chromatic
+  aberration, chroma key…), colour wheels, `.cube` LUTs, 7 transitions, titles.
+  Everything is rendered in WGSL compute shaders.
+- **Audio.** EQ, Vocal Clarity, −14 LUFS normalize, and **look-ahead
+  auto-ducking**: music ducks *before* the voice starts. Preview and export
+  sound identical.
+- **Auto Captions** (`Ctrl+Shift+C`). Offline Whisper speech-to-text with Vulkan
+  GPU acceleration, word-by-word highlight styles, and `.srt` import/export.
+- **AI Editor Copilot** (`Ctrl+Shift+A`). Optional. Ask for edit suggestions
+  using **Google Gemini**, **OpenAI** or a local **Ollama** model. Your key is
+  stored in Windows Credential Manager, not in a text file. Settings has
+  **Test Live Connection** and lists the Gemini models your key can use, with
+  an automatic fallback model when the main one is overloaded.
+- **Online audio & SFX.** Search Openverse and Internet Archive CC0/CC-BY audio
+  in the app, preview it, and insert it. Credits are written next to your export.
+- **Export.** AV1 / HEVC / H.264 via Quick Sync, or software x264.
+- **Discord Rich Presence** (optional, *Help → Discord Rich Presence…*). Shows
+  what you're editing; it does nothing if Discord isn't running. See
+  [docs/DISCORD.md](docs/DISCORD.md).
+- **Licenses.** *Help → Licenses & Notices…* shows every open-source license
+  used in the app.
+
+---
+
+## Keyboard shortcuts
+
+Every binding can be changed in *Help → Keyboard Shortcuts* (`Ctrl+,` / `F1`),
+including extra mouse buttons (`Middle`, `Back`, `Forward`). There are three
+presets: **Argon Montage** (the default, below), **Final Cut Pro** and
+**DaVinci Resolve**. Changes are saved to `%APPDATA%\RustCutPro\config\keybindings.toml`.
+
+| Keys | Action | Group |
+|---|---|---|
+| **Space** | Play / Pause | Playback |
+| **J** | Shuttle Reverse 1x/2x/4x (J) | Playback |
+| **K** | Pause / Hold for Frame Step (K) | Playback |
+| **L** | Shuttle Forward 1x/2x/4x (L) | Playback |
+| **←** | Previous Frame | Playback |
+| **→** | Next Frame | Playback |
+| **Shift+←** | Back 10 Frames | Playback |
+| **Shift+→** | Forward 10 Frames | Playback |
+| **↑** | Previous Edit Point | Playback |
+| **↓** | Next Edit Point | Playback |
+| **Home** | Go to Start | Playback |
+| **End** | Go to End | Playback |
+| **A** | Select Tool | Tools |
+| **T** | Trim Tool | Tools |
+| **Ctrl+Shift+B** | Blade Tool | Tools |
+| **R** | Range Tool | Tools |
+| **C / Ctrl+B / B** | Split Clip at Playhead | Edit |
+| **Shift+B** | Blade All at Playhead | Edit |
+| **Q** | Ripple Trim Start to Playhead (Q) | Edit |
+| **W** | Ripple Trim End to Playhead (W) | Edit |
+| **Shift+Delete / Shift+Backspace** | Ripple Delete | Edit |
+| **Delete / Backspace** | Lift Delete (Leave Gap) | Edit |
+| **Alt+G** | Insert Gap at Playhead | Edit |
+| **Ctrl+Z** | Undo | Edit |
+| **Ctrl+Shift+Z** | Redo | Edit |
+| **Ctrl+A** | Select All | Edit |
+| **Esc** | Clear Selection | Edit |
+| **V** | Enable / Disable Clip | Edit |
+| **Ctrl+T** | Add Cross Dissolve | Edit |
+| **Alt+A** | Add Adjustment Clip | Edit |
+| **Alt+C** | New Compound Clip | Edit |
+| **Shift+Alt+C** | Break Apart Clip Items | Edit |
+| **Shift+H** | Hold Frame | Edit |
+| **E** | Append Browser Clip | Edit |
+| **Alt+W** | Insert Browser Clip | Edit |
+| **Alt+Q** | Connect Browser Clip | Edit |
+| **D** | Overwrite with Browser Clip | Edit |
+| **Alt+K** | Add Keyframe | Animation |
+| **Ctrl+V** | Show Video Animation | Animation |
+| **Ctrl+R** | Show Retime Editor | Animation |
+| **M** | Add Marker | Markers |
+| **Alt+M** | Add Named / Colored Marker | Markers |
+| **Alt+B** | Analyze Beats | Markers |
+| **Shift+Alt+K** | Scan VOD for Kills / Action Peaks | Montage |
+| **Alt+S** | Sync Clips & Velocity to Beats | Montage |
+| **Alt+9** | Gaming 9:16 Split-Crop | Montage |
+| **Z** | Zoom Punch at Playhead | Montage |
+| **Shift+Z** | Hard Zoom Punch (hold) | Montage |
+| **Ctrl+Shift+A** | AI Editor Copilot | AI |
+| **S / N** | Snapping On/Off | View |
+| **Shift+S** | Skimming On/Off | View |
+| **Ctrl+= / Ctrl++** | Zoom In | View |
+| **Ctrl+-** | Zoom Out | View |
+| **Ctrl+0** | Zoom to Fit | View |
+| **Ctrl+Shift+C** | Auto Captions | Captions |
+| **Ctrl+I** | Import Media | File |
+| **Ctrl+Shift+I** | Import FCPXML | File |
+| **Ctrl+O** | Open Project | File |
+| **Ctrl+S** | Save | File |
+| **Ctrl+Shift+S** | Save As | File |
+| **Ctrl+E** | Export Movie | File |
+| **Ctrl+, / F1** | Keyboard Shortcuts | Help |
+
+Mouse:
+- Scroll pans the timeline. Ctrl+scroll zooms around the cursor.
+- Click the ruler to move the playhead; drag it to scrub.
+- Double-click a browser clip to append it.
+- Drag browser clips onto the storyline to insert them, or above/below it to connect them.
+- Right-click a clip for the clip menu (transitions, retime, compound, lift…).
+- Drag keyframe diamonds in the animation lane to retime them.
+- Double-click a colour wheel to reset it.
+
+> **Note on Ctrl+V:** egui's winit backend turns Ctrl+V into a *paste* event and drops the key. On Windows the editor reads the key state directly, so the shortcut always works. On Linux it relies on the paste event, so it only fires when the clipboard holds text. The same toggle is in the timeline toolbar (**Animation**) and in **View → Video Animation**.
+
+---
+
+## For developers
+
+Everything below covers building from source and how the code is laid out.
+The editor was tuned for an **AMD Ryzen 7 5800X** with an **Intel Arc A750**, on Windows
+(DX12/Vulkan + Quick Sync over D3D11VA) and Linux (Vulkan + Quick Sync over VA-API `iHD`).
+
+### Workspace
 
 ```
 rust-cut-pro/
@@ -22,7 +214,7 @@ rust-cut-pro/
 
 There are no circular dependencies: `nle-core` ← `nle-media` ← `nle-render` ← `nle-ui`.
 
-### nle-core
+#### nle-core
 
 | Module | What it does |
 |---|---|
@@ -37,7 +229,7 @@ There are no circular dependencies: `nle-core` ← `nle-media` ← `nle-render` 
 | `keymap` | Customizable keyboard & mouse (`Middle` / `Back` / `Forward`) bindings with `Final Cut Pro` and `DaVinci Resolve` presets and TOML persistence. |
 | `eval` | Resolves the timeline at a given instant into a render graph (layers, adjustment passes, effects, captions and transitions) plus audio spans. |
 
-### nle-media
+#### nle-media
 
 - **Hardware decode.** Planned per codec and bit depth, in this order: Quick Sync (`h264_qsv` / `hevc_qsv` / `av1_qsv`), then VA-API or D3D11VA, then software. On Linux the QSV child device is `vaapi=va:/dev/dri/renderD128,driver=iHD` → `qsv=hw@va`. On Windows it is `d3d11va=dx:,vendor_id=0x8086` → `qsv=hw@dx`. If any step fails, decoding falls back to software without interrupting the user.
 - **Decoders.** Two backends:
@@ -58,7 +250,7 @@ There are no circular dependencies: `nle-core` ← `nle-media` ← `nle-render` 
   - Royalty-free online search (Openverse & Internet Archive), streaming FFmpeg → `rtrb` → `cpal` URL preview (`AudioPreview`), streamed downloads with CC attribution tracking, and optional `yt-dlp` URL import.
 - **Media analysis.** Parallel filmstrip thumbnails, RMS/peak waveforms, integrated LUFS loudness, and a background proxy transcoder (QSV first).
 
-### nle-render
+#### nle-render
 
 All pixel work runs in WGSL compute shaders on the GPU:
 
@@ -72,7 +264,7 @@ All pixel work runs in WGSL compute shaders on the GPU:
 - NV12 packing for the encoders, with **export** via `av1_qsv`, `hevc_qsv`, `h264_qsv` and `h264_vaapi` (or software `libx264`). When timeline-used online media requires credit (`CC-BY`, etc.), `project_credits.txt` is written automatically beside the exported video.
 - Decoded frames stay in VRAM in an **LRU cache capped at 2,560 MB**.
 
-### nle-ui
+#### nle-ui
 
 The UI uses eframe/egui on the wgpu backend. The renderer shares eframe's wgpu
 device, so the viewer displays the rendered frame without any copies.
@@ -104,9 +296,9 @@ device, so the viewer displays the rendered frame without any copies.
 
 ---
 
-## System packages
+### System packages
 
-### Linux (Ubuntu 24.04 / Debian 13)
+#### Linux (Ubuntu 24.04 / Debian 13)
 
 ```bash
 # Rust
@@ -135,7 +327,7 @@ sudo apt install libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
 
 Check Quick Sync with `vainfo --display drm --device /dev/dri/renderD128`. It should list the `iHD` driver and the AV1/HEVC/H.264 profiles. Your user must be in the `render` and `video` groups.
 
-### Windows 10/11
+#### Windows 10/11
 
 - Rust via <https://rustup.rs> (MSVC toolchain, with Visual Studio Build Tools and the "Desktop development with C++" workload).
 - **Whisper + Vulkan build toolchain (default `whisper-vulkan` feature):** requires CMake (`cmake`), LLVM (`libclang` via `LIBCLANG_PATH`), and the **Vulkan SDK** (`VULKAN_SDK`). The repository includes [`.cargo/config.toml`](.cargo/config.toml) (setting default fallback paths with `force = false`) and [`Directory.Build.props`](Directory.Build.props) (redirecting MSBuild `.tlog` / marker files into `%TEMP%\rcp-tlog` so `whisper-rs-sys` Vulkan shader generation stays well within Windows' 260-character `MAX_PATH` limit). To build without Whisper, pass `--no-default-features` to `nle-ui`.
@@ -160,7 +352,7 @@ Without FFmpeg the editor still runs: the demo media and the GPU pipeline work, 
 
 ---
 
-## Build & run
+### Build & run
 
 ```bash
 cargo run --release -p nle-ui            # the editor (binary: rust-cut-pro)
@@ -176,74 +368,26 @@ Environment variables:
 | `RCP_WGPU_BACKEND=vulkan\|dx12\|gl` | Force a wgpu backend. The default is DX12 → Vulkan on Windows and Vulkan on Linux. |
 | `RCP_FFMPEG`, `RCP_FFPROBE` | Paths to the FFmpeg tools. |
 | `RUST_LOG=debug` | Verbose logging. |
+| `RCP_DATA_DIR` | Override `%LOCALAPPDATA%\RustCutPro` (where the downloaded FFmpeg goes). |
+| `RCP_DISCORD_APP_ID` | Discord application ID. At build time it bakes the ID into the exe; at run time it overrides it. |
 
-Autosaves go to `%APPDATA%\RustCutPro\autosave` on Windows and `~/.local/share/RustCutPro/autosave` on Linux (`config\keybindings.toml`, `models\`, `downloads\`, and `proxies\` live beside it under the same app data directory).
+Autosaves go to `%APPDATA%\RustCutPro\autosave` on Windows and `~/.local/share/RustCutPro/autosave` on Linux (`config\keybindings.toml`, `logs\` and `proxies\` live beside it). Whisper `models\`, `downloads\` and the downloaded FFmpeg `bin\` live under `%LOCALAPPDATA%\RustCutPro` (Linux: `~/.local/share/rust-cut-pro`).
 
----
+#### Release packaging (Windows)
 
-## Keyboard shortcuts
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\package_windows.ps1   # add -SkipBuild to reuse target\release
+```
 
-Shortcuts are customizable in **Help → Keyboard Shortcuts** (`Ctrl+,` / `F1`), supporting **Final Cut Pro** and **DaVinci Resolve** presets plus extra mouse buttons (`Mouse:Middle`, `Mouse:Back`, `Mouse:Forward`). Default **Final Cut Pro** bindings:
-
-| Key | Action |
-|---|---|
-| **Space** | Play / Pause |
-| **J / K / L** | Play reverse / Stop / Play forward. Press J or L again for 2×, 4×, 8×. |
-| **← / →** | Previous / next frame |
-| **Shift+← / →** | Back / forward 10 frames |
-| **↑ / ↓** | Previous / next edit point |
-| **Home / End** | Go to start / end |
-| **A** | Select tool: click to select, drag to move/reorder, drag edges to ripple trim |
-| **T** | Trim tool: edges ripple trim, the middle slips, Alt+middle slides |
-| **B** | Blade tool: click to cut. Shift+click blades every lane. |
-| **R** | Range selection tool |
-| **E / W / Q / D** | Append / Insert / Connect / Overwrite the browser selection |
-| **C / Ctrl+B** | Split the selected / hovered clip at the playhead |
-| **Q / W** | Ripple-trim the clip's start / end to the playhead |
-| **J / K / L** | Shuttle reverse / pause / forward (1× → 2× → 4×); hold **K** and tap **J**/**L** to step one frame |
-| **Ctrl+Shift+B** | Blade all at playhead |
-| **Delete / Backspace** | Lift delete — leaves a gap (or deletes the selected range) |
-| **Shift+Delete** | Ripple delete |
-| **Alt+G** | New compound clip from the selection |
-| **Shift+Alt+G** | Break apart clip items |
-| **Alt+A** | Add Adjustment Clip |
-| **V** | Enable / disable the selected clips |
-| **Ctrl+T** | Add a Cross Dissolve to the selected edit points |
-| **Ctrl+R** | Show / hide the retime editor. Click a segment for 25/50/100/200/400 %, ramps, splitting, reverse and hold. |
-| **Shift+H** | Hold (freeze) frame at the playhead, 2 s |
-| **Alt+K** | Add keyframe at playhead |
-| **Ctrl+V** | Show / hide the video animation (keyframe) lane |
-| **M** | Add marker at playhead |
-| **Alt+B** | Analyze beats on the selected clip |
-| **Ctrl+Shift+C** | Open Auto Captions & Whisper |
-| **S** (or **N**) | Magnetic snapping on / off (`Snap: ON/OFF` badge; `♪ Peaks` adds audio-transient snap points) |
-| **Shift+S** | Skimming on / off |
-| **Shift+Z** | Zoom the timeline to fit |
-| **Ctrl+= / Ctrl+-** | Zoom the timeline in / out (Ctrl+scroll also works) |
-| **Ctrl+Z** | Undo |
-| **Ctrl+Shift+Z** | Redo |
-| **Ctrl+A** | Select all clips |
-| **Esc** | Clear the selection and range |
-| **Ctrl+I** | Import media (or drag files onto the window) |
-| **Ctrl+Shift+I** | Import FCPXML (you can also drop a `.fcpxml` file) |
-| **Ctrl+O / Ctrl+S / Ctrl+Shift+S** | Open / Save / Save As (`.rcp` project) |
-| **Ctrl+E** | Export a movie (AV1/HEVC/H.264 Quick Sync, H.264 VA-API, x264) |
-| **Ctrl+, / F1** | Customize keyboard & mouse shortcuts window |
-
-Mouse:
-- Scroll pans the timeline. Ctrl+scroll zooms around the cursor.
-- Click the ruler to move the playhead; drag it to scrub.
-- Double-click a browser clip to append it.
-- Drag browser clips onto the storyline to insert them, or above/below it to connect them.
-- Right-click a clip for the clip menu (transitions, retime, compound, lift…).
-- Drag keyframe diamonds in the animation lane to retime them.
-- Double-click a colour wheel to reset it.
-
-> **Note on Ctrl+V:** egui's winit backend turns Ctrl+V into a *paste* event and drops the key. On Windows the editor reads the key state directly, so the shortcut always works. On Linux it relies on the paste event, so it only fires when the clipboard holds text. The same toggle is in the timeline toolbar (**Animation**) and in **View → Video Animation**.
+This writes `dist\RustCutPro-v<version>-win64-portable.zip`, the installer `dist\RustCutPro-v<version>-win64-setup.exe`
+(only when [Inno Setup 6](https://jrsoftware.org/isinfo.php) is installed: `winget install JRSoftware.InnoSetup`)
+and `dist\SHA256SUMS.txt`. The exe is signed only if a certificate is configured through environment variables
+(see the script header and [docs/RELEASE_DECISIONS.md](docs/RELEASE_DECISIONS.md)). After a dependency change,
+regenerate the license file with `python scripts/gen_third_party_notices.py`.
 
 ---
 
-## Tests
+### Tests
 
 `cargo test --workspace` runs these suites:
 
@@ -258,6 +402,11 @@ Mouse:
     It also encodes HEVC Main10 and AV1 sources with the Arc's Quick Sync encoders and checks that they decode in hardware (P010 / NV12). This runs only where those encoders work.
   - `nle-render/tests/export_ffmpeg.rs` exports a two-clip timeline with a dissolve through **every encoder FFmpeg reports** (`av1_qsv`, `hevc_qsv`, `h264_qsv`, `h264_vaapi`, `libx264`). Each output is verified with ffprobe for size, duration and audio track.
   - A hardware-encoder failure is excused only if FFmpeg also cannot use that encoder directly. Otherwise the test fails.
+- **Release smoke test** (manual, `#[ignore]`): `nle-render/tests/e2e_smoke.rs` exercises the whole pipeline on generated media. It synthesizes speech with Windows TTS, then imports → trims → applies Zoom Punch → runs Whisper auto-captions → applies look-ahead ducking → exports → validates with ffprobe, and measures the duck in the exported audio. It needs ffmpeg, a GPU and `ggml-base-q5_1.bin` in the models folder:
+
+  ```powershell
+  cargo test -p nle-render --features nle-media/whisper-vulkan --test e2e_smoke -- --ignored --nocapture
+  ```
 
 **Verified on** Ryzen 7 5800X + Arc A750 under Windows 11, with FFmpeg 9.0.2 (gyan.dev full build):
 - every suite passes;
@@ -269,7 +418,7 @@ The `ffmpeg` feature (`ffmpeg-next` 9.1) was built and tested against the same F
 
 ---
 
-## Implementation notes
+### Implementation notes
 
 - **Intel Arc on DX12:** creating an `Rgba8UnormSrgb` *view* of a storage-capable `Rgba8Unorm` texture loses the device. The display output is therefore copied into a separate sRGB texture for egui instead of being reinterpreted (see `Renderer::make_display`).
 - **Optional libav decoder:** the `ffmpeg` feature (`nle-media/src/decode/libav.rs`) uses FFmpeg's generic hwaccel (D3D11VA / VA-API `iHD`) and transfers frames to NV12/P010. It needs FFmpeg dev libraries and libclang to build. The default CLI decoder covers the full QSV → VA-API/D3D11VA → software chain.

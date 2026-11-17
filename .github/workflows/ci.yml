@@ -1,0 +1,64 @@
+# Windows CI: check, test, and build the portable zip.
+# NOTE: written 2026-11-17 without a GitHub remote, so this workflow has not run yet.
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # .cargo/config.toml holds the dev machine's tool paths with force = false,
+  # so these job-level values win.
+  LIBCLANG_PATH: C:\Program Files\LLVM\bin
+  CMAKE: cmake
+  RUST_BACKTRACE: "1"
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # whisper-rs-sys (default feature whisper-vulkan) needs the Vulkan SDK
+      # (headers + glslc) to build; this action exports VULKAN_SDK.
+      - name: Install Vulkan SDK
+        uses: jakoch/install-vulkan-sdk-action@v1
+        with:
+          vulkan_version: latest
+          install_runtime: true
+          cache: true
+          stripdown: true
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo check
+        run: cargo check --workspace --all-targets
+
+      # GPU tests skip themselves when no adapter is found, and FFmpeg tests skip
+      # without ffmpeg. The keyring migration test uses Credential Manager and
+      # cleans up after itself.
+      - name: cargo test
+        run: cargo test --workspace
+
+      - name: Package
+        shell: pwsh
+        run: ./scripts/package_windows.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rust-cut-pro-windows
+          path: |
+            dist/*.zip
+            dist/*-setup.exe
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
