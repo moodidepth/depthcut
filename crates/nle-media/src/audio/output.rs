@@ -5,10 +5,12 @@
 //! samples — no locks, no allocation. The number of frames the device has
 //! consumed is the master clock the UI follows for A/V sync.
 
+use super::meter::MeterReading;
 use super::mixer::TimelineMixer;
+use super::restore::{RestoreKey, Restored};
 use crate::frame::AudioBuffer;
 use nle_core::eval::AudioSpan;
-use nle_core::{AssetId, Time};
+use nle_core::{AssetId, ClipId, MixerSettings, Time};
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -124,6 +126,34 @@ impl AudioEngine {
 
     pub fn set_master_gain(&self, g: f32) {
         self.shared.mixer.lock().master_gain = g;
+    }
+
+    /// Bus faders / pan / mute / solo / inserts (solo is honoured here,
+    /// unlike export).
+    pub fn set_mixer(&self, mix: &MixerSettings) {
+        let mut m = self.shared.mixer.lock();
+        if m.mixer() != mix {
+            m.set_mixer(mix);
+        }
+    }
+
+    /// Per-bus meters ([`nle_core::BusId::ALL`] order). They read the
+    /// mixer's output ~60 ms before it is heard (render look-ahead).
+    pub fn meters(&self) -> Option<[MeterReading; 5]> {
+        self.shared.mixer.lock().meter_readings()
+    }
+
+    pub fn reset_loudness(&self) {
+        self.shared.mixer.lock().reset_loudness();
+    }
+
+    pub fn set_restored(&self, clip: ClipId, r: Restored) {
+        self.shared.mixer.lock().set_restored(clip, r);
+    }
+
+    /// Noise reduction / voice isolation renders the current spans still need.
+    pub fn restore_requests(&self) -> Vec<(ClipId, RestoreKey)> {
+        self.shared.mixer.lock().restore_requests()
     }
 
     pub fn peaks(&self) -> [f32; 2] {
@@ -272,7 +302,12 @@ impl Drop for AudioEngine {
 
 fn make_shared(rate: u32, has_device: bool) -> Arc<Shared> {
     Arc::new(Shared {
-        mixer: Mutex::new(TimelineMixer::new(rate)),
+        mixer: Mutex::new({
+            let mut m = TimelineMixer::new(rate);
+            m.honor_solo = true;
+            m.set_metering(true);
+            m
+        }),
         transport: Mutex::new(Transport { playing: false, speed: 1.0, base: Time::ZERO, render_pos: Time::ZERO, started_at: Instant::now() }),
         consumed: AtomicU64::new(0),
         cb_seq: AtomicU64::new(0),

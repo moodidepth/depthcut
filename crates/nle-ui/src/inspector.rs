@@ -13,7 +13,6 @@ use nle_core::{
     TextAnimation, Time, TitleStyle, Transition, TransitionKind, VideoFormat,
 };
 use nle_media::analysis::{normalize_gain_db, TARGET_LUFS};
-use nle_media::audio::eq::ThreeBandEq;
 
 const INSPECTOR_TAG: u64 = 0x1f;
 
@@ -58,6 +57,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let mut multiband_beats = false;
     let mut scan_kills = false;
     let mut sync_beats = false;
+    let mut learn_noise = false;
     let mut toggle_reframe_916 = false;
     let mut punch_request: Option<bool> = None;
     let asset_lufs = if let ClipKind::Asset { asset } = &c.kind { app.asset_loudness_lufs(*asset) } else { None };
@@ -75,9 +75,21 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match app.inspector_tab {
         InspectorTab::Video => video_tab(ui, &mut c, local, frame, &mut retime_action, &mut toggle_reframe_916, &mut app.punch, &mut punch_request, color_view),
         InspectorTab::Color => color_tab(ui, &mut c, local, frame, detected_space, color_view),
-        InspectorTab::Audio => {
-            audio_tab(ui, &mut c, local, frame, asset_lufs, beat_busy, kill_busy, mb_busy, &mut analyze_beats, &mut multiband_beats, &mut scan_kills, &mut sync_beats)
-        }
+        InspectorTab::Audio => audio_tab(
+            ui,
+            &mut c,
+            local,
+            frame,
+            asset_lufs,
+            beat_busy,
+            kill_busy,
+            mb_busy,
+            &mut analyze_beats,
+            &mut multiband_beats,
+            &mut scan_kills,
+            &mut sync_beats,
+            &mut learn_noise,
+        ),
         InspectorTab::TitlesTransitions => titles_tab(ui, &mut c, &mut add_title),
         InspectorTab::Motion => motion_action = crate::motion_ui::tab(ui, &mut c, &motion_cx, motion_ui),
     });
@@ -130,6 +142,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     if sync_beats {
         app.sync_clips_to_beats();
     }
+    if learn_noise {
+        learn_noise_at_playhead(app, id);
+    }
     if toggle_reframe_916 {
         app.toggle_gaming_reframe_916();
     }
@@ -138,6 +153,34 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     }
     if let Some(a) = motion_action {
         app.run_motion_action(id, a);
+    }
+}
+
+/// Learn a noise profile from 1 s of the clip's source starting at the
+/// playhead (park it on room tone between words first).
+fn learn_noise_at_playhead(app: &mut App, id: nle_core::ClipId) {
+    let spans = nle_core::eval::audio_spans(&app.project.timeline);
+    let Some(span) = spans.iter().find(|s| s.clip == id && s.start <= app.playhead && app.playhead < s.end()).or_else(|| spans.iter().find(|s| s.clip == id)) else {
+        app.status("Learn noise: this clip has no audible span");
+        return;
+    };
+    let Some(src) = app.library.audio.get(&span.asset).cloned() else {
+        app.status("Learn noise: the clip's audio is still loading");
+        return;
+    };
+    let rate = src.sample_rate as f64;
+    let at = span.source_time(app.playhead.clamp(span.start, span.end())).as_secs_f64().max(0.0);
+    let start = (at * rate) as usize;
+    let end = start + rate as usize;
+    let Some(profile) = nle_media::audio::restore::learn_noise_profile(&src, start, end) else {
+        app.status("Learn noise: not enough audio after the playhead");
+        return;
+    };
+    let Some(mut c) = app.project.timeline.clip(id).cloned() else { return };
+    c.audio.noise_reduction.profile = Some(profile);
+    c.audio.noise_reduction.enabled = true;
+    if app.exec(Command::UpdateClip { clip: Box::new(c) }) {
+        app.status(format!("Noise profile learned from {at:.2}–{:.2} s of the source", at + 1.0));
     }
 }
 
@@ -571,6 +614,7 @@ fn audio_tab(
     multiband_beats: &mut bool,
     scan_kills: &mut bool,
     sync_beats: &mut bool,
+    learn_noise: &mut bool,
 ) {
     if !c.has_audio() {
         ui.label(egui::RichText::new("No audio in this clip.").color(theme::TEXT_DIM));
@@ -669,19 +713,50 @@ fn audio_tab(
             }
         });
     });
-    section(ui, "Equalization (3-band)", |ui| {
-        let e = &mut a.eq;
-        ui.checkbox(&mut e.enabled, "Enabled");
-        ui.add_enabled_ui(e.enabled, |ui| {
-            slider_f32(ui, "Low", &mut e.low_gain_db, -18.0..=18.0, " dB");
-            slider_f32(ui, "Low Freq", &mut e.low_freq, 40.0..=500.0, " Hz");
-            slider_f32(ui, "Mid", &mut e.mid_gain_db, -18.0..=18.0, " dB");
-            slider_f32(ui, "Mid Freq", &mut e.mid_freq, 200.0..=6000.0, " Hz");
-            slider_f32(ui, "Mid Q", &mut e.mid_q, 0.3..=6.0, "");
-            slider_f32(ui, "High", &mut e.high_gain_db, -18.0..=18.0, " dB");
-            slider_f32(ui, "High Freq", &mut e.high_freq, 2000.0..=16000.0, " Hz");
+    section(ui, "Restoration", |ui| {
+        let nr = &mut a.noise_reduction;
+        ui.checkbox(&mut nr.enabled, egui::RichText::new("Noise Reduction").strong())
+            .on_hover_text("Spectral noise reduction, rendered in the background (raw audio plays until it is ready). Export always uses the cleaned audio.");
+        ui.add_enabled_ui(nr.enabled, |ui| {
+            slider_f32(ui, "Reduction", &mut nr.reduction_db, 0.0..=40.0, " dB");
+            slider_f32(ui, "Sensitivity", &mut nr.sensitivity, 0.5..=4.0, "");
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(if nr.profile.is_some() { "Profile: learned" } else { "Profile: automatic (quietest parts)" }).small().color(theme::TEXT_DIM));
+                if ui.small_button("Learn").on_hover_text("Park the playhead on room tone (a pause with no speech), then learn 1 s of it").clicked() {
+                    *learn_noise = true;
+                }
+                if nr.profile.is_some() && ui.small_button("Auto").on_hover_text("Forget the learned profile").clicked() {
+                    nr.profile = None;
+                }
+            });
         });
-        eq_plot(ui, e);
+        let vi = &mut a.voice_isolation;
+        let backend = nle_media::audio::restore::voice_isolation_backend();
+        ui.checkbox(&mut vi.enabled, egui::RichText::new("Voice Isolation").strong()).on_hover_text(match backend {
+            Some(name) => format!("Neural separation ({name})"),
+            None => "DSP fallback: cuts steady noise, rumble and hiss around the voice. It cannot remove music or game audio — that needs the neural model.".to_string(),
+        });
+        ui.add_enabled_ui(vi.enabled, |ui| {
+            slider_f32(ui, "Amount", &mut vi.amount, 0.0..=1.0, "");
+            if backend.is_none() {
+                ui.label(egui::RichText::new("No voice-separation model loaded — using the DSP fallback.").small().color(theme::SNAP));
+            }
+        });
+        let lv = &mut a.leveler;
+        ui.checkbox(&mut lv.enabled, egui::RichText::new("Dialogue Leveler").strong())
+            .on_hover_text("Rides the gain toward the target so quiet and loud passages sit together; pauses are not boosted");
+        ui.add_enabled_ui(lv.enabled, |ui| {
+            slider_f32(ui, "Target", &mut lv.target_db, -40.0..=-6.0, " dB");
+            slider_f32(ui, "Max Gain", &mut lv.max_gain_db, 0.0..=24.0, " dB");
+            slider_f32(ui, "Speed", &mut lv.speed_ms, 50.0..=3000.0, " ms");
+            slider_f32(ui, "Floor", &mut lv.floor_db, -80.0..=-20.0, " dB");
+        });
+    });
+    section(ui, "EQ (6-band parametric)", |ui| {
+        crate::audio_ui::eq_editor(ui, &mut a.eq, egui::Id::new("clip-eq"));
+    });
+    section(ui, "Dynamics & Effects", |ui| {
+        crate::audio_ui::fx_editor(ui, &mut a.fx, egui::Id::new("clip-fx"), None);
     });
     section(ui, "Auto-Duck Under Voice", |ui| {
         let is_voice = a.role == nle_core::AudioRole::Dialogue;
@@ -715,28 +790,6 @@ fn audio_tab(
             }
         });
     });
-}
-
-fn eq_plot(ui: &mut egui::Ui, e: &nle_core::EqSettings) {
-    let eq = ThreeBandEq::new(48_000.0, *e);
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 70.0), egui::Sense::hover());
-    let p = ui.painter();
-    p.rect_filled(rect, egui::CornerRadius::same(4), theme::BG);
-    p.line_segment([rect.left_center(), rect.right_center()], Stroke::new(0.5_f32, theme::BORDER));
-    let n = 120;
-    let pts: Vec<egui::Pos2> = (0..=n)
-        .map(|i| {
-            let u = i as f32 / n as f32;
-            let freq = 20.0 * (1000.0f32).powf(u);
-            let db = if e.enabled { eq.response_db(freq) } else { 0.0 };
-            egui::pos2(rect.left() + u * rect.width(), rect.center().y - (db / 20.0).clamp(-1.0, 1.0) * rect.height() * 0.45)
-        })
-        .collect();
-    p.add(egui::Shape::line(pts, Stroke::new(1.5_f32, theme::AUDIO)));
-    for (f, l) in [(100.0f32, "100"), (1000.0, "1k"), (10000.0, "10k")] {
-        let x = rect.left() + (f / 20.0).log(1000.0) * rect.width();
-        p.text(egui::pos2(x, rect.bottom() - 2.0), egui::Align2::CENTER_BOTTOM, l, egui::FontId::proportional(9.0), theme::TEXT_DIM);
-    }
 }
 
 // ---------------------------------------------------------------------------

@@ -8,6 +8,7 @@
 
 mod about_ui;
 mod app;
+mod audio_ui;
 mod browser;
 mod captions_ui;
 mod color_ui;

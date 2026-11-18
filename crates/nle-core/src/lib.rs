@@ -20,6 +20,7 @@
 //! * [`keymap`] — customisable keyboard shortcuts with FCP / Resolve presets (TOML).
 
 pub mod asset;
+pub mod audio_fx;
 pub mod audio_polish;
 pub mod autosave;
 pub mod caption_follow;
@@ -45,6 +46,10 @@ pub mod xml;
 pub mod zoom_punch;
 
 pub use asset::{AssetKind, Attribution, AudioStreamInfo, MediaAsset, VideoStreamInfo};
+pub use audio_fx::{
+    AudioFx, BusId, BusSettings, CompressorSettings, DeEsserSettings, DelaySettings, EqBand, EqBandType, EqFilter, FilterSlope, GateMode, GateSettings, LevelerSettings,
+    MixerSettings, NoiseReductionSettings, ParametricEq, ReverbSettings, VoiceIsolationSettings,
+};
 pub use captions::{CaptionSegment, CaptionStyle, CaptionTrack, CaptionWord};
 pub use clip::{
     AudioParams, AudioRole, AvFlags, BlendMode, Clip, ClipKind, ColorParams, ColorWheel, CompoundClip, CropMode, Direction, DuckingSettings, EqSettings, FadeShape, LutRef,

@@ -8,14 +8,14 @@
 pub const TARGET_LUFS: f32 = -14.0;
 
 #[derive(Clone, Copy, Debug)]
-struct Biquad64 {
+pub(crate) struct Biquad64 {
     b: [f64; 3],
     a: [f64; 2],
     z: [f64; 2],
 }
 
 impl Biquad64 {
-    fn process(&mut self, x: f64) -> f64 {
+    pub(crate) fn process(&mut self, x: f64) -> f64 {
         let y = self.b[0] * x + self.z[0];
         self.z[0] = self.b[1] * x - self.a[0] * y + self.z[1];
         self.z[1] = self.b[2] * x - self.a[1] * y;
@@ -23,7 +23,7 @@ impl Biquad64 {
     }
 }
 
-fn k_weighting(rate: f64) -> [Biquad64; 2] {
+pub(crate) fn k_weighting(rate: f64) -> [Biquad64; 2] {
     // stage 1: high shelf (+4 dB above ~1.7 kHz)
     let f0 = 1681.974450955533;
     let g = 3.999843853973347;

@@ -1,12 +1,23 @@
 //! Timeline audio mixer: renders all audible clips (volume keyframes,
-//! fades, pan, 3-band EQ, retiming, dialogue auto-ducking) to stereo.
+//! fades, pan, retiming, parametric EQ, dynamics / creative inserts,
+//! dialogue leveling, auto-ducking), routes them to the role busses
+//! (Dialogue, Music, SFX, General — each with EQ, inserts, fader, pan,
+//! mute / solo and loudness meters) and sums those into the master bus.
+//!
+//! Per clip: source (or its cleaned [`Restored`] copy) → retime → gain /
+//! pan → low-pass → EQ → sub-bass → vocal clarity → leveler → inserts →
+//! ducking → role bus. Master: EQ → inserts → fader → preview volume →
+//! −1 dBFS limiter.
 
 use super::ducking::{DuckCurve, DuckEnvelope, Ducker, RmsAccumulator};
-use super::eq::{BandKind, Biquad, ThreeBandEq};
+use super::eq::{BandKind, Biquad, ParametricEqProc};
+use super::fx::{FxChain, GainReduction, Leveler};
+use super::meter::{LoudnessMeter, MeterReading};
+use super::restore::{restore_key, RestoreKey, Restored};
 use super::vocal::VocalClarity;
 use crate::frame::AudioBuffer;
 use nle_core::eval::AudioSpan;
-use nle_core::{AssetId, AudioRole, ClipId, Time};
+use nle_core::{AssetId, AudioRole, BusId, BusSettings, ClipId, MixerSettings, Time};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
@@ -148,7 +159,24 @@ pub struct TimelineMixer {
     pub sample_rate: u32,
     spans: Vec<AudioSpan>,
     sources: HashMap<AssetId, Arc<AudioBuffer>>,
-    eqs: HashMap<ClipId, ThreeBandEq>,
+    eqs: HashMap<ClipId, ParametricEqProc>,
+    clip_fx: HashMap<ClipId, FxChain>,
+    levelers: HashMap<ClipId, Leveler>,
+    /// Cleaned (noise-reduced / voice-isolated) source ranges per clip.
+    restored: HashMap<ClipId, Restored>,
+    /// Restored buffers serving the current spans: (buffer, first source frame).
+    active_restored: HashMap<ClipId, (Arc<AudioBuffer>, f64)>,
+    mix: MixerSettings,
+    /// Honour bus solo (playback monitoring only; export ignores solo).
+    pub honor_solo: bool,
+    bus_bufs: [Vec<f32>; 4],
+    bus_eq: Vec<ParametricEqProc>,
+    bus_fx: Vec<FxChain>,
+    /// Smoothed per-bus (L, R) gain so fader moves never zipper.
+    bus_gain: [[f32; 2]; 5],
+    /// Meters per bus ([`BusId::ALL`] order) when metering is on.
+    meters: Option<Vec<LoudnessMeter>>,
+    gr: [GainReduction; 5],
     lowpasses: HashMap<ClipId, Biquad>,
     sub_basses: HashMap<ClipId, Biquad>,
     duckers: HashMap<ClipId, Ducker>,
@@ -174,6 +202,18 @@ impl TimelineMixer {
             spans: Vec::new(),
             sources: HashMap::new(),
             eqs: HashMap::new(),
+            clip_fx: HashMap::new(),
+            levelers: HashMap::new(),
+            restored: HashMap::new(),
+            active_restored: HashMap::new(),
+            mix: MixerSettings::default(),
+            honor_solo: false,
+            bus_bufs: Default::default(),
+            bus_eq: (0..5).map(|_| ParametricEqProc::new(sample_rate as f32, Default::default())).collect(),
+            bus_fx: (0..5).map(|_| FxChain::new(sample_rate as f32)).collect(),
+            bus_gain: [[1.0; 2]; 5],
+            meters: None,
+            gr: Default::default(),
             lowpasses: HashMap::new(),
             sub_basses: HashMap::new(),
             duckers: HashMap::new(),
@@ -198,6 +238,85 @@ impl TimelineMixer {
             }
         }
         self.spans = spans;
+        self.refresh_restored();
+    }
+
+    /// Bus settings (faders, mute / solo, bus EQ and inserts).
+    pub fn set_mixer(&mut self, mix: &MixerSettings) {
+        self.mix = *mix;
+    }
+
+    pub fn mixer(&self) -> &MixerSettings {
+        &self.mix
+    }
+
+    /// Turn loudness metering on (playback) or off (export / analysis).
+    pub fn set_metering(&mut self, on: bool) {
+        match (on, self.meters.is_some()) {
+            (true, false) => self.meters = Some((0..5).map(|_| LoudnessMeter::new(self.sample_rate)).collect()),
+            (false, true) => self.meters = None,
+            _ => {}
+        }
+    }
+
+    /// Current meter readings per bus ([`BusId::ALL`] order); resets the
+    /// per-reading peaks and gain-reduction maxima.
+    pub fn meter_readings(&mut self) -> Option<[MeterReading; 5]> {
+        let meters = self.meters.as_mut()?;
+        let mut out = [MeterReading::default(); 5];
+        for (i, m) in meters.iter_mut().enumerate() {
+            out[i] = m.read();
+            out[i].gr = std::mem::take(&mut self.gr[i]);
+        }
+        Some(out)
+    }
+
+    /// Restart integrated loudness / true-peak hold on every bus.
+    pub fn reset_loudness(&mut self) {
+        for m in self.meters.iter_mut().flatten() {
+            m.reset_loudness();
+        }
+    }
+
+    /// Install a cleaned source range for `clip` (see [`super::restore`]).
+    pub fn set_restored(&mut self, clip: ClipId, r: Restored) {
+        self.restored.insert(clip, r);
+        self.refresh_restored();
+    }
+
+    /// Restorations the current spans need that are not installed yet.
+    pub fn restore_requests(&self) -> Vec<(ClipId, RestoreKey)> {
+        restore_requests(&self.spans, &self.sources).into_iter().filter(|(c, k)| !self.restored.get(c).is_some_and(|r| r.key.serves(k))).collect()
+    }
+
+    fn refresh_restored(&mut self) {
+        let mut active: HashMap<ClipId, (Arc<AudioBuffer>, f64)> = HashMap::new();
+        let mut stale = Vec::new();
+        for span in &self.spans {
+            let Some(src) = self.sources.get(&span.asset) else { continue };
+            let Some(want) = restore_key(span, src) else { continue };
+            match self.restored.get(&span.clip) {
+                Some(r) if r.key.serves(&want) => {
+                    active.entry(span.clip).or_insert((r.buf.clone(), r.key.start as f64));
+                }
+                _ => stale.push(span.clip),
+            }
+        }
+        for c in stale {
+            active.remove(&c);
+        }
+        // a different buffer means different sample positions for cached grains
+        for (c, st) in self.retime.iter_mut() {
+            let before = self.active_restored.get(c).map(|(b, _)| Arc::as_ptr(b));
+            let after = active.get(c).map(|(b, _)| Arc::as_ptr(b));
+            if before != after {
+                st.grains.clear();
+            }
+        }
+        // drop restorations no span uses any more (keeps memory bounded)
+        let used: std::collections::HashSet<ClipId> = self.spans.iter().map(|s| s.clip).collect();
+        self.restored.retain(|c, _| used.contains(c));
+        self.active_restored = active;
     }
 
     pub fn spans(&self) -> &[AudioSpan] {
@@ -235,6 +354,7 @@ impl TimelineMixer {
 
     pub fn set_source(&mut self, asset: AssetId, buf: Arc<AudioBuffer>) {
         self.sources.insert(asset, buf);
+        self.refresh_restored();
     }
 
     pub fn has_source(&self, asset: AssetId) -> bool {
@@ -244,6 +364,17 @@ impl TimelineMixer {
     /// Clear filter/ducker state (call after a seek).
     pub fn reset_state(&mut self) {
         self.eqs.clear();
+        self.clip_fx.clear();
+        self.levelers.clear();
+        for f in &mut self.bus_fx {
+            f.reset();
+        }
+        for e in &mut self.bus_eq {
+            e.reset();
+        }
+        for m in self.meters.iter_mut().flatten() {
+            m.reset_windows();
+        }
         self.lowpasses.clear();
         self.sub_basses.clear();
         self.duckers.clear();
@@ -276,7 +407,13 @@ impl TimelineMixer {
             if span.end().as_secs_f64() <= lo || span.start.as_secs_f64() >= hi {
                 continue;
             }
-            let Some(src) = self.sources.get(&span.asset) else { continue };
+            let (src, src_off) = match self.active_restored.get(&span.clip) {
+                Some((b, off)) => (b, *off),
+                None => match self.sources.get(&span.asset) {
+                    Some(s) => (s, 0.0),
+                    None => continue,
+                },
+            };
             tmp.clear();
             tmp.resize(out.len(), 0.0);
             let (s_start, s_end) = (span.start.as_secs_f64(), span.end().as_secs_f64());
@@ -286,8 +423,8 @@ impl TimelineMixer {
                 let n = BLOCK.min(frames - b);
                 let ta = t0 + speed * b as f64 / sr;
                 let tb = t0 + speed * (b + n) as f64 / sr;
-                let pa = span.source_time(Time::from_secs_f64(ta)).as_secs_f64() * src_rate;
-                let pb = span.source_time(Time::from_secs_f64(tb)).as_secs_f64() * src_rate;
+                let pa = span.source_time(Time::from_secs_f64(ta)).as_secs_f64() * src_rate - src_off;
+                let pb = span.source_time(Time::from_secs_f64(tb)).as_secs_f64() * src_rate - src_off;
                 let ga = span.gain_at(Time::from_secs_f64(ta));
                 let gb = span.gain_at(Time::from_secs_f64(tb));
                 let pan = span.pan_at(Time::from_secs_f64(ta));
@@ -348,7 +485,7 @@ impl TimelineMixer {
                         let g0 = (ts / grain_step).floor() as i64;
                         let ideal = |g: i64| {
                             let tg = (g as f64 * grain_step / sr).max(origin);
-                            span.source_time(Time::from_secs_f64(tg)).as_secs_f64() * src_rate
+                            span.source_time(Time::from_secs_f64(tg)).as_secs_f64() * src_rate - src_off
                         };
                         let hop = grain_step * pitch_step;
                         let p1 = st.grain_pos(g0 - 1, || ideal(g0 - 1), src, hop, tol, ovl);
@@ -376,7 +513,7 @@ impl TimelineMixer {
                 }
                 b += n;
             }
-            let eq = self.eqs.entry(span.clip).or_insert_with(|| ThreeBandEq::new(self.sample_rate as f32, span.params.eq));
+            let eq = self.eqs.entry(span.clip).or_insert_with(|| ParametricEqProc::new(self.sample_rate as f32, span.params.eq));
             eq.update(&span.params.eq);
             eq.process(&mut tmp);
             if span.params.sub_bass_punch && span.params.sub_bass_db.abs() > 0.05 {
@@ -392,6 +529,14 @@ impl TimelineMixer {
                 let sr = self.sample_rate as f32;
                 self.vocals.entry(span.clip).or_insert_with(|| VocalClarity::new(sr)).process(&mut tmp);
             }
+            if span.params.leveler.enabled {
+                let lv = self.levelers.entry(span.clip).or_insert_with(|| Leveler::new(self.sample_rate as f32, span.params.leveler));
+                lv.update(&span.params.leveler);
+                lv.process(&mut tmp);
+            }
+            if span.params.fx.is_active() {
+                self.clip_fx.entry(span.clip).or_insert_with(|| FxChain::new(self.sample_rate as f32)).process(&span.params.fx, &mut tmp);
+            }
 
             if span.params.role == AudioRole::Dialogue {
                 for (d, s) in self.dialogue.iter_mut().zip(&tmp) {
@@ -400,24 +545,33 @@ impl TimelineMixer {
             } else if span.params.ducking.enabled {
                 ducked.push((span.clip, tmp.clone()));
             } else {
-                for (o, s) in out.iter_mut().zip(&tmp) {
+                let bus = &mut self.bus_bufs[BusId::Role(span.params.role).index()];
+                bus.resize(out.len(), 0.0);
+                for (o, s) in bus.iter_mut().zip(&tmp) {
                     *o += s;
                 }
             }
         }
 
-        // dialogue bus + sidechain ducking
-        for (o, d) in out.iter_mut().zip(&self.dialogue) {
-            *o += d;
+        // the dialogue bus input is also the (pre-fader) ducking sidechain
+        {
+            let bus = &mut self.bus_bufs[0];
+            bus.resize(out.len(), 0.0);
+            for (o, d) in bus.iter_mut().zip(&self.dialogue) {
+                *o += d;
+            }
         }
         for (clip, buf) in &ducked {
-            let settings = self.spans.iter().find(|s| s.clip == *clip).map(|s| s.params.ducking).unwrap_or_default();
-            if let Some(curve) = self.duck_curve(*clip, settings) {
+            let (settings, role) = self.spans.iter().find(|s| s.clip == *clip).map(|s| (s.params.ducking, s.params.role)).unwrap_or_default();
+            let curve = self.duck_curve(*clip, settings);
+            let bus = &mut self.bus_bufs[BusId::Role(role).index()];
+            bus.resize(out.len(), 0.0);
+            if let Some(curve) = curve {
                 // look-ahead curve on the timeline clock: identical in preview and export
                 for (i, frame) in buf.as_chunks::<2>().0.iter().enumerate() {
                     let g = curve.gain_at(t0 + speed * i as f64 / sr);
-                    out[2 * i] += frame[0] * g;
-                    out[2 * i + 1] += frame[1] * g;
+                    bus[2 * i] += frame[0] * g;
+                    bus[2 * i + 1] += frame[1] * g;
                 }
                 continue;
             }
@@ -426,25 +580,145 @@ impl TimelineMixer {
             for (i, frame) in buf.as_chunks::<2>().0.iter().enumerate() {
                 let side = 0.5 * (self.dialogue[2 * i] + self.dialogue[2 * i + 1]);
                 let g = ducker.process(side);
-                out[2 * i] += frame[0] * g;
-                out[2 * i + 1] += frame[1] * g;
+                bus[2 * i] += frame[0] * g;
+                bus[2 * i + 1] += frame[1] * g;
             }
         }
 
-        // Master bus: always-on −1 dBFS soft-knee limiter (playback + export).
+        // role busses → master (solo is a monitoring aid: playback only)
+        let any_solo = self.honor_solo && self.mix.any_solo();
+        for (i, role) in AudioRole::ALL.into_iter().enumerate() {
+            let settings = *self.mix.bus(BusId::Role(role));
+            let mut bus = std::mem::take(&mut self.bus_bufs[i]);
+            bus.resize(out.len(), 0.0);
+            let audible = !settings.mute && (!any_solo || settings.solo);
+            self.process_bus(i, &settings, audible, &mut bus);
+            for (o, s) in out.iter_mut().zip(&bus) {
+                *o += s;
+            }
+            bus.fill(0.0);
+            self.bus_bufs[i] = bus;
+        }
+
+        // Master bus: EQ, inserts, fader, preview volume, then the
+        // always-on −1 dBFS soft-knee limiter (playback + export).
+        let master = self.mix.master;
+        for s in out.iter_mut() {
+            if !s.is_finite() {
+                *s = 0.0;
+            }
+        }
+        self.bus_eq[4].update(&master.eq);
+        self.bus_eq[4].process(out);
+        if master.fx.is_active() {
+            self.bus_fx[4].process(&master.fx, out);
+            let g = self.bus_fx[4].take_gr();
+            merge_gr(&mut self.gr[4], g);
+        }
+        let target = bus_gains(&master, !master.mute);
+        let a = gain_smoothing(self.sample_rate);
         let mut peaks = [0.0f32; 2];
         for frame in out.as_chunks_mut::<2>().0 {
-            for s in frame.iter_mut() {
-                *s = if s.is_finite() { *s * self.master_gain } else { 0.0 };
+            for (c, s) in frame.iter_mut().enumerate() {
+                let g = &mut self.bus_gain[4][c];
+                *g += (target[c] - *g) * a;
+                *s *= *g * self.master_gain;
             }
             self.limiter.process(frame);
             peaks[0] = peaks[0].max(frame[0].abs());
             peaks[1] = peaks[1].max(frame[1].abs());
         }
+        if let Some(m) = self.meters.as_mut() {
+            m[4].push(out);
+        }
         self.peaks = peaks;
         self.tmp = tmp;
         self.ducked = ducked;
     }
+
+    /// Bus EQ → inserts → fader / pan (smoothed) → meter. A silent bus
+    /// still feeds its meter so it falls to −∞ instead of freezing.
+    fn process_bus(&mut self, i: usize, s: &BusSettings, audible: bool, buf: &mut [f32]) {
+        self.bus_eq[i].update(&s.eq);
+        self.bus_eq[i].process(buf);
+        if s.fx.is_active() {
+            self.bus_fx[i].process(&s.fx, buf);
+            let g = self.bus_fx[i].take_gr();
+            merge_gr(&mut self.gr[i], g);
+        }
+        let target = bus_gains(s, audible);
+        let a = gain_smoothing(self.sample_rate);
+        let g = &mut self.bus_gain[i];
+        if (g[0] - target[0]).abs() < 1e-6 && (g[1] - target[1]).abs() < 1e-6 {
+            *g = target;
+            if target != [1.0, 1.0] {
+                for f in buf.as_chunks_mut::<2>().0 {
+                    f[0] *= target[0];
+                    f[1] *= target[1];
+                }
+            }
+        } else {
+            for f in buf.as_chunks_mut::<2>().0 {
+                for c in 0..2 {
+                    g[c] += (target[c] - g[c]) * a;
+                    f[c] *= g[c];
+                }
+            }
+        }
+        if let Some(m) = self.meters.as_mut() {
+            m[i].push(buf);
+        }
+    }
+}
+
+/// One-pole coefficient for 10 ms fader smoothing.
+fn gain_smoothing(sample_rate: u32) -> f32 {
+    1.0 - (-1.0 / (0.01 * sample_rate as f32)).exp()
+}
+
+/// Bus fader + balance as (L, R) gains.
+fn bus_gains(s: &BusSettings, audible: bool) -> [f32; 2] {
+    if !audible {
+        return [0.0; 2];
+    }
+    let g = s.gain();
+    let pan = s.pan.clamp(-1.0, 1.0);
+    [g * if pan > 0.0 { 1.0 - pan } else { 1.0 }, g * if pan < 0.0 { 1.0 + pan } else { 1.0 }]
+}
+
+fn merge_gr(acc: &mut GainReduction, g: GainReduction) {
+    acc.gate = acc.gate.max(g.gate);
+    acc.comp = acc.comp.max(g.comp);
+    acc.de_esser = acc.de_esser.max(g.de_esser);
+}
+
+/// Restorations `spans` need: one key per clip (ranges of split spans merged).
+pub fn restore_requests(spans: &[AudioSpan], sources: &HashMap<AssetId, Arc<AudioBuffer>>) -> Vec<(ClipId, RestoreKey)> {
+    let mut out: Vec<(ClipId, RestoreKey)> = Vec::new();
+    for span in spans {
+        let Some(src) = sources.get(&span.asset) else { continue };
+        let Some(k) = restore_key(span, src) else { continue };
+        match out.iter_mut().find(|(c, _)| *c == span.clip) {
+            Some((_, have)) if have.asset == k.asset => {
+                have.start = have.start.min(k.start);
+                have.end = have.end.max(k.end);
+            }
+            Some(_) => {}
+            None => out.push((span.clip, k)),
+        }
+    }
+    out
+}
+
+/// Run every restoration `spans` need, synchronously (export). `None` when
+/// cancelled.
+pub fn restore_all(spans: &[AudioSpan], sources: &HashMap<AssetId, Arc<AudioBuffer>>, cancel: &dyn Fn() -> bool) -> Option<Vec<(ClipId, Restored)>> {
+    let mut out = Vec::new();
+    for (clip, key) in restore_requests(spans, sources) {
+        let buf = super::restore::restore(&sources[&key.asset], &key, cancel)?;
+        out.push((clip, Restored { key, buf: Arc::new(buf) }));
+    }
+    Some(out)
 }
 
 /// Whether any span ducks under dialogue (so an envelope is worth computing).
@@ -803,5 +1077,128 @@ mod tests {
         let deep = ratio(1.2, 2.8);
         assert!((deep - nle_core::clip::db_to_gain(-14.0)).abs() < 0.02, "−14 dB under voice: {deep}");
         assert!((ratio(3.7, 3.95) - 1.0).abs() < 0.01, "released after hold + release");
+    }
+
+    /// Dialogue on the spine (0–2 s), music connected underneath.
+    fn two_role_timeline() -> (Timeline, MediaAsset, MediaAsset) {
+        let info = Some(nle_core::AudioStreamInfo { sample_rate: 48_000, channels: 2, codec: "pcm".into() });
+        let mut voice = MediaAsset::new("voice", "/v.wav", Time::from_secs(2));
+        voice.audio = info.clone();
+        let mut music = MediaAsset::new("music", "/m.wav", Time::from_secs(2));
+        music.audio = info;
+        let mut tl = Timeline::default();
+        let mut v = Clip::from_asset(&voice);
+        v.audio.role = AudioRole::Dialogue;
+        tl.append(v).unwrap();
+        let mut m = Clip::from_asset(&music);
+        m.audio.ducking.enabled = false; // music auto-ducks by default
+        tl.connect(m, Time::ZERO, -1).unwrap();
+        (tl, voice, music)
+    }
+
+    fn rms_of(x: &[f32]) -> f32 {
+        (x.iter().map(|s| s * s).sum::<f32>() / x.len().max(1) as f32).sqrt()
+    }
+
+    fn render_with(mix: &MixerSettings, honor_solo: bool) -> Vec<f32> {
+        let (tl, voice, music) = two_role_timeline();
+        let mut m = TimelineMixer::new(48_000);
+        m.honor_solo = honor_solo;
+        m.set_spans(nle_core::audio_spans(&tl));
+        m.set_source(voice.id, tone(2.0, 0.2));
+        m.set_source(music.id, tone(2.0, 0.1));
+        m.set_mixer(mix);
+        let mut out = vec![0.0f32; 48_000 * 2];
+        m.render(Time::ZERO, 1.0, &mut out);
+        out
+    }
+
+    #[test]
+    fn role_busses_mute_solo_fader_and_pan() {
+        let tail = |o: &[f32]| rms_of(&o[2 * 24_000..]);
+        let both = tail(&render_with(&MixerSettings::default(), false));
+        // identical waveforms: 0.2 + 0.1 sum coherently
+        assert!((both / (0.3 / 2f32.sqrt()) - 1.0).abs() < 0.03, "default mix is the plain sum: {both}");
+
+        let mut mix = MixerSettings::default();
+        mix.bus_mut(BusId::Role(AudioRole::Music)).mute = true;
+        let voice_only = tail(&render_with(&mix, false));
+        assert!((voice_only / (0.2 / 2f32.sqrt()) - 1.0).abs() < 0.03, "music bus muted: {voice_only}");
+
+        let mut mix = MixerSettings::default();
+        mix.bus_mut(BusId::Role(AudioRole::Music)).solo = true;
+        let solo = tail(&render_with(&mix, true));
+        assert!((solo / (0.1 / 2f32.sqrt()) - 1.0).abs() < 0.03, "solo → only music: {solo}");
+        let ignored = tail(&render_with(&mix, false));
+        assert!((ignored - both).abs() < 1e-4, "export ignores solo");
+
+        let mut mix = MixerSettings::default();
+        mix.bus_mut(BusId::Role(AudioRole::Dialogue)).gain_db = -6.0206;
+        let faded = tail(&render_with(&mix, false));
+        assert!((faded / (0.2 / 2f32.sqrt()) - 1.0).abs() < 0.03, "−6 dB dialogue fader halves it: {faded}");
+
+        let mut mix = MixerSettings::default();
+        mix.master.pan = 1.0;
+        let o = render_with(&mix, false);
+        let (l, r): (Vec<f32>, Vec<f32>) = o[2 * 24_000..].as_chunks::<2>().0.iter().map(|f| (f[0], f[1])).unzip();
+        assert!(rms_of(&l) < 1e-4 && rms_of(&r) > 0.2, "master balance hard right");
+
+        let mut mix = MixerSettings::default();
+        mix.master.mute = true;
+        assert!(tail(&render_with(&mix, false)) < 1e-5, "master mute");
+    }
+
+    #[test]
+    fn meters_read_each_bus_and_master() {
+        let (tl, voice, music) = two_role_timeline();
+        let mut m = TimelineMixer::new(48_000);
+        m.set_metering(true);
+        m.set_spans(nle_core::audio_spans(&tl));
+        m.set_source(voice.id, tone(2.0, 0.2));
+        m.set_source(music.id, tone(2.0, 0.1));
+        let mut out = vec![0.0f32; 48_000 * 2];
+        m.render(Time::ZERO, 1.0, &mut out);
+        let r = m.meter_readings().unwrap();
+        let (d, mu, fx, master) = (r[0].momentary.unwrap(), r[1].momentary.unwrap(), r[2], r[4].momentary.unwrap());
+        assert!((d - mu - 6.02).abs() < 0.2, "dialogue 6 dB over music: {d} {mu}");
+        assert!(fx.momentary.is_none(), "empty effects bus reads −∞");
+        assert!(master > d, "master is the sum");
+        assert!(r[4].true_peak_db.unwrap() < 0.0);
+        assert!(r[0].peak[0] > 0.19 && r[0].peak[0] < 0.21);
+        // no metering in export
+        let mut e = TimelineMixer::new(48_000);
+        assert!(e.meter_readings().is_none());
+    }
+
+    #[test]
+    fn restored_buffer_replaces_the_source_for_its_clip() {
+        let (mut tl, voice, music) = two_role_timeline();
+        tl.spine[0].audio.noise_reduction = nle_core::NoiseReductionSettings { enabled: true, reduction_db: 12.0, sensitivity: 1.0, profile: None };
+        let spans = nle_core::audio_spans(&tl);
+        let sources: HashMap<AssetId, Arc<AudioBuffer>> = [(voice.id, tone(2.0, 0.2)), (music.id, tone(2.0, 0.1))].into_iter().collect();
+        let reqs = restore_requests(&spans, &sources);
+        assert_eq!(reqs.len(), 1, "only the denoised clip");
+        assert_eq!(reqs[0].1.asset, voice.id);
+
+        let mut m = TimelineMixer::new(48_000);
+        m.set_spans(spans);
+        m.set_source(voice.id, sources[&voice.id].clone());
+        m.set_source(music.id, sources[&music.id].clone());
+        m.set_mixer(&{
+            let mut x = MixerSettings::default();
+            x.bus_mut(BusId::Role(AudioRole::Music)).mute = true;
+            x
+        });
+        assert_eq!(m.restore_requests().len(), 1);
+        // a stand-in "restoration" at half level proves the mixer reads it
+        let key = reqs[0].1.clone();
+        let len = (key.end - key.start) * 2;
+        let half: Vec<f32> = sources[&voice.id].samples[key.start * 2..key.start * 2 + len].iter().map(|s| s * 0.5).collect();
+        m.set_restored(reqs[0].0, Restored { key, buf: Arc::new(AudioBuffer::new(48_000, 2, half)) });
+        assert!(m.restore_requests().is_empty(), "installed restoration serves the span");
+        let mut out = vec![0.0f32; 48_000 * 2];
+        m.render(Time::ZERO, 1.0, &mut out);
+        let got = rms_of(&out[2 * 24_000..]);
+        assert!((got / (0.1 / 2f32.sqrt()) - 1.0).abs() < 0.03, "restored (half-level) audio plays: {got}");
     }
 }

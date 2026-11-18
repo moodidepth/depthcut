@@ -447,7 +447,8 @@ pub struct AudioParams {
     pub fade_in: Time,
     pub fade_out: Time,
     pub fade_shape: FadeShape,
-    pub eq: EqSettings,
+    /// 6-band parametric EQ + HPF/LPF (older 3-band projects load into it).
+    pub eq: crate::audio_fx::ParametricEq,
     pub role: AudioRole,
     pub ducking: DuckingSettings,
     pub muted: bool,
@@ -489,6 +490,18 @@ pub struct AudioParams {
     /// L-cut: audio keeps playing this long *after* the clip's video ends.
     #[serde(default)]
     pub audio_tail: Time,
+    /// Expander/gate, compressor, de-esser, delay, reverb.
+    #[serde(default)]
+    pub fx: crate::audio_fx::AudioFx,
+    /// Spectral noise reduction (rendered ahead of playback).
+    #[serde(default)]
+    pub noise_reduction: crate::audio_fx::NoiseReductionSettings,
+    /// Voice isolation (rendered ahead of playback).
+    #[serde(default)]
+    pub voice_isolation: crate::audio_fx::VoiceIsolationSettings,
+    /// Dialogue leveler (automatic gain riding).
+    #[serde(default)]
+    pub leveler: crate::audio_fx::LevelerSettings,
 }
 
 fn default_lowpass_hz() -> Param {
@@ -509,7 +522,7 @@ impl Default for AudioParams {
             fade_in: Time::ZERO,
             fade_out: Time::ZERO,
             fade_shape: FadeShape::SCurve,
-            eq: EqSettings::default(),
+            eq: crate::audio_fx::ParametricEq::default(),
             role: AudioRole::Dialogue,
             ducking: DuckingSettings::default(),
             muted: false,
@@ -526,6 +539,10 @@ impl Default for AudioParams {
             mute_extreme_slowmo: false,
             audio_lead: Time::ZERO,
             audio_tail: Time::ZERO,
+            fx: Default::default(),
+            noise_reduction: Default::default(),
+            voice_isolation: Default::default(),
+            leveler: Default::default(),
         }
     }
 }

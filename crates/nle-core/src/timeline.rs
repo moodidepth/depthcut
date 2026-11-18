@@ -95,6 +95,9 @@ pub struct Timeline {
     pub markers: Vec<Marker>,
     #[serde(default)]
     pub captions: CaptionTrack,
+    /// Role busses + master (only the project's root timeline is mixed with them).
+    #[serde(default)]
+    pub mixer: crate::audio_fx::MixerSettings,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -155,7 +158,7 @@ impl Default for Timeline {
 
 impl Timeline {
     pub fn new(name: impl Into<String>, format: VideoFormat) -> Self {
-        Timeline { name: name.into(), format, spine: Vec::new(), snapping: true, markers: Vec::new(), captions: CaptionTrack::default() }
+        Timeline { name: name.into(), format, spine: Vec::new(), snapping: true, markers: Vec::new(), captions: CaptionTrack::default(), mixer: Default::default() }
     }
 
     pub fn frame(&self) -> Time {
@@ -752,7 +755,7 @@ impl Timeline {
 
     /// A bare timeline around a nested spine (compound / storyline editing).
     pub fn nested(format: VideoFormat, spine: Vec<Clip>) -> Timeline {
-        Timeline { name: String::new(), format, spine, snapping: false, markers: Vec::new(), captions: CaptionTrack::default() }
+        Timeline { name: String::new(), format, spine, snapping: false, markers: Vec::new(), captions: CaptionTrack::default(), mixer: Default::default() }
     }
 
     /// Group connected clips into a secondary storyline (FCP "Create

@@ -489,10 +489,18 @@ pub fn mix_audio(project: &Project, sources: &HashMap<AssetId, Arc<AudioBuffer>>
         let env = nle_media::audio::dialogue_envelope(&spans, sources, project.timeline.extent(), &|| false);
         mixer.set_duck_envelope(env.map(Arc::new));
     }
+    // Noise reduction / voice isolation: rendered up front, exactly like the
+    // preview's background job (same keys → same audio).
+    let restored = nle_media::audio::restore_all(&spans, sources, &|| false).unwrap_or_default();
     mixer.set_spans(spans);
     for (id, buf) in sources {
         mixer.set_source(*id, buf.clone());
     }
+    for (clip, r) in restored {
+        mixer.set_restored(clip, r);
+    }
+    // Bus faders / mutes / inserts apply; solo is a monitoring aid only.
+    mixer.set_mixer(&project.timeline.mixer);
     // Integer sample positions: audio never drifts against video PTS.
     let frames = (end - start).max(Time::ZERO).samples_round(48_000) as usize;
     let mut out = vec![0.0f32; frames * 2];

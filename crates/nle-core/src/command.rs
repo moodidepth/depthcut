@@ -145,6 +145,10 @@ pub enum Command {
     SetCaptions {
         captions: Box<CaptionTrack>,
     },
+    /// Replace the mixer's bus settings.
+    SetMixer {
+        mixer: Box<crate::audio_fx::MixerSettings>,
+    },
     /// Insert a gap at `at` (splits the storyline clip under it).
     InsertGap {
         at: Time,
@@ -228,6 +232,7 @@ impl Command {
             Command::ToggleEnabled { .. } => "Enable/Disable",
             Command::SetMarkers { .. } => "Markers",
             Command::SetCaptions { .. } => "Captions",
+            Command::SetMixer { .. } => "Mixer",
             Command::InsertGap { .. } => "Insert Gap",
             Command::Batch { label, .. } => label,
             Command::InContainer { cmd, .. } | Command::HoldConnections { cmd, .. } => cmd.label(),
@@ -250,7 +255,7 @@ impl Command {
     /// Whether this command can move clips (and so the speech under captions).
     fn moves_media(&self) -> bool {
         // a Batch re-anchors around each of its sub-commands instead
-        !matches!(self, Command::SetCaptions { .. } | Command::SetMarkers { .. } | Command::Batch { .. })
+        !matches!(self, Command::SetCaptions { .. } | Command::SetMarkers { .. } | Command::SetMixer { .. } | Command::Batch { .. })
     }
 
     /// Apply to `tl`. On error the timeline may be partially modified; the
@@ -388,6 +393,10 @@ impl Command {
                 let mut c = (**captions).clone();
                 c.sort();
                 tl.captions = c;
+                Ok(())
+            }
+            Command::SetMixer { mixer } => {
+                tl.mixer = **mixer;
                 Ok(())
             }
             Command::InsertGap { at, duration } => {

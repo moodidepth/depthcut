@@ -1,7 +1,7 @@
-//! Real-time 3-band parametric EQ (RBJ biquads): low shelf, peaking mid,
-//! high shelf.
+//! Real-time parametric EQ (RBJ biquads): HPF / LPF (12–48 dB/oct
+//! Butterworth cascades) and six shelf / bell / notch bands.
 
-use nle_core::EqSettings;
+use nle_core::{EqBand, EqBandType, ParametricEq};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Biquad {
@@ -25,6 +25,19 @@ pub enum BandKind {
     LowPass,
     /// Constant 0 dB peak gain band-pass filter (gain ignored).
     BandPass,
+    /// Band-reject (gain ignored).
+    Notch,
+}
+
+impl BandKind {
+    fn from_band(t: EqBandType) -> Self {
+        match t {
+            EqBandType::LowShelf => BandKind::LowShelf,
+            EqBandType::Bell => BandKind::Peaking,
+            EqBandType::HighShelf => BandKind::HighShelf,
+            EqBandType::Notch => BandKind::Notch,
+        }
+    }
 }
 
 impl Biquad {
@@ -46,6 +59,7 @@ impl Biquad {
             BandKind::HighPass => ((1.0 + cos) / 2.0, -(1.0 + cos), (1.0 + cos) / 2.0, 1.0 + alpha, -2.0 * cos, 1.0 - alpha),
             BandKind::LowPass => ((1.0 - cos) / 2.0, 1.0 - cos, (1.0 - cos) / 2.0, 1.0 + alpha, -2.0 * cos, 1.0 - alpha),
             BandKind::BandPass => (alpha, 0.0, -alpha, 1.0 + alpha, -2.0 * cos, 1.0 - alpha),
+            BandKind::Notch => (1.0, -2.0 * cos, 1.0, 1.0 + alpha, -2.0 * cos, 1.0 - alpha),
             BandKind::LowShelf => {
                 let s = 2.0 * a.sqrt() * alpha;
                 (
@@ -98,42 +112,60 @@ impl Biquad {
         let num = (self.b0 as f64 + self.b1 as f64 * c1 + self.b2 as f64 * c2, self.b1 as f64 * s1 + self.b2 as f64 * s2);
         let den = (1.0 + self.a1 as f64 * c1 + self.a2 as f64 * c2, self.a1 as f64 * s1 + self.a2 as f64 * s2);
         let mag = ((num.0 * num.0 + num.1 * num.1) / (den.0 * den.0 + den.1 * den.1)).sqrt();
-        (20.0 * mag.log10()) as f32
+        (20.0 * mag.max(1e-12).log10()) as f32
     }
 }
 
-/// Stereo 3-band EQ.
+/// Stereo 6-band parametric EQ with cascaded Butterworth HPF / LPF.
 #[derive(Clone, Debug)]
-pub struct ThreeBandEq {
+pub struct ParametricEqProc {
     pub sample_rate: f32,
-    settings: EqSettings,
-    bands: [Biquad; 3],
+    settings: ParametricEq,
+    /// Active sections in processing order (HPF, LPF, bands).
+    sections: Vec<Biquad>,
+    output: f32,
 }
 
-impl ThreeBandEq {
-    pub fn new(sample_rate: f32, settings: EqSettings) -> Self {
-        let mut eq = ThreeBandEq { sample_rate, settings, bands: [Biquad::default(); 3] };
+impl ParametricEqProc {
+    pub fn new(sample_rate: f32, settings: ParametricEq) -> Self {
+        let mut eq = ParametricEqProc { sample_rate, settings, sections: Vec::new(), output: 1.0 };
         eq.configure(settings);
         eq
     }
 
-    pub fn configure(&mut self, s: EqSettings) {
+    /// Rebuild the filter sections. Sections that survive keep their state,
+    /// so dragging a band while playing does not click.
+    pub fn configure(&mut self, s: ParametricEq) {
         self.settings = s;
         let sr = self.sample_rate;
-        self.bands[0].set(BandKind::LowShelf, sr, s.low_freq, s.low_gain_db, 0.707);
-        self.bands[1].set(BandKind::Peaking, sr, s.mid_freq, s.mid_gain_db, s.mid_q);
-        self.bands[2].set(BandKind::HighShelf, sr, s.high_freq, s.high_gain_db, 0.707);
+        let mut want: Vec<(BandKind, f32, f32, f32)> = Vec::new();
+        if s.enabled {
+            if s.hpf.enabled {
+                want.extend(s.hpf.slope.section_qs().iter().map(|q| (BandKind::HighPass, s.hpf.freq, 0.0, *q)));
+            }
+            if s.lpf.enabled {
+                want.extend(s.lpf.slope.section_qs().iter().map(|q| (BandKind::LowPass, s.lpf.freq, 0.0, *q)));
+            }
+            for b in s.bands.iter().filter(|b| b.is_active()) {
+                want.push((BandKind::from_band(b.kind), b.freq, b.gain_db, b.q));
+            }
+        }
+        self.sections.resize(want.len(), Biquad::default());
+        for (sec, (kind, f, g, q)) in self.sections.iter_mut().zip(want) {
+            sec.set(kind, sr, f, g, q);
+        }
+        self.output = if s.enabled { 10f32.powf(s.output_db / 20.0) } else { 1.0 };
     }
 
     /// Reconfigure only if the settings changed (cheap per-block call).
-    pub fn update(&mut self, s: &EqSettings) {
+    pub fn update(&mut self, s: &ParametricEq) {
         if *s != self.settings {
             self.configure(*s);
         }
     }
 
     pub fn is_active(&self) -> bool {
-        self.settings.enabled && (self.settings.low_gain_db != 0.0 || self.settings.mid_gain_db != 0.0 || self.settings.high_gain_db != 0.0)
+        self.settings.is_active()
     }
 
     /// Process an interleaved stereo buffer in place.
@@ -141,29 +173,38 @@ impl ThreeBandEq {
         if !self.is_active() {
             return;
         }
+        let out = self.output;
         for frame in buf.as_chunks_mut::<2>().0 {
             for (ch, s) in frame.iter_mut().enumerate() {
                 let mut x = *s;
-                for b in &mut self.bands {
+                for b in &mut self.sections {
                     x = b.process(ch, x);
                 }
-                *s = x;
+                *s = x * out;
             }
         }
     }
 
     pub fn reset(&mut self) {
-        for b in &mut self.bands {
+        for b in &mut self.sections {
             b.reset();
         }
     }
 
     /// Combined response in dB (for the inspector curve display).
     pub fn response_db(&self, freq: f32) -> f32 {
-        if !self.settings.enabled {
+        if !self.is_active() {
             return 0.0;
         }
-        self.bands.iter().map(|b| b.magnitude_db(self.sample_rate, freq)).sum()
+        self.sections.iter().map(|b| b.magnitude_db(self.sample_rate, freq)).sum::<f32>() + self.settings.output_db
+    }
+
+    /// Response of a single band in dB (for per-band curve shading).
+    pub fn band_response_db(sample_rate: f32, band: &EqBand, freq: f32) -> f32 {
+        if !band.is_active() {
+            return 0.0;
+        }
+        Biquad::new(BandKind::from_band(band.kind), sample_rate, band.freq, band.gain_db, band.q).magnitude_db(sample_rate, freq)
     }
 }
 
@@ -182,21 +223,54 @@ pub fn soft_limit(sample: f32, ceiling: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nle_core::{EqFilter, FilterSlope};
+
+    fn eq_with(f: impl FnOnce(&mut ParametricEq)) -> ParametricEqProc {
+        let mut p = ParametricEq { enabled: true, ..Default::default() };
+        f(&mut p);
+        ParametricEqProc::new(48_000.0, p)
+    }
 
     #[test]
     fn band_responses() {
-        let s = EqSettings { enabled: true, low_gain_db: 6.0, mid_gain_db: -9.0, high_gain_db: 4.0, ..Default::default() };
-        let eq = ThreeBandEq::new(48_000.0, s);
-        assert!((eq.bands[0].magnitude_db(48_000.0, 20.0) - 6.0).abs() < 0.3, "low shelf at DC");
-        assert!((eq.bands[1].magnitude_db(48_000.0, 1_000.0) + 9.0).abs() < 0.05, "peak centre");
-        assert!((eq.bands[2].magnitude_db(48_000.0, 20_000.0) - 4.0).abs() < 0.5, "high shelf");
-        assert!(eq.bands[1].magnitude_db(48_000.0, 50.0).abs() < 0.5, "peak far away is flat");
+        let eq = eq_with(|p| {
+            p.bands[0].gain_db = 6.0;
+            p.bands[2].gain_db = -9.0;
+            p.bands[2].freq = 1_000.0;
+            p.bands[5].gain_db = 4.0;
+        });
+        assert!((eq.response_db(20.0) - 6.0).abs() < 0.4, "low shelf at DC {}", eq.response_db(20.0));
+        assert!((eq.response_db(1_000.0) + 9.0).abs() < 0.3, "bell centre {}", eq.response_db(1_000.0));
+        assert!((eq.response_db(20_000.0) - 4.0).abs() < 0.6, "high shelf {}", eq.response_db(20_000.0));
+        // untouched bands add no sections
+        assert_eq!(eq.sections.len(), 3);
+        assert_eq!(eq_with(|_| {}).sections.len(), 0);
+        assert!(!eq_with(|_| {}).is_active());
+    }
+
+    #[test]
+    fn filter_slopes_and_notch() {
+        for (slope, want) in [(FilterSlope::Db12, -12.0), (FilterSlope::Db24, -24.0), (FilterSlope::Db48, -48.0)] {
+            let eq = eq_with(|p| p.hpf = EqFilter { enabled: true, freq: 400.0, slope });
+            assert!((eq.response_db(400.0) + 3.0).abs() < 0.2, "{slope:?}: −3 dB at the corner, got {}", eq.response_db(400.0));
+            // two octaves below the corner the slope is close to its asymptote
+            let oct = eq.response_db(50.0) - eq.response_db(100.0);
+            assert!((oct - want).abs() < 1.0, "{slope:?}: {oct} dB/oct");
+            assert!(eq.response_db(4_000.0).abs() < 0.1, "passband flat");
+        }
+        let eq = eq_with(|p| p.lpf = EqFilter { enabled: true, freq: 2_000.0, slope: FilterSlope::Db24 });
+        assert!(eq.response_db(8_000.0) < -40.0);
+        let eq = eq_with(|p| p.bands[3] = EqBand { enabled: true, kind: EqBandType::Notch, freq: 60.0, gain_db: 0.0, q: 8.0 });
+        assert!(eq.response_db(60.0) < -40.0, "hum notch {}", eq.response_db(60.0));
+        assert!(eq.response_db(120.0).abs() < 0.5);
     }
 
     #[test]
     fn processing_matches_response() {
-        let s = EqSettings { enabled: true, mid_gain_db: 12.0, mid_freq: 1_000.0, ..Default::default() };
-        let mut eq = ThreeBandEq::new(48_000.0, s);
+        let mut eq = eq_with(|p| {
+            p.bands[2].gain_db = 12.0;
+            p.bands[2].freq = 1_000.0;
+        });
         let mut buf: Vec<f32> = (0..48_000)
             .flat_map(|i| {
                 let v = (2.0 * std::f32::consts::PI * 1_000.0 * i as f32 / 48_000.0).sin() * 0.1;

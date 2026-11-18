@@ -99,6 +99,7 @@ actions! {
     ZoomToFit => "Zoom to Fit", "View";
     ToggleAudioLanes => "Show Audio Lanes by Role", "View";
     ToggleScopes => "Show Video Scopes", "View";
+    ToggleAudioMixer => "Show Audio Mixer", "View";
     AutoCaptions => "Auto Captions", "Captions";
     Import => "Import Media", "File";
     ImportFcpxml => "Import FCPXML", "File";
@@ -417,6 +418,7 @@ impl ActionMap {
                 (FinalizeAudition, &[B::shift_alt(K::Y)]),
                 (ToggleAudioLanes, &[B::ctrl_shift(K::L)]),
                 (ToggleScopes, &[B::ctrl(K::Num7)]),
+                (ToggleAudioMixer, &[B::ctrl(K::Num8)]),
             ],
         )
     }
@@ -500,6 +502,7 @@ impl ActionMap {
                 (FinalizeAudition, &[B::shift_alt(K::Y)]),
                 (ToggleAudioLanes, &[B::ctrl_shift(K::L)]),
                 (ToggleScopes, &[B::ctrl(K::Num7)]),
+                (ToggleAudioMixer, &[B::ctrl(K::Num8)]),
             ],
         )
     }
@@ -583,6 +586,7 @@ impl ActionMap {
                 (FinalizeAudition, &[B::shift_alt(K::Y)]),
                 (ToggleAudioLanes, &[B::ctrl_shift(K::L)]),
                 (ToggleScopes, &[B::ctrl(K::Num7)]),
+                (ToggleAudioMixer, &[B::ctrl(K::Num8)]),
             ],
         )
     }

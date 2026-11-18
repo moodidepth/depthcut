@@ -216,6 +216,10 @@ pub struct App {
     /// from, and the installed envelope (also read by the timeline overlay).
     duck_job: Option<Job<nle_media::audio::DuckEnvelope>>,
     duck_key: Option<DuckKey>,
+    /// Background noise-reduction / voice-isolation render for one clip.
+    restore_job: Option<(nle_core::ClipId, nle_media::audio::RestoreKey, Job<nle_media::frame::AudioBuffer>)>,
+    /// Audio Mixer drawer (Ctrl+8).
+    pub mixer_view: crate::audio_ui::MixerView,
     pub duck_env: Option<Arc<nle_media::audio::DuckEnvelope>>,
     pub duck_overlay: std::cell::RefCell<std::collections::HashMap<nle_core::ClipId, (nle_core::DuckingSettings, Arc<nle_media::audio::DuckCurve>)>>,
     pub gpu_label: String,
@@ -248,6 +252,9 @@ pub enum ProjectSwitch {
 pub fn coalesce_key() -> u64 {
     COALESCE.fetch_add(1, Ordering::Relaxed) | (1 << 62)
 }
+
+/// Undo-coalescing tag for Audio Mixer drags.
+const MIXER_TAG: u64 = 0x4d;
 
 /// Stable coalescing key for continuous edits (drags) of one clip.
 pub fn drag_key(tag: u64, id: ClipId) -> u64 {
@@ -339,6 +346,8 @@ impl App {
             audio_sources: HashSet::new(),
             duck_job: None,
             duck_key: None,
+            restore_job: None,
+            mixer_view: Default::default(),
             duck_env: None,
             duck_overlay: Default::default(),
             gpu_label,
@@ -362,6 +371,9 @@ impl App {
         self.audio_revision = u64::MAX;
         self.duck_job = None;
         self.duck_key = None;
+        if let Some((_, _, j)) = self.restore_job.take() {
+            j.cancel();
+        }
         self.set_duck_env(None);
         self.selection.clear();
         self.playhead = Time::ZERO;
@@ -488,8 +500,8 @@ impl App {
     /// (continuous drags become one undo step).
     pub fn exec_key(&mut self, cmd: Command, key: Option<u64>) -> bool {
         let label = cmd.label();
-        if !self.focus.is_empty() && matches!(cmd, Command::SetMarkers { .. } | Command::SetCaptions { .. } | Command::SyncClipsToBeats { .. }) {
-            self.status(format!("{label}: markers and captions belong to the project timeline \u{2014} step out of the compound first"));
+        if !self.focus.is_empty() && matches!(cmd, Command::SetMarkers { .. } | Command::SetCaptions { .. } | Command::SyncClipsToBeats { .. } | Command::SetMixer { .. }) {
+            self.status(format!("{label}: markers, captions and the mixer belong to the project timeline \u{2014} step out of the compound first"));
             return false;
         }
         let result = self.focus.execute(&mut self.project.timeline, &mut self.history, cmd, key);
@@ -1509,12 +1521,16 @@ impl App {
 
     fn sync_audio(&mut self) {
         let rev = self.history.revision();
-        if rev != self.audio_revision {
+        let changed = rev != self.audio_revision;
+        if changed {
             let spans = eval::audio_spans(&self.project.timeline);
             self.refresh_duck_envelope(&spans);
             self.audio.set_spans(spans);
             self.audio_revision = rev;
         }
+        // busses live on the project timeline, also while stepped into a compound
+        self.audio.set_mixer(&self.focus.root(&self.project.timeline).mixer);
+        self.sync_restore(changed);
         if let Some(r) = self.duck_job.as_ref().and_then(|j| j.take()) {
             self.duck_job = None;
             match r {
@@ -1522,6 +1538,61 @@ impl App {
                 Err(e) => log::warn!("duck envelope: {e}"),
             }
         }
+    }
+
+    /// Noise reduction / voice isolation: render what the spans need, one
+    /// clip at a time in the background, and install it into the mixer.
+    /// Until a render lands that clip plays raw.
+    fn sync_restore(&mut self, mut dirty: bool) {
+        if let Some((clip, key, job)) = &self.restore_job {
+            match job.take() {
+                Some(r) => {
+                    match r {
+                        Ok(buf) => self.audio.set_restored(*clip, nle_media::audio::Restored { key: key.clone(), buf: Arc::new(buf) }),
+                        Err(e) => log::warn!("audio restoration: {e}"),
+                    }
+                    self.restore_job = None;
+                    dirty = true;
+                }
+                None if !dirty => return,
+                None => {}
+            }
+        }
+        if !dirty {
+            return;
+        }
+        let reqs = self.audio.restore_requests();
+        if let Some((clip, key, job)) = &self.restore_job {
+            if reqs.iter().any(|(c, k)| c == clip && k == key) {
+                return; // still wanted, keep rendering
+            }
+            job.cancel();
+            self.restore_job = None;
+        }
+        let Some((clip, key)) = reqs.into_iter().find(|(_, k)| self.library.audio.contains_key(&k.asset)) else { return };
+        let src = self.library.audio[&key.asset].clone();
+        let k = key.clone();
+        let job = Job::spawn("Audio restoration", move |ctx| nle_media::audio::restore::restore(&src, &k, &|| ctx.cancelled()).ok_or_else(|| "cancelled".to_string()));
+        self.restore_job = Some((clip, key, job));
+    }
+
+    fn mixer_drawer(&mut self, ui: &mut egui::Ui) {
+        let dt = ui.input(|i| i.stable_dt).min(0.1);
+        self.mixer_view.feed(self.audio.meters(), dt);
+        let original = self.focus.root(&self.project.timeline).mixer;
+        let mut mix = original;
+        let req = crate::audio_ui::mixer_panel(ui, &mut mix, &mut self.mixer_view);
+        if mix != original {
+            self.exec_key(Command::SetMixer { mixer: Box::new(mix) }, Some(drag_key(MIXER_TAG, nle_core::ClipId(0))));
+        }
+        if !ui.ctx().input(|i| i.pointer.any_down()) && !ui.ctx().wants_keyboard_input() {
+            self.history.seal();
+        }
+        if req.reset_loudness {
+            self.audio.reset_loudness();
+        }
+        // meters keep moving while audio plays (and fall back to −∞ after)
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
     }
 
     /// Recompute the dialogue envelope in the background when the voice
@@ -1792,6 +1863,7 @@ impl App {
             Action::ZoomOut => self.tl.zoom_by(1.0 / 1.5),
             Action::ZoomToFit => self.tl.fit_pending = true,
             Action::ToggleScopes => self.set_scopes(!self.viewer.scopes),
+            Action::ToggleAudioMixer => self.mixer_view.open = !self.mixer_view.open,
             Action::AutoCaptions => self.show_captions = !self.show_captions,
             Action::Import => self.import_dialog(),
             Action::ImportFcpxml => self.request_switch(ProjectSwitch::ImportFcpxml),
@@ -2145,6 +2217,10 @@ impl App {
                 if ui.checkbox(&mut scopes, self.menu_label("Video Scopes", Action::ToggleScopes)).changed() {
                     self.set_scopes(scopes);
                 }
+                let mut mixer = self.mixer_view.open;
+                if ui.checkbox(&mut mixer, self.menu_label("Audio Mixer", Action::ToggleAudioMixer)).changed() {
+                    self.mixer_view.open = mixer;
+                }
             });
             ui.menu_button("Help", |ui| {
                 if ui.button("Discord Rich Presence…").clicked() {
@@ -2472,6 +2548,14 @@ impl eframe::App for App {
             .min_height(200.0)
             .frame(egui::Frame::new().fill(theme::BG).inner_margin(egui::Margin::same(0)))
             .show(ctx, |ui| timeline_ui::show(self, ui));
+        if self.mixer_view.open {
+            egui::TopBottomPanel::bottom("audio-mixer")
+                .resizable(true)
+                .default_height(330.0)
+                .min_height(260.0)
+                .frame(egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin::same(6)).stroke(egui::Stroke::new(1.0_f32, theme::BORDER)))
+                .show(ctx, |ui| self.mixer_drawer(ui));
+        }
         egui::SidePanel::left("browser")
             .resizable(true)
             .default_width(380.0)
