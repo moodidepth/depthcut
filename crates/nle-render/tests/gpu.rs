@@ -115,7 +115,7 @@ fn gpu_pipeline_end_to_end() {
     let mut graded = media_layer(b);
     graded.color = ResolvedColor { enabled: true, exposure: 1.0, ..Default::default() };
     let comp = Composition::new(Time::ZERO, vec![RenderNode::Layer(graded)]);
-    let out = r.render_nv12(&comp, &mut src, RenderOptions { wipe: Some(0.5), color: true, highlight: None });
+    let out = r.render_nv12(&comp, &mut src, RenderOptions { wipe: Some(0.5), ..Default::default() });
     let left = mean_y(&out, 0, W / 2 - 4);
     let right = mean_y(&out, W / 2 + 4, W);
     assert!((left - 40.0).abs() <= 2.0, "ungraded side {left}");

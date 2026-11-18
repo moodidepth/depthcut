@@ -118,12 +118,16 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let p = vec3<f32>(f32(id.x) + 0.5, f32(id.y) + 0.5, 1.0);
     let uv = vec2<f32>(dot(c.inv_row0.xyz, p), dot(c.inv_row1.xyz, p));
     var out = base.rgb;
+    // premultiplied "over": an opaque base stays opaque, a transparent one
+    // (alpha exports) picks up the layer's coverage
+    var alpha = base.a;
     let inside = uv.x >= c.crop.x && uv.x <= 1.0 - c.crop.y && uv.y >= c.crop.z && uv.y <= 1.0 - c.crop.w;
     if (inside) {
         let suv = c.src_rect.xy + uv * c.src_rect.zw;
         let l = textureSampleLevel(layer, samp, suv, 0.0);
         let a = clamp(l.a * c.opacity, 0.0, 1.0);
         out = mix(base.rgb, blend(base.rgb, l.rgb, c.blend), a);
+        alpha = a + base.a * (1.0 - a);
     }
-    textureStore(dst, vec2<i32>(id.xy), vec4<f32>(out, 1.0));
+    textureStore(dst, vec2<i32>(id.xy), vec4<f32>(out, alpha));
 }

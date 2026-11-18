@@ -464,6 +464,25 @@ fn poll_settings_jobs(app: &mut App, ctx: &egui::Context) {
     }
 }
 
+/// Carry out app-side work a Copilot action asked for.
+fn run_request(app: &mut App, req: nle_ai::UiRequest) -> Result<(), String> {
+    match req {
+        nle_ai::UiRequest::GenerateCaptions { language } => {
+            if let Some(l) = language {
+                app.captions.language = l;
+            }
+            app.show_captions = true;
+            crate::captions_ui::start_caption_generation(app)
+        }
+        nle_ai::UiRequest::OpenExport { delivery } => {
+            let g = crate::export_ui::delivery_from_name(&delivery).ok_or_else(|| format!("unknown delivery '{delivery}'"))?;
+            app.export.requested_delivery = Some(g);
+            app.export.open = true;
+            Ok(())
+        }
+    }
+}
+
 pub fn poll(app: &mut App, ctx: &egui::Context) {
     poll_settings_jobs(app, ctx);
     let Some(job) = app.copilot.job.as_ref() else { return };
@@ -476,7 +495,25 @@ pub fn poll(app: &mut App, ctx: &egui::Context) {
                 // The copilot edits the whole project, never a stepped-into compound.
                 app.step_out(usize::MAX);
                 let mut outcomes = resp.rejected.clone();
-                outcomes.extend(nle_ai::apply_copilot_actions(&resp.tool_calls, &mut app.project.timeline, &mut app.history, &mut app.playhead, &app.selection));
+                let mut env = nle_ai::CopilotEnv::default();
+                if resp.tool_calls.contains(&nle_ai::CopilotToolCall::PolishAudio) {
+                    let ids: std::collections::BTreeSet<_> = nle_core::audio_spans(&app.project.timeline).iter().map(|s| s.asset).collect();
+                    for id in ids {
+                        if let Some(l) = app.asset_loudness_lufs(id) {
+                            env.lufs.insert(id, l);
+                        }
+                    }
+                }
+                let mut done = nle_ai::apply_copilot_actions_with(&resp.tool_calls, &mut app.project.timeline, &mut app.history, &mut app.playhead, &app.selection, &env);
+                for o in &mut done {
+                    if let Some(req) = o.request.take() {
+                        if let Err(e) = run_request(app, req) {
+                            o.applied = false;
+                            o.detail = e;
+                        }
+                    }
+                }
+                outcomes.extend(done);
                 let applied = outcomes.iter().filter(|o| o.applied).count();
                 let skipped = outcomes.len() - applied;
                 let mut body = resp.reply;

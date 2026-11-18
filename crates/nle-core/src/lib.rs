@@ -28,14 +28,18 @@ pub mod captions;
 pub mod clip;
 pub mod color;
 pub mod command;
+pub mod edl;
 pub mod effects;
 pub mod eval;
 pub mod fcpxml;
 pub mod focus;
 pub mod ids;
+pub mod interchange;
 pub mod keyframe;
 pub mod keymap;
+pub mod media_mgmt;
 pub mod motion;
+pub mod otio;
 pub mod presets;
 pub mod project;
 pub mod speed;
@@ -45,7 +49,7 @@ pub mod timeline;
 pub mod xml;
 pub mod zoom_punch;
 
-pub use asset::{AssetKind, Attribution, AudioStreamInfo, MediaAsset, VideoStreamInfo};
+pub use asset::{AssetKind, Attribution, AudioStreamInfo, MediaAsset, VideoStreamInfo, YuvMatrix};
 pub use audio_fx::{
     AudioFx, BusId, BusSettings, CompressorSettings, DeEsserSettings, DelaySettings, EqBand, EqBandType, EqFilter, FilterSlope, GateMode, GateSettings, LevelerSettings,
     MixerSettings, NoiseReductionSettings, ParametricEq, ReverbSettings, VoiceIsolationSettings,

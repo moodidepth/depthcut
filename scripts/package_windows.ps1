@@ -98,41 +98,13 @@ if ($crtDir) {
 }
 
 # ---- code signing ----------------------------------------------------------
-function Find-SignTool {
-    $cmd = Get-Command signtool.exe -ErrorAction SilentlyContinue
-    if ($cmd) { return $cmd.Source }
-    $kits = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin"
-    $hit = Get-ChildItem $kits -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^10\.' } |
-        Sort-Object { [version]$_.Name } -Descending |
-        ForEach-Object { Join-Path $_.FullName "x64\signtool.exe" } | Where-Object { Test-Path $_ } | Select-Object -First 1
-    return $hit
-}
+# scripts\sign_file.ps1 reads the RCP_SIGN_* variables (it is also Inno Setup's
+# SignTool, so the uninstaller inside setup.exe gets signed too).
+$SignScript = Join-Path $PSScriptRoot "sign_file.ps1"
+$SignConfigured = [bool](($env:RCP_TRUSTED_SIGNING_DLIB -and $env:RCP_TRUSTED_SIGNING_METADATA) -or $env:RCP_SIGN_PFX -or $env:RCP_SIGN_CERT_THUMBPRINT)
 function Invoke-Sign([string]$File) {
-    $ts = if ($env:RCP_SIGN_TIMESTAMP_URL) { $env:RCP_SIGN_TIMESTAMP_URL } else { "http://timestamp.digicert.com" }
-    $mode = $null
-    $signArgs = @("sign", "/fd", "SHA256", "/td", "SHA256")
-    if ($env:RCP_TRUSTED_SIGNING_DLIB -and $env:RCP_TRUSTED_SIGNING_METADATA) {
-        $mode = "Azure Trusted Signing"
-        if (-not $env:RCP_SIGN_TIMESTAMP_URL) { $ts = "http://timestamp.acs.microsoft.com" }
-        $signArgs += @("/dlib", $env:RCP_TRUSTED_SIGNING_DLIB, "/dmdf", $env:RCP_TRUSTED_SIGNING_METADATA)
-    } elseif ($env:RCP_SIGN_PFX) {
-        $mode = "PFX certificate"
-        $signArgs += @("/f", $env:RCP_SIGN_PFX)
-        if ($env:RCP_SIGN_PFX_PASSWORD) { $signArgs += @("/p", $env:RCP_SIGN_PFX_PASSWORD) }
-    } elseif ($env:RCP_SIGN_CERT_THUMBPRINT) {
-        $mode = "certificate store"
-        $signArgs += @("/sha1", $env:RCP_SIGN_CERT_THUMBPRINT)
-    }
-    if (-not $mode) {
-        Write-Host "    Skipping code signing for $(Split-Path -Leaf $File) (no certificate configured)" -ForegroundColor Yellow
-        return
-    }
-    $signtool = Find-SignTool
-    if (-not $signtool) { throw "code signing requested ($mode) but signtool.exe was not found (install the Windows SDK)" }
-    $signArgs += @("/tr", $ts, $File)
-    Write-Host "    Signing $(Split-Path -Leaf $File) with $mode"
-    & $signtool @signArgs
-    if ($LASTEXITCODE -ne 0) { throw "signtool failed for $File" }
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $SignScript -File $File
+    if ($LASTEXITCODE -ne 0) { throw "code signing failed for $File" }
 }
 Step "Code signing"
 Invoke-Sign (Join-Path $Stage "rust-cut-pro.exe")
@@ -164,9 +136,15 @@ if (-not $iscc) {
 $Setup = Join-Path $Dist "$Name-setup.exe"
 if (Test-Path $Setup) { Remove-Item $Setup -Force }
 if ($iscc) {
-    & $iscc "/Q" "/DAppVersion=$Version" "/DStageDir=$Stage" "/DOutputDir=$Dist" (Join-Path $Root "installer\rust_cut_pro.iss")
+    $isccArgs = @("/Q", "/DAppVersion=$Version", "/DStageDir=$Stage", "/DOutputDir=$Dist")
+    if ($SignConfigured) {
+        # ISCC runs this for setup.exe and the embedded uninstaller; $q is a
+        # quote and $f the quoted file name (Inno Setup expands both)
+        $isccArgs += ('/Srcp=powershell.exe -NoProfile -ExecutionPolicy Bypass -File $q' + $SignScript + '$q -File $f')
+        $isccArgs += "/DSignSetup"
+    }
+    & $iscc @isccArgs (Join-Path $Root "installer\rust_cut_pro.iss")
     if ($LASTEXITCODE -ne 0) { throw "ISCC failed ($LASTEXITCODE)" }
-    Invoke-Sign $Setup
     Write-Host "    $Setup"
 } else {
     Write-Host "    Inno Setup 6 not found - skipped setup.exe (install it: winget install JRSoftware.InnoSetup)" -ForegroundColor Yellow

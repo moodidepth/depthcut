@@ -48,6 +48,41 @@ impl HwBackend {
     }
 }
 
+/// Chroma subsampling of a stream.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Chroma {
+    #[default]
+    Yuv420,
+    Yuv422,
+    Yuv444,
+}
+
+impl Chroma {
+    /// From an FFmpeg pixel format name (`yuv422p10le`, `yuvj444p`, `y210le`, ...).
+    pub fn from_pix_fmt(pix_fmt: &str) -> Chroma {
+        let f = pix_fmt.to_ascii_lowercase();
+        if f.contains("444") || f.starts_with("gbr") || f.starts_with("rgb") || f.starts_with("bgr") || f.starts_with("argb") || f.starts_with("xv3") || f.starts_with("vuy") {
+            Chroma::Yuv444
+        } else if f.contains("422") || f.starts_with("yuyv") || f.starts_with("uyvy") || f.starts_with("y210") || f.starts_with("y212") || f.starts_with("p21") {
+            Chroma::Yuv422
+        } else {
+            Chroma::Yuv420
+        }
+    }
+
+    /// Software format to `hwdownload` a QSV / VA-API surface of this layout to.
+    /// 4:2:2 surfaces are packed (Y210 / YUY2), verified on an Arc A750 with
+    /// HEVC 4:2:2 8- and 10-bit: P010 / NV12 downloads fail there.
+    pub fn hw_download_format(self, bit_depth: u8) -> &'static str {
+        match (self, bit_depth > 8) {
+            (Chroma::Yuv422, true) => "y210le",
+            (Chroma::Yuv422, false) => "yuyv422",
+            (_, true) => "p010le",
+            (_, false) => "nv12",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum VideoCodec {
     H264,
@@ -237,11 +272,21 @@ pub struct DecoderPlan {
 
 /// Choose the decode path for a stream, in priority order. Returns every
 /// viable plan so callers can fall back if one fails at runtime.
-pub fn plan_decode(codec: VideoCodec, bit_depth: u8, platform: Platform, caps: &HwCaps, gpu: &GpuProfile) -> Vec<DecoderPlan> {
+///
+/// Chroma: 4:2:2 goes to QSV only for HEVC (Arc decodes HEVC Rext 4:2:2; its
+/// H.264 4:2:2 fails with "Error querying IO surface"), and 4:4:4 never does
+/// (untested). D3D11VA / VA-API stay in the list: FFmpeg itself falls back to
+/// software there when the GPU can't decode the profile.
+pub fn plan_decode(codec: VideoCodec, bit_depth: u8, chroma: Chroma, platform: Platform, caps: &HwCaps, gpu: &GpuProfile) -> Vec<DecoderPlan> {
     let mut plans = Vec::new();
     let hw_ok = gpu.can_decode(codec, bit_depth);
+    let qsv_chroma_ok = match chroma {
+        Chroma::Yuv420 => true,
+        Chroma::Yuv422 => codec == VideoCodec::Hevc,
+        Chroma::Yuv444 => false,
+    };
     if hw_ok {
-        if let Some(dec) = codec.qsv_decoder() {
+        if let Some(dec) = codec.qsv_decoder().filter(|_| qsv_chroma_ok) {
             if caps.has_hwaccel("qsv") && (caps.decoders.is_empty() || caps.has_decoder(dec)) {
                 let mut args = qsv_device_args(platform);
                 args.extend(["-hwaccel", "qsv", "-hwaccel_device", "hw", "-c:v", dec].map(String::from));
@@ -249,7 +294,7 @@ pub fn plan_decode(codec: VideoCodec, bit_depth: u8, platform: Platform, caps: &
                     backend: HwBackend::Qsv,
                     decoder: Some(dec.into()),
                     input_args: args,
-                    reason: format!("{} {}-bit on {} via QSV", dec, bit_depth, gpu.name),
+                    reason: format!("{} {}-bit {:?} on {} via QSV", dec, bit_depth, chroma, gpu.name),
                 });
             }
         }
@@ -288,7 +333,7 @@ mod tests {
         for platform in [Platform::Windows, Platform::Linux] {
             let caps = HwCaps::assume_full(platform);
             for (codec, depth) in [(VideoCodec::H264, 8), (VideoCodec::Hevc, 10), (VideoCodec::Av1, 10)] {
-                let plans = plan_decode(codec, depth, platform, &caps, &INTEL_ARC_A750);
+                let plans = plan_decode(codec, depth, Chroma::Yuv420, platform, &caps, &INTEL_ARC_A750);
                 assert_eq!(plans[0].backend, HwBackend::Qsv, "{codec:?}");
                 assert_eq!(plans.last().unwrap().backend, HwBackend::Software);
                 let joined = plans[0].input_args.join(" ");
@@ -309,15 +354,32 @@ mod tests {
     #[test]
     fn legacy_codecs_fall_back_to_software() {
         let caps = HwCaps::assume_full(Platform::Linux);
-        let plans = plan_decode(VideoCodec::ProRes, 10, Platform::Linux, &caps, &INTEL_ARC_A750);
+        let plans = plan_decode(VideoCodec::ProRes, 10, Chroma::Yuv422, Platform::Linux, &caps, &INTEL_ARC_A750);
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].backend, HwBackend::Software);
         // 10-bit H.264 (Hi10P) is not decodable on Arc
-        let plans = plan_decode(VideoCodec::H264, 10, Platform::Linux, &caps, &INTEL_ARC_A750);
+        let plans = plan_decode(VideoCodec::H264, 10, Chroma::Yuv420, Platform::Linux, &caps, &INTEL_ARC_A750);
         assert_eq!(plans[0].backend, HwBackend::Software);
         // no hw support in ffmpeg build → software
-        let plans = plan_decode(VideoCodec::Hevc, 8, Platform::Linux, &HwCaps::default(), &INTEL_ARC_A750);
+        let plans = plan_decode(VideoCodec::Hevc, 8, Chroma::Yuv420, Platform::Linux, &HwCaps::default(), &INTEL_ARC_A750);
         assert_eq!(plans[0].backend, HwBackend::Software);
+    }
+
+    #[test]
+    fn four_two_two_uses_qsv_only_for_hevc() {
+        let caps = HwCaps::assume_full(Platform::Windows);
+        let plans = plan_decode(VideoCodec::Hevc, 10, Chroma::Yuv422, Platform::Windows, &caps, &INTEL_ARC_A750);
+        assert_eq!(plans[0].backend, HwBackend::Qsv);
+        let plans = plan_decode(VideoCodec::H264, 8, Chroma::Yuv422, Platform::Windows, &caps, &INTEL_ARC_A750);
+        assert!(plans.iter().all(|p| p.backend != HwBackend::Qsv), "{plans:?}");
+        let plans = plan_decode(VideoCodec::Hevc, 10, Chroma::Yuv444, Platform::Windows, &caps, &INTEL_ARC_A750);
+        assert!(plans.iter().all(|p| p.backend != HwBackend::Qsv), "{plans:?}");
+        assert_eq!(Chroma::from_pix_fmt("yuv422p10le"), Chroma::Yuv422);
+        assert_eq!(Chroma::from_pix_fmt("yuvj444p"), Chroma::Yuv444);
+        assert_eq!(Chroma::from_pix_fmt("yuv420p"), Chroma::Yuv420);
+        assert_eq!(Chroma::Yuv422.hw_download_format(10), "y210le");
+        assert_eq!(Chroma::Yuv422.hw_download_format(8), "yuyv422");
+        assert_eq!(Chroma::Yuv420.hw_download_format(10), "p010le");
     }
 
     #[test]

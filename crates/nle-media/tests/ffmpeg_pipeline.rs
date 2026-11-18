@@ -179,3 +179,48 @@ fn quick_sync_decodes_hevc_10bit_and_av1() {
     eprintln!("hardware decode cases run: {ran}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// 4:2:2 sources (camera / ProRes-style HEVC and H.264): every one must
+/// decode, 10-bit to P010. On Intel Arc, HEVC 4:2:2 must stay on QSV (packed
+/// Y210 / YUY2 download) and H.264 4:2:2 must not try QSV at all.
+#[test]
+fn four_two_two_sources_decode() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let dir = workdir("422");
+    let caps = nle_media::hwaccel::probe_caps();
+    let mut cases = vec![("h264_422_10.mov", "libx264", "yuv422p10le")];
+    if caps.encoders.is_empty() || caps.has_encoder("libx265") {
+        cases.push(("hevc_422_10.mov", "libx265", "yuv422p10le"));
+        cases.push(("hevc_422_8.mov", "libx265", "yuv422p"));
+    }
+    for (name, enc, pix) in cases {
+        let path = dir.join(name);
+        let status = ffmpeg_cli::command(&ffmpeg_cli::ffmpeg_path())
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30:duration=1"])
+            .args(["-c:v", enc, "-pix_fmt", pix])
+            .arg(&path)
+            .status()
+            .expect("run ffmpeg");
+        assert!(status.success(), "{name}: encode");
+        let asset = probe::probe(&path).expect("probe");
+        let v = asset.video.as_ref().unwrap();
+        let mut dec = decode::open(&asset, DecodeOptions::default()).expect("open decoder");
+        let f = dec.frame_at(Time::from_millis(500)).unwrap_or_else(|e| panic!("{name}: decode: {e}"));
+        assert_eq!((f.width, f.height), (1280, 720), "{name}");
+        let want = if v.bit_depth > 8 { PixelFormat::P010 } else { PixelFormat::Nv12 };
+        assert_eq!(f.format, want, "{name}");
+        // luma of testsrc2 is far from flat black: catches a garbage download
+        let mean = f.data.iter().take(1280 * 720).map(|&b| b as u64).sum::<u64>() / (1280 * 720);
+        assert!(mean > 20, "{name}: mean {mean}");
+        let backend = dec.backend();
+        eprintln!("{name}: {} {}-bit -> {backend:?}", v.pix_fmt, v.bit_depth);
+        if enc == "libx264" {
+            assert_ne!(backend, nle_media::hwaccel::HwBackend::Qsv, "{name}: H.264 4:2:2 must not use QSV");
+        } else if cfg!(windows) && caps.has_hwaccel("qsv") && caps.has_decoder("hevc_qsv") && nle_media::encoder_probe::probe_blocking().backend.label().contains("Intel") {
+            assert_eq!(backend, nle_media::hwaccel::HwBackend::Qsv, "{name}: HEVC 4:2:2 should stay on QSV on Arc");
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

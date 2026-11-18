@@ -1,6 +1,7 @@
 //! Structured AI Copilot timeline tool definitions, execution engine (via undoable
 //! `nle_core::Command`s), quick prompt chips, and deterministic offline fallback.
 
+use crate::tools_post::{self as post, AudioArgs, CaptionStyleArgs, ColorGradeArgs, MaskArgs, UiRequest};
 use nle_core::presets::MontagePreset;
 use nle_core::timeline::Marker;
 use nle_core::{ClipId, Command, History, Retime, Time, Timeline, Transition, TransitionKind};
@@ -27,7 +28,26 @@ pub enum CopilotToolCall {
     SyncToBeatMarkers { clip_ids: Vec<u64> },
     DropMarker { time_secs: f64, label: String, kind: String },
     AddTransition { clip_id: Option<u64>, transition_kind: String, duration_frames: i64 },
+    ColorGrade(ColorGradeArgs),
+    AddMask(MaskArgs),
+    GenerateCaptions { language: Option<String> },
+    StyleCaptions(CaptionStyleArgs),
+    PolishAudio,
+    AdjustAudio(AudioArgs),
+    SetExportPreset { delivery: String },
 }
+
+/// What the app knows that the timeline doesn't, for tools that need it.
+#[derive(Clone, Debug, Default)]
+pub struct CopilotEnv {
+    /// Measured integrated loudness per asset (for `polish_audio`).
+    pub lufs: std::collections::HashMap<nle_core::AssetId, f32>,
+}
+
+/// Most actions one model reply may carry; the rest are rejected.
+pub const MAX_ACTIONS_PER_REPLY: usize = 32;
+/// Longest text argument accepted (labels, preset names).
+pub const MAX_TEXT_ARG: usize = 200;
 
 impl CopilotToolCall {
     pub fn name(&self) -> &'static str {
@@ -39,6 +59,22 @@ impl CopilotToolCall {
             Self::SyncToBeatMarkers { .. } => "sync_to_beat_markers",
             Self::DropMarker { .. } => "drop_marker",
             Self::AddTransition { .. } => "add_transition",
+            Self::ColorGrade(_) => "color_grade",
+            Self::AddMask(_) => "add_mask",
+            Self::GenerateCaptions { .. } => "generate_captions",
+            Self::StyleCaptions(_) => "style_captions",
+            Self::PolishAudio => "polish_audio",
+            Self::AdjustAudio(_) => "adjust_audio",
+            Self::SetExportPreset { .. } => "set_export_preset",
+        }
+    }
+
+    /// Tools that hand work to the app (at most one of each per reply).
+    fn request_kind(&self) -> Option<u8> {
+        match self {
+            Self::GenerateCaptions { .. } => Some(0),
+            Self::SetExportPreset { .. } => Some(1),
+            _ => None,
         }
     }
 
@@ -54,7 +90,7 @@ impl CopilotToolCall {
             Value::Null => &empty,
             _ => return Err("arguments must be a JSON object".into()),
         };
-        let a = Args(obj);
+        let a = ArgReader(obj);
         match name {
             "jump_to_timecode" => Ok(Self::JumpToTimecode { time_secs: a.req_secs("time_secs")? }),
             "apply_velocity_preset" => Ok(Self::ApplyVelocityPreset { clip_id: a.id("clip_id")?, preset_name: a.req_text("preset_name")? }),
@@ -67,6 +103,7 @@ impl CopilotToolCall {
             "sync_to_beat_markers" => {
                 let clip_ids = match obj.get("clip_ids") {
                     None | Some(Value::Null) => Vec::new(),
+                    Some(Value::Array(arr)) if arr.len() > 1000 => return Err("clip_ids has more than 1000 entries".into()),
                     Some(Value::Array(arr)) => arr.iter().map(|v| as_id(v).ok_or_else(|| format!("clip_ids entry {v} is not a clip id"))).collect::<Result<_, _>>()?,
                     Some(v) => return Err(format!("clip_ids must be an array of integers, got {v}")),
                 };
@@ -87,16 +124,32 @@ impl CopilotToolCall {
                 }
                 Ok(Self::AddTransition { clip_id: a.id("clip_id")?, transition_kind: kind, duration_frames: frames as i64 })
             }
-            other => Err(format!("unknown tool '{other}'")),
+            "color_grade" => Ok(Self::ColorGrade(post::parse_color_grade(&a)?)),
+            "add_mask" => Ok(Self::AddMask(post::parse_mask(&a)?)),
+            "generate_captions" => Ok(Self::GenerateCaptions { language: post::parse_language(&a)? }),
+            "style_captions" => Ok(Self::StyleCaptions(post::parse_caption_style(&a)?)),
+            "polish_audio" => Ok(Self::PolishAudio),
+            "adjust_audio" => Ok(Self::AdjustAudio(post::parse_audio(&a)?)),
+            "set_export_preset" => Ok(Self::SetExportPreset { delivery: post::parse_delivery(&a)? }),
+            other => Err(format!("unknown tool '{}'", other.chars().take(64).collect::<String>())),
         }
     }
 }
 
 /// Typed accessors over a tool-call argument object.
-struct Args<'a>(&'a serde_json::Map<String, Value>);
+pub(crate) struct ArgReader<'a>(pub(crate) &'a serde_json::Map<String, Value>);
 
-impl Args<'_> {
-    fn num(&self, k: &str) -> Result<Option<f64>, String> {
+impl ArgReader<'_> {
+    pub(crate) fn flag(&self, k: &str) -> Result<Option<bool>, String> {
+        match self.0.get(k) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::Bool(b)) => Ok(Some(*b)),
+            Some(Value::String(s)) if s.eq_ignore_ascii_case("true") || s == "1" => Ok(Some(true)),
+            Some(Value::String(s)) if s.eq_ignore_ascii_case("false") || s == "0" => Ok(Some(false)),
+            Some(v) => Err(format!("`{k}` must be true or false, got {v}")),
+        }
+    }
+    pub(crate) fn num(&self, k: &str) -> Result<Option<f64>, String> {
         let n = match self.0.get(k) {
             None | Some(Value::Null) => return Ok(None),
             Some(Value::Number(n)) => n.as_f64(),
@@ -109,28 +162,29 @@ impl Args<'_> {
             _ => Err(format!("`{k}` must be a finite number")),
         }
     }
-    fn req_secs(&self, k: &str) -> Result<f64, String> {
+    pub(crate) fn req_secs(&self, k: &str) -> Result<f64, String> {
         let v = self.num(k)?.ok_or_else(|| format!("missing required `{k}`"))?;
         if v < 0.0 {
             return Err(format!("`{k}` = {v} is negative"));
         }
         Ok(v)
     }
-    fn id(&self, k: &str) -> Result<Option<u64>, String> {
+    pub(crate) fn id(&self, k: &str) -> Result<Option<u64>, String> {
         match self.0.get(k) {
             None | Some(Value::Null) => Ok(None),
             Some(v) => as_id(v).map(Some).ok_or_else(|| format!("`{k}` = {v} is not a clip id")),
         }
     }
-    fn text(&self, k: &str) -> Result<Option<String>, String> {
+    pub(crate) fn text(&self, k: &str) -> Result<Option<String>, String> {
         match self.0.get(k) {
             None | Some(Value::Null) => Ok(None),
             Some(Value::String(s)) if s.trim().is_empty() => Ok(None),
+            Some(Value::String(s)) if s.chars().count() > MAX_TEXT_ARG => Err(format!("`{k}` is longer than {MAX_TEXT_ARG} characters")),
             Some(Value::String(s)) => Ok(Some(s.trim().to_string())),
             Some(v) => Err(format!("`{k}` must be a string, got {v}")),
         }
     }
-    fn req_text(&self, k: &str) -> Result<String, String> {
+    pub(crate) fn req_text(&self, k: &str) -> Result<String, String> {
         self.text(k)?.ok_or_else(|| format!("missing required `{k}`"))
     }
 }
@@ -170,8 +224,16 @@ fn parse_marker_kind(s: &str) -> Option<&'static str> {
     }
 }
 
-/// Gemini `functionDeclarations` schema block for all 7 timeline tools.
+/// Gemini `functionDeclarations` schema block for every Copilot tool.
 pub fn gemini_tool_declarations() -> Value {
+    let mut v = editing_declarations();
+    if let Some(arr) = v["functionDeclarations"].as_array_mut() {
+        arr.extend(post::declarations());
+    }
+    v
+}
+
+fn editing_declarations() -> Value {
     json!({
         "functionDeclarations": [
             {
@@ -262,7 +324,7 @@ pub fn gemini_tool_declarations() -> Value {
     })
 }
 
-/// OpenAI / OpenRouter compatible `tools` array for all 7 timeline tools.
+/// OpenAI / OpenRouter compatible `tools` array for every Copilot tool.
 pub fn openai_tool_declarations() -> Value {
     let decls = gemini_tool_declarations();
     let funcs: Vec<Value> = decls["functionDeclarations"]
@@ -343,14 +405,17 @@ pub struct ActionOutcome {
     pub tool: String,
     pub applied: bool,
     pub detail: String,
+    /// App work this action still needs (captions job, Render dialog).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<UiRequest>,
 }
 
 impl ActionOutcome {
     pub fn applied(tool: &str, detail: impl Into<String>) -> Self {
-        Self { tool: tool.into(), applied: true, detail: detail.into() }
+        Self { tool: tool.into(), applied: true, detail: detail.into(), request: None }
     }
     pub fn skipped(tool: &str, reason: impl Into<String>) -> Self {
-        Self { tool: tool.into(), applied: false, detail: reason.into() }
+        Self { tool: tool.into(), applied: false, detail: reason.into(), request: None }
     }
 }
 
@@ -359,6 +424,7 @@ struct PlannedAction {
     commands: Vec<Command>,
     playhead: Option<Time>,
     summary: String,
+    request: Option<UiRequest>,
 }
 
 const COPILOT_UNDO_LABEL: &str = "AI Copilot Edit";
@@ -374,12 +440,13 @@ fn secs_in_bounds(tl: &Timeline, field: &str, secs: f64, allow_end: bool) -> Res
 
 /// Validate `call` against the live timeline and turn it into commands.
 /// Nothing is mutated here.
-fn plan_tool_call(call: &CopilotToolCall, tl: &Timeline, playhead: Time, selection: &[ClipId]) -> Result<PlannedAction, String> {
-    let one = |cmd: Command, summary: String| Ok(PlannedAction { commands: vec![cmd], playhead: None, summary });
+fn plan_tool_call(call: &CopilotToolCall, tl: &Timeline, playhead: Time, selection: &[ClipId], env: &CopilotEnv) -> Result<PlannedAction, String> {
+    let one = |cmd: Command, summary: String| Ok(PlannedAction { commands: vec![cmd], playhead: None, summary, request: None });
+    let ask = |request: UiRequest, summary: String| Ok(PlannedAction { commands: Vec::new(), playhead: None, summary, request: Some(request) });
     match call {
         CopilotToolCall::JumpToTimecode { time_secs } => {
             let t = secs_in_bounds(tl, "time", *time_secs, true)?;
-            Ok(PlannedAction { commands: Vec::new(), playhead: Some(t), summary: format!("Playhead → {:.2}s", t.as_secs_f64()) })
+            Ok(PlannedAction { commands: Vec::new(), playhead: Some(t), summary: format!("Playhead → {:.2}s", t.as_secs_f64()), request: None })
         }
         CopilotToolCall::ApplyVelocityPreset { clip_id, preset_name } => {
             let id = target_clip(tl, *clip_id, playhead, selection)?;
@@ -428,7 +495,7 @@ fn plan_tool_call(call: &CopilotToolCall, tl: &Timeline, playhead: Time, selecti
             preset.apply_to_clip(&mut clip, local);
             let name = clip.name.clone();
             let commands = vec![Command::ReplaceClip { label: "Apply Preset", clip: Box::new(clip) }];
-            Ok(PlannedAction { commands, playhead: None, summary: format!("Preset '{}' on '{name}'", preset.name) })
+            Ok(PlannedAction { commands, playhead: None, summary: format!("Preset '{}' on '{name}'", preset.name), request: None })
         }
         CopilotToolCall::CutAndRipple { clip_id, time_secs, trim_mode } => {
             let at = secs_in_bounds(tl, "cut", *time_secs, false)?.snap_to_frame(tl.format.rate);
@@ -517,6 +584,34 @@ fn plan_tool_call(call: &CopilotToolCall, tl: &Timeline, playhead: Time, selecti
                 format!("{} transition ({duration_frames}f) on '{}'", kind.label(), clip.name),
             )
         }
+        CopilotToolCall::ColorGrade(a) => {
+            let (cmd, s) = post::plan_color_grade(tl, target_clip(tl, a.clip_id, playhead, selection)?, a)?;
+            one(cmd, s)
+        }
+        CopilotToolCall::AddMask(a) => {
+            let (cmd, s) = post::plan_mask(tl, target_clip(tl, a.clip_id, playhead, selection)?, a)?;
+            one(cmd, s)
+        }
+        CopilotToolCall::StyleCaptions(a) => {
+            let (cmd, s) = post::plan_caption_style(tl, a)?;
+            one(cmd, s)
+        }
+        CopilotToolCall::PolishAudio => {
+            let (commands, summary) = post::plan_polish_audio(tl, env)?;
+            Ok(PlannedAction { commands, playhead: None, summary, request: None })
+        }
+        CopilotToolCall::AdjustAudio(a) => {
+            let (cmd, s) = post::plan_audio(tl, target_clip(tl, a.clip_id, playhead, selection)?, a)?;
+            one(cmd, s)
+        }
+        CopilotToolCall::GenerateCaptions { language } => {
+            let (r, s) = post::plan_generate_captions(tl, language)?;
+            ask(r, s)
+        }
+        CopilotToolCall::SetExportPreset { delivery } => {
+            let (r, s) = post::plan_export(delivery);
+            ask(r, s)
+        }
     }
 }
 
@@ -534,11 +629,34 @@ static COPILOT_RUN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64:
 /// run is a single undo step, so one Ctrl+Z reverts everything the Copilot did.
 /// Returns one `Applied` / `Skipped: reason` outcome per action, in order.
 pub fn apply_copilot_actions(calls: &[CopilotToolCall], tl: &mut Timeline, history: &mut History, playhead: &mut Time, selection: &[ClipId]) -> Vec<ActionOutcome> {
+    apply_copilot_actions_with(calls, tl, history, playhead, selection, &CopilotEnv::default())
+}
+
+/// [`apply_copilot_actions`] with app-side facts (measured loudness). Actions
+/// that need the app ([`UiRequest`]) come back `applied` with the request set;
+/// the caller carries them out and may downgrade the outcome if that fails.
+pub fn apply_copilot_actions_with(
+    calls: &[CopilotToolCall],
+    tl: &mut Timeline,
+    history: &mut History,
+    playhead: &mut Time,
+    selection: &[ClipId],
+    env: &CopilotEnv,
+) -> Vec<ActionOutcome> {
     let key = Some(0xC0F1_0000_0000_0000 ^ COPILOT_RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
     let mut outcomes = Vec::with_capacity(calls.len());
-    for call in calls {
+    for (i, call) in calls.iter().enumerate() {
         let tool = call.name();
-        let plan = match plan_tool_call(call, tl, *playhead, selection) {
+        if i >= MAX_ACTIONS_PER_REPLY {
+            outcomes.push(ActionOutcome::skipped(tool, format!("more than {MAX_ACTIONS_PER_REPLY} actions in one reply")));
+            continue;
+        }
+        // one Whisper job / one dialog per reply
+        if call.request_kind().is_some() && calls[..i].iter().any(|c| c.request_kind() == call.request_kind()) {
+            outcomes.push(ActionOutcome::skipped(tool, "already requested earlier in this reply"));
+            continue;
+        }
+        let plan = match plan_tool_call(call, tl, *playhead, selection, env) {
             Ok(p) => p,
             Err(reason) => {
                 outcomes.push(ActionOutcome::skipped(tool, reason));
@@ -562,7 +680,9 @@ pub fn apply_copilot_actions(calls: &[CopilotToolCall], tl: &mut Timeline, histo
         if let Some(t) = plan.playhead {
             *playhead = t;
         }
-        outcomes.push(ActionOutcome::applied(tool, plan.summary));
+        let mut out = ActionOutcome::applied(tool, plan.summary);
+        out.request = plan.request;
+        outcomes.push(out);
     }
     history.seal();
     *playhead = (*playhead).min(tl.extent().max(Time::ZERO));
@@ -611,7 +731,8 @@ pub fn offline_copilot_plan(prompt: &str, tl: &Timeline, playhead: Time, selecti
     let mut calls = Vec::new();
     let mut notes = Vec::new();
 
-    if lower.contains("9:16") || lower.contains("tiktok") || lower.contains("shorts") {
+    let wants_export = ["export", "render", "deliver"].iter().any(|w| lower.contains(w));
+    if (lower.contains("9:16") || lower.contains("tiktok") || lower.contains("shorts")) && !wants_export {
         calls.push(CopilotToolCall::AddEffectPreset { clip_id: target, preset_name: "Gaming 9:16 Split-Crop".into() });
         notes.push("Enabled dual-viewport 9:16 Split-Crop with killfeed PiP.");
     }
@@ -647,6 +768,73 @@ pub fn offline_copilot_plan(prompt: &str, tl: &Timeline, playhead: Time, selecti
             calls.push(CopilotToolCall::AddTransition { clip_id: target, transition_kind: "whip_pan".into(), duration_frames: 8 });
         }
         notes.push("Applied signature FX / transition preset.");
+    }
+    let has = |words: &[&str]| words.iter().any(|w| lower.contains(w));
+    let look = [
+        (&["black and white", "b&w", "monochrome"][..], "black_and_white"),
+        (&["teal", "cinematic"][..], "teal_orange"),
+        (&["moody", "dark look"][..], "moody"),
+        (&["faded", "film look"][..], "faded"),
+        (&["punchy", "pop the colo"][..], "punchy"),
+        (&["warm"][..], "warm"),
+        (&["cool", "cold"][..], "cool"),
+    ]
+    .into_iter()
+    .find(|(w, _)| has(w));
+    if let Some((_, look)) = look {
+        calls.push(CopilotToolCall::ColorGrade(ColorGradeArgs {
+            clip_id: target,
+            look: Some(look.into()),
+            intensity: None,
+            exposure: None,
+            contrast: None,
+            saturation: None,
+            temperature: None,
+            tint: None,
+        }));
+        notes.push("Applied a colour look.");
+    }
+    if has(&["vignette"]) {
+        calls.push(CopilotToolCall::AddMask(MaskArgs {
+            clip_id: target,
+            style: "vignette".into(),
+            shape: "ellipse".into(),
+            center: [0.5, 0.5],
+            size: [0.85, 0.55],
+            feather: 0.3,
+            invert: true,
+            exposure: Some(-0.7),
+            saturation: None,
+        }));
+        notes.push("Added a vignette.");
+    }
+    if has(&["caption", "subtitle", "transcri"]) {
+        if tl.captions.is_empty() || has(&["generate", "transcri", "add caption", "add subtitle"]) {
+            calls.push(CopilotToolCall::GenerateCaptions { language: None });
+            notes.push("Started caption transcription.");
+        } else {
+            calls.push(CopilotToolCall::StyleCaptions(CaptionStyleArgs { preset: Some("bold_pop".into()), ..Default::default() }));
+            notes.push("Restyled captions.");
+        }
+    }
+    if has(&["polish audio", "clean audio", "clean up the audio", "fix audio", "fix the audio", "normalize", "normalise", "loudness"]) {
+        calls.push(CopilotToolCall::PolishAudio);
+        notes.push("Polished the audio mix.");
+    }
+    if wants_export {
+        let delivery = if has(&["discord"]) {
+            "discord_25mb"
+        } else if has(&["tiktok", "shorts", "reels", "9:16", "vertical"]) {
+            "shorts_9x16"
+        } else if has(&["4k"]) {
+            "youtube_4k60"
+        } else if has(&["youtube"]) {
+            "youtube_1440p60"
+        } else {
+            "match_project"
+        };
+        calls.push(CopilotToolCall::SetExportPreset { delivery: delivery.into() });
+        notes.push("Opened the Render dialog with a delivery preset.");
     }
     if calls.is_empty() {
         if let Some(secs_word) = lower.split_whitespace().find_map(|w| w.trim_end_matches('s').parse::<f64>().ok()) {

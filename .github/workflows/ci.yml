@@ -19,6 +19,11 @@ env:
   LIBCLANG_PATH: C:\Program Files\LLVM\bin
   CMAKE: cmake
   RUST_BACKTRACE: "1"
+  # Code signing runs only on pushes / manual runs with the secrets set
+  # (never for pull requests). Secrets:
+  #   RCP_SIGN_PFX_BASE64    base64 of the .pfx (certutil -encode, or [Convert]::ToBase64String)
+  #   RCP_SIGN_PFX_PASSWORD  its password
+  SIGNING_ENABLED: ${{ github.event_name != 'pull_request' && secrets.RCP_SIGN_PFX_BASE64 != '' }}
 
 jobs:
   windows:
@@ -50,9 +55,41 @@ jobs:
       - name: cargo test
         run: cargo test --workspace
 
+      # windows-latest has shipped Inno Setup 6; install it if an image drops it
+      - name: Inno Setup
+        shell: pwsh
+        run: |
+          $iscc = @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) { choco install innosetup --no-progress -y; if ($LASTEXITCODE -ne 0) { throw "innosetup install failed" } }
+
+      - name: Decode signing certificate
+        if: env.SIGNING_ENABLED == 'true'
+        shell: pwsh
+        env:
+          PFX_BASE64: ${{ secrets.RCP_SIGN_PFX_BASE64 }}
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP "rcp-sign.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:PFX_BASE64))
+          "RCP_SIGN_PFX=$pfx" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Package
         shell: pwsh
+        env:
+          RCP_SIGN_PFX_PASSWORD: ${{ env.SIGNING_ENABLED == 'true' && secrets.RCP_SIGN_PFX_PASSWORD || '' }}
         run: ./scripts/package_windows.ps1
+
+      - name: Check signatures
+        if: env.SIGNING_ENABLED == 'true'
+        shell: pwsh
+        run: |
+          $bad = Get-ChildItem dist -Filter *-setup.exe | Get-AuthenticodeSignature | Where-Object { -not $_.SignerCertificate }
+          if ($bad) { $bad | Format-List Path, Status, StatusMessage; throw "unsigned installer" }
+          Get-ChildItem dist -Filter *-setup.exe | Get-AuthenticodeSignature | Format-Table Path, Status, @{ n = "Signer"; e = { $_.SignerCertificate.Subject } }
+
+      - name: Remove signing certificate
+        if: always() && env.SIGNING_ENABLED == 'true'
+        shell: pwsh
+        run: Remove-Item (Join-Path $env:RUNNER_TEMP "rcp-sign.pfx") -Force -ErrorAction SilentlyContinue
 
       - uses: actions/upload-artifact@v4
         with:

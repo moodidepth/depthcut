@@ -117,7 +117,8 @@ pub fn parse_ffprobe_json(path: &Path, json: &str) -> Result<MediaAsset, MediaEr
                 codec: s["codec_name"].as_str().unwrap_or("unknown").to_string(),
                 pix_fmt,
                 bit_depth,
-                color_space: s["color_space"].as_str().unwrap_or("bt709").to_string(),
+                // untagged stays "unknown" so the YCbCr matrix can be guessed from the size
+                color_space: s["color_space"].as_str().unwrap_or("unknown").to_string(),
                 color_transfer: s["color_transfer"].as_str().unwrap_or("").to_string(),
                 color_primaries: s["color_primaries"].as_str().unwrap_or("").to_string(),
                 is_vfr,

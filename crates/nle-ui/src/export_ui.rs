@@ -1,12 +1,15 @@
 //! Share / Export dialog: AV1 / HEVC / H.264 on whichever hardware encoder
-//! the startup probe found working (QSV → NVENC → AMF), or software x264. Rendering runs on a worker thread on the shared GPU.
+//! the startup probe found working (QSV → NVENC → AMF), or software x264,
+//! plus mastering formats (ProRes, DNxHR, PNG / TIFF / EXR sequences).
+//! Rendering runs on a worker thread on the shared GPU. Jobs can be queued
+//! (each with a snapshot of the project) and rendered one after another.
 
 use crate::theme;
 use eframe::egui;
 use nle_core::{AssetId, Clip, ClipKind, Project};
 use nle_media::encoder_probe;
 use nle_media::AudioBuffer;
-use nle_render::export::{fits_size_budget, run_export, working_presets, AudioExport, ExportProgress, RateControl};
+use nle_render::export::{fits_size_budget, mastering_presets, run_export, working_presets, AudioExport, ExportProgress, RateControl};
 use nle_render::{ExportPreset, ExportSettings, GamingDeliveryPreset, GpuContext};
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
@@ -21,11 +24,24 @@ struct Job {
     cancel: Arc<AtomicBool>,
     started: Instant,
     path: PathBuf,
+    /// The project as rendered (for the .srt / credits written afterwards).
+    project: Arc<Project>,
+    export_srt: bool,
+}
+
+/// A render-queue entry: the project and settings as they were when queued.
+struct Queued {
+    project: Arc<Project>,
+    settings: ExportSettings,
+    export_srt: bool,
 }
 
 pub struct ExportDialog {
     pub open: bool,
     pub delivery: GamingDeliveryPreset,
+    /// Delivery chosen from outside the dialog (AI Copilot); applied like a
+    /// pick from the combo box the next time the dialog draws.
+    pub requested_delivery: Option<GamingDeliveryPreset>,
     preset: Option<ExportPreset>,
     quality: u8,
     use_bitrate: bool,
@@ -47,6 +63,49 @@ pub struct ExportDialog {
     path: Option<PathBuf>,
     job: Option<Job>,
     last_result: Option<String>,
+    /// 10-bit HEVC / AV1.
+    ten_bit: bool,
+    /// Transparent background for ProRes 4444 / PNG / TIFF / EXR.
+    alpha: bool,
+    queue: Vec<Queued>,
+    /// Working through `queue`.
+    queue_running: bool,
+    /// One line per finished queue job.
+    queue_log: Vec<String>,
+}
+
+impl ExportDialog {
+    /// Pick a delivery preset: codec, bitrate, size, rate and loudness follow it.
+    fn select_delivery(&mut self, g: GamingDeliveryPreset, project: &nle_core::Project, presets: &[ExportPreset]) {
+        self.delivery = g;
+        if g == GamingDeliveryPreset::ProjectDefault {
+            return;
+        }
+        let mut s = ExportSettings::new("preview.mp4", self.preset.unwrap_or(ExportPreset::H264Software), project);
+        g.apply(&mut s, project.timeline.format, presets);
+        self.preset = Some(s.preset);
+        if let RateControl::Bitrate(kbps) = s.rate {
+            self.use_bitrate = true;
+            self.bitrate_kbps = kbps;
+        }
+        self.audio = 0;
+        self.resolution = 0;
+        self.fps = 0;
+        self.loudness = loudness_choice(s.loudness_target);
+    }
+}
+
+/// Copilot delivery names (`nle_ai::tools_post::EXPORT_DELIVERIES`) to presets.
+pub fn delivery_from_name(name: &str) -> Option<GamingDeliveryPreset> {
+    Some(match name {
+        "match_project" => GamingDeliveryPreset::ProjectDefault,
+        "youtube_1440p60" => GamingDeliveryPreset::YouTube1440p60,
+        "youtube_4k60" => GamingDeliveryPreset::YouTube4k60,
+        "shorts_9x16" => GamingDeliveryPreset::TikTokShorts1080x1920,
+        "discord_25mb" => GamingDeliveryPreset::DiscordUnder25Mb,
+        "discord_50mb" => GamingDeliveryPreset::DiscordUnder50Mb,
+        _ => return None,
+    })
 }
 
 impl Default for ExportDialog {
@@ -54,6 +113,7 @@ impl Default for ExportDialog {
         ExportDialog {
             open: false,
             delivery: GamingDeliveryPreset::ProjectDefault,
+            requested_delivery: None,
             preset: None,
             quality: 24,
             use_bitrate: false,
@@ -69,6 +129,11 @@ impl Default for ExportDialog {
             path: None,
             job: None,
             last_result: None,
+            ten_bit: false,
+            alpha: false,
+            queue: Vec::new(),
+            queue_running: false,
+            queue_log: Vec::new(),
         }
     }
 }
@@ -80,28 +145,42 @@ impl ExportDialog {
 
     pub fn show(&mut self, ctx: &egui::Context, project: &Project, gpu: Option<&GpuContext>, audio: &HashMap<AssetId, Arc<AudioBuffer>>) {
         // finished job?
-        let finished = self.job.as_ref().and_then(|j| j.result.lock().take().map(|r| (r, j.path.clone(), j.started)));
-        if let Some((r, path, started)) = finished {
+        let finished = self.job.as_ref().and_then(|j| j.result.lock().take().map(|r| (r, j.path.clone(), j.started, j.project.clone(), j.export_srt)));
+        if let Some((r, path, started, project, export_srt)) = finished {
             self.done_path = r.is_ok().then(|| path.clone());
-            self.last_result = Some(match r {
+            let msg = match r {
                 Ok(()) => {
                     let mut msg = format!("Exported {} in {:.1}s", path.display(), started.elapsed().as_secs_f32());
-                    if self.export_srt && !project.timeline.captions.is_empty() {
+                    if export_srt && !project.timeline.captions.is_empty() {
                         let srt = path.with_extension("srt");
                         match std::fs::write(&srt, project.timeline.captions.to_srt()) {
                             Ok(()) => msg.push_str(&format!(" — captions written to {}", srt.display())),
                             Err(e) => msg.push_str(&format!(" — could not write {}: {e}", srt.display())),
                         }
                     }
-                    if let Some(cp) = write_credits_file(project, &path) {
+                    if let Some(cp) = write_credits_file(&project, &path) {
                         msg.push_str(&format!(" — credits written to {}", cp.display()));
                     }
                     msg
                 }
-                Err(e) => format!("Export failed: {e}"),
-            });
+                Err(e) => format!("Export of {} failed: {e}", path.display()),
+            };
+            if self.queue_running {
+                self.queue_log.push(msg.clone());
+            }
+            self.last_result = Some(msg);
             self.job = None;
             self.open = true;
+        }
+        // render queue: start the next entry once the previous one finished
+        if self.queue_running && self.job.is_none() {
+            match (self.queue.is_empty(), gpu) {
+                (false, Some(gpu)) => {
+                    let q = self.queue.remove(0);
+                    self.spawn(q.project, q.settings, q.export_srt, gpu.clone(), audio.clone());
+                }
+                _ => self.queue_running = false,
+            }
         }
         if !self.open {
             return;
@@ -111,7 +190,9 @@ impl ExportDialog {
         }
         // Cached result of the startup hardware probe (None while it runs).
         let probe = encoder_probe::result();
-        let presets = probe.map(working_presets).unwrap_or_default();
+        let delivery_presets = probe.map(working_presets).unwrap_or_default();
+        let mastering = if probe.is_some() { mastering_presets(nle_media::hwaccel::probe_caps()) } else { Vec::new() };
+        let presets: Vec<ExportPreset> = delivery_presets.iter().chain(&mastering).copied().collect();
         if self.preset.is_none_or_not_in(&presets) {
             self.preset = presets.first().copied();
             if let Some(p) = self.preset {
@@ -126,12 +207,19 @@ impl ExportDialog {
                     Some(p) => (p.frame as f32 / p.total.max(1) as f32, format!("Frame {} / {} · {:.1} fps", p.frame, p.total, p.fps)),
                     None => (0.0, "Starting encoder…".into()),
                 };
-                ui.label(format!("Rendering to {}", job.path.display()));
+                let queued = if self.queue.is_empty() { String::new() } else { format!(" ({} more queued)", self.queue.len()) };
+                ui.label(format!("Rendering to {}{queued}", job.path.display()));
                 ui.add(egui::ProgressBar::new(frac).show_percentage().animate(true));
                 ui.label(egui::RichText::new(text).monospace().color(theme::TEXT_DIM));
-                if ui.button("Cancel").clicked() {
-                    job.cancel.store(true, Ordering::Relaxed);
-                }
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        job.cancel.store(true, Ordering::Relaxed);
+                    }
+                    if self.queue_running && ui.button("Cancel Queue").on_hover_text("Stop this render and drop the remaining queued jobs").clicked() {
+                        job.cancel.store(true, Ordering::Relaxed);
+                        self.queue_running = false;
+                    }
+                });
                 ctx.request_repaint();
                 return;
             }
@@ -152,6 +240,9 @@ impl ExportDialog {
                 }
             }
             let f = project.timeline.format;
+            if let Some(g) = self.requested_delivery.take() {
+                self.select_delivery(g, project, &presets);
+            }
             let dur_secs = project.timeline.extent().as_secs_f64().max(0.1);
             let mut target_w = f.width;
             let mut target_h = f.height;
@@ -175,63 +266,89 @@ impl ExportDialog {
                 egui::ComboBox::from_id_salt("gaming-delivery").selected_text(self.delivery.label()).width(240.0).show_ui(ui, |ui| {
                     for g in GamingDeliveryPreset::ALL {
                         if ui.selectable_label(self.delivery == g, g.label()).clicked() {
-                            self.delivery = g;
-                            if g != GamingDeliveryPreset::ProjectDefault {
-                                let mut s = ExportSettings::new("preview.mp4", self.preset.unwrap_or(ExportPreset::H264Software), project);
-                                g.apply(&mut s, f, &presets);
-                                self.preset = Some(s.preset);
-                                if let RateControl::Bitrate(kbps) = s.rate {
-                                    self.use_bitrate = true;
-                                    self.bitrate_kbps = kbps;
-                                }
-                                self.audio = 0;
-                                self.resolution = 0;
-                                self.fps = 0;
-                                self.loudness = loudness_choice(s.loudness_target);
-                            }
+                            self.select_delivery(g, project, &presets);
                         }
                     }
                 });
                 ui.end_row();
                 ui.label("Video codec");
                 egui::ComboBox::from_id_salt("preset").selected_text(self.preset.map(|p| p.label()).unwrap_or("none")).width(240.0).show_ui(ui, |ui| {
-                    for p in &presets {
-                        if ui.selectable_label(self.preset == Some(*p), p.label()).clicked() {
-                            self.preset = Some(*p);
+                    let mut pick = |ui: &mut egui::Ui, p: ExportPreset| {
+                        if ui.selectable_label(self.preset == Some(p), p.label()).clicked() {
+                            self.preset = Some(p);
                             self.quality = p.default_quality();
+                            if p.is_mastering() && self.audio == 0 {
+                                self.audio = 1;
+                            }
+                            // keep the file name, switch the extension to the format's
+                            if let Some(path) = &mut self.path {
+                                if path.extension().is_none_or(|e| !e.eq_ignore_ascii_case(p.extension())) {
+                                    path.set_extension(p.extension());
+                                }
+                            }
+                        }
+                    };
+                    for p in &delivery_presets {
+                        pick(ui, *p);
+                    }
+                    if !mastering.is_empty() {
+                        ui.separator();
+                        ui.label(egui::RichText::new("Mastering").small().color(theme::TEXT_DIM));
+                        for p in &mastering {
+                            pick(ui, *p);
                         }
                     }
                 });
                 ui.end_row();
+                let chosen = self.preset.unwrap_or(ExportPreset::H264Software);
+                if chosen.supports_ten_bit() || chosen.supports_alpha() {
+                    ui.label("Bit depth / alpha");
+                    ui.horizontal(|ui| {
+                        if chosen.supports_ten_bit() {
+                            ui.checkbox(&mut self.ten_bit, "10-bit (Main10)").on_hover_text("P010 output: smoother gradients, HDR-ready. Needs a player with 10-bit support.");
+                        }
+                        if chosen.supports_alpha() {
+                            ui.checkbox(&mut self.alpha, "Transparent background")
+                                .on_hover_text("Keep alpha where nothing covers the frame (titles, graphics over an empty timeline).");
+                        }
+                    });
+                    ui.end_row();
+                }
                 ui.label("Encoder");
                 ui.label(egui::RichText::new(self.preset.map(|p| p.encoder()).unwrap_or("-")).monospace().color(theme::TEXT_DIM));
                 ui.end_row();
-                ui.label("Quality");
-                ui.horizontal(|ui| {
-                    for t in QualityTier::ALL {
-                        if ui.selectable_label(self.tier == t, t.label()).on_hover_text(t.hint()).clicked() {
-                            self.tier = t;
-                            if let Some(p) = self.preset {
-                                self.quality = t.quality(p.default_quality());
+                if chosen.is_mastering() {
+                    ui.label("Quality");
+                    ui.label(egui::RichText::new("Intra-frame — set by the format's profile").color(theme::TEXT_DIM));
+                    ui.end_row();
+                } else {
+                    ui.label("Quality");
+                    ui.horizontal(|ui| {
+                        for t in QualityTier::ALL {
+                            if ui.selectable_label(self.tier == t, t.label()).on_hover_text(t.hint()).clicked() {
+                                self.tier = t;
+                                if let Some(p) = self.preset {
+                                    self.quality = t.quality(p.default_quality());
+                                }
                             }
                         }
+                    });
+                    ui.end_row();
+                    ui.label("Rate control");
+                    ui.horizontal(|ui| {
+                        ui.selectable_value(&mut self.use_bitrate, false, "Quality");
+                        ui.selectable_value(&mut self.use_bitrate, true, "Bitrate");
+                    });
+                    ui.end_row();
+                    if self.use_bitrate {
+                        ui.label("Bitrate");
+                        ui.add(egui::Slider::new(&mut self.bitrate_kbps, 250..=150_000).suffix(" kbit/s").logarithmic(true));
+                    } else {
+                        ui.label("Quality (lower = better)");
+                        ui.add(egui::Slider::new(&mut self.quality, 1..=51));
                     }
-                });
-                ui.end_row();
-                ui.label("Rate control");
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.use_bitrate, false, "Quality");
-                    ui.selectable_value(&mut self.use_bitrate, true, "Bitrate");
-                });
-                ui.end_row();
-                if self.use_bitrate {
-                    ui.label("Bitrate");
-                    ui.add(egui::Slider::new(&mut self.bitrate_kbps, 250..=150_000).suffix(" kbit/s").logarithmic(true));
-                } else {
-                    ui.label("Quality (lower = better)");
-                    ui.add(egui::Slider::new(&mut self.quality, 1..=51));
+                    ui.end_row();
                 }
-                ui.end_row();
                 ui.label("Resolution");
                 let auto_label = format!("{}×{} (project)", auto_size.0, auto_size.1);
                 let current = self.resolution.checked_sub(1).and_then(|i| OUTPUT_SIZES.get(i)).map_or(auto_label.clone(), |r| r.2.to_string());
@@ -302,11 +419,19 @@ impl ExportDialog {
                 let label = self.path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "Choose destination…".into());
                 ui.label("Output");
                 if ui.button("📁 Browse…").clicked() {
-                    let ext = if self.audio == 1 { "mov" } else { "mp4" };
-                    let mut dlg = rfd::FileDialog::new()
-                        .set_file_name(format!("{}.{ext}", sanitize_file_name(&project.name)))
-                        .add_filter("MP4 video", &["mp4"])
-                        .add_filter("Movie", &["mov", "mkv"]);
+                    let chosen = self.preset.unwrap_or(ExportPreset::H264Software);
+                    let ext = match chosen.extension() {
+                        "mp4" if self.audio == 1 => "mov",
+                        e => e,
+                    };
+                    let mut dlg = rfd::FileDialog::new().set_file_name(format!("{}.{ext}", sanitize_file_name(&project.name)));
+                    dlg = match ext {
+                        "png" => dlg.add_filter("PNG sequence (first frame name)", &["png"]),
+                        "tif" => dlg.add_filter("TIFF sequence (first frame name)", &["tif", "tiff"]),
+                        "exr" => dlg.add_filter("OpenEXR sequence (first frame name)", &["exr"]),
+                        _ if chosen.is_mastering() => dlg.add_filter("QuickTime movie", &["mov"]),
+                        _ => dlg.add_filter("MP4 video", &["mp4"]).add_filter("Movie", &["mov", "mkv"]),
+                    };
                     if let Some(dir) = self.path.as_ref().and_then(|p| p.parent()) {
                         dlg = dlg.set_directory(dir);
                     }
@@ -328,11 +453,31 @@ impl ExportDialog {
             if let Some(r) = &self.last_result {
                 ui.label(egui::RichText::new(r).color(theme::SNAP));
             }
+            if self.preset.is_some_and(|p| p.is_image_sequence()) {
+                if let Some(p) = &self.path {
+                    let pattern = nle_render::export::sequence_pattern(p);
+                    ui.label(egui::RichText::new(format!("Frames: {}  ·  audio: {}", pattern.display(), p.with_extension("wav").display())).small().color(theme::TEXT_DIM));
+                }
+            }
             ui.horizontal(|ui| {
                 let ready = self.preset.is_some() && self.path.is_some() && gpu.is_some();
                 if ui.add_enabled(ready, egui::Button::new(egui::RichText::new("⤴ Render").strong())).clicked() {
                     if let (Some(preset), Some(path), Some(gpu)) = (self.preset, self.path.clone(), gpu) {
-                        self.start(project, preset, path, gpu.clone(), audio.clone());
+                        let (snapshot, settings) = self.build(project, preset, path);
+                        self.queue_log.clear();
+                        self.spawn(snapshot, settings, self.export_srt, gpu.clone(), audio.clone());
+                    }
+                }
+                if ui
+                    .add_enabled(self.preset.is_some() && self.path.is_some(), egui::Button::new("➕ Add to Queue"))
+                    .on_hover_text("Snapshot the project and these settings; render later with the others")
+                    .clicked()
+                {
+                    if let (Some(preset), Some(path)) = (self.preset, self.path.clone()) {
+                        let (snapshot, settings) = self.build(project, preset, path);
+                        self.queue.push(Queued { project: snapshot, settings, export_srt: self.export_srt });
+                        // the next entry gets a fresh name instead of overwriting this one
+                        self.path = self.path.as_ref().map(|p| next_free_path(p, &self.queue));
                     }
                 }
                 if let Some(done) = &self.done_path {
@@ -341,12 +486,47 @@ impl ExportDialog {
                     }
                 }
             });
+            if !self.queue.is_empty() {
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(format!("Render Queue — {} job{}", self.queue.len(), if self.queue.len() == 1 { "" } else { "s" })).strong());
+                    if ui.add_enabled(gpu.is_some(), egui::Button::new("▶ Render All")).clicked() {
+                        self.queue_log.clear();
+                        self.queue_running = true;
+                        ctx.request_repaint();
+                    }
+                    if ui.button("Clear").clicked() {
+                        self.queue.clear();
+                    }
+                });
+                let mut remove = None;
+                for (i, q) in self.queue.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        if ui.small_button("✖").on_hover_text("Remove from queue").clicked() {
+                            remove = Some(i);
+                        }
+                        let (w, h) = q.settings.encoded_size();
+                        ui.label(egui::RichText::new(format!("{}  ·  {}  ·  {w}×{h}", q.settings.path.display(), q.settings.preset.label())).small());
+                    });
+                }
+                if let Some(i) = remove {
+                    self.queue.remove(i);
+                }
+            }
+            if !self.queue_log.is_empty() && !self.queue_running {
+                ui.separator();
+                ui.label(egui::RichText::new("Queue results").strong());
+                for l in &self.queue_log {
+                    ui.label(egui::RichText::new(l).small());
+                }
+            }
         });
         self.open = open || self.running();
     }
 
-    fn start(&mut self, project: &Project, preset: ExportPreset, path: PathBuf, gpu: GpuContext, audio: HashMap<AssetId, Arc<AudioBuffer>>) {
-        let mut settings = ExportSettings::new(path.clone(), preset, project);
+    /// Settings and a project snapshot for the dialog's current choices.
+    fn build(&self, project: &Project, preset: ExportPreset, path: PathBuf) -> (Arc<Project>, ExportSettings) {
+        let mut settings = ExportSettings::new(path, preset, project);
         let available = encoder_probe::result().map(working_presets).unwrap_or_default();
         if self.delivery != GamingDeliveryPreset::ProjectDefault {
             self.delivery.apply(&mut settings, project.timeline.format, &available);
@@ -372,14 +552,22 @@ impl ExportDialog {
             2 => settings.frame_rate = nle_core::FrameRate::FPS_60,
             _ => {}
         }
+        settings.ten_bit = self.ten_bit;
+        settings.alpha = self.alpha;
         let mut project = project.clone();
         if !self.burn_captions {
             project.timeline.captions.enabled = false;
         }
+        (Arc::new(project), settings)
+    }
+
+    fn spawn(&mut self, project: Arc<Project>, settings: ExportSettings, export_srt: bool, gpu: GpuContext, audio: HashMap<AssetId, Arc<AudioBuffer>>) {
+        let path = settings.path.clone();
         let progress = Arc::new(Mutex::new(None));
         let result = Arc::new(Mutex::new(None));
         let cancel = Arc::new(AtomicBool::new(false));
         let (p2, r2, c2) = (progress.clone(), result.clone(), cancel.clone());
+        let job_project = project.clone();
         let spawned = std::thread::Builder::new().name("rcp-export".into()).spawn(move || {
             let r = run_export(&project, &settings, gpu, &audio, &c2, |p| *p2.lock() = Some(p));
             *r2.lock() = Some(r.map_err(|e| e.to_string()));
@@ -390,8 +578,25 @@ impl ExportDialog {
         }
         self.last_result = None;
         self.done_path = None;
-        self.job = Some(Job { progress, result, cancel, started: Instant::now(), path });
+        self.job = Some(Job { progress, result, cancel, started: Instant::now(), path, project: job_project, export_srt });
     }
+}
+
+/// `name.ext` -> `name (2).ext`, … : the first name neither on disk nor
+/// already used by a queued job.
+fn next_free_path(path: &Path, queue: &[Queued]) -> PathBuf {
+    let taken = |p: &Path| p.exists() || queue.iter().any(|q| q.settings.path == p);
+    if !taken(path) {
+        return path.to_path_buf();
+    }
+    let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    // "clip (2)" -> base "clip"
+    let base = match stem.rsplit_once(" (") {
+        Some((b, n)) if n.trim_end_matches(')').parse::<u32>().is_ok() => b.to_string(),
+        _ => stem,
+    };
+    let ext = path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
+    (2..).map(|n| path.with_file_name(format!("{base} ({n}).{ext}"))).find(|p| !taken(p)).unwrap()
 }
 
 /// Output sizes offered in the Render dialog (width, height, label).
@@ -556,6 +761,20 @@ mod tests {
         assert!(QualityTier::Balanced.quality(24) < QualityTier::Fast.quality(24));
         assert_eq!(QualityTier::High.quality(3), 1);
         assert_eq!(QualityTier::Fast.quality(50), 51);
+    }
+
+    #[test]
+    fn queued_names_never_collide() {
+        let project = Arc::new(Project::new("q"));
+        let dir = std::env::temp_dir().join(format!("rcp-queue-name-{}", std::process::id()));
+        let first = dir.join("cut.mov");
+        let q = |p: &Path| Queued { project: project.clone(), settings: ExportSettings::new(p, ExportPreset::ProRes422, &project), export_srt: false };
+        let mut queue = vec![q(&first)];
+        let second = next_free_path(&first, &queue);
+        assert_eq!(second, dir.join("cut (2).mov"));
+        queue.push(q(&second));
+        assert_eq!(next_free_path(&second, &queue), dir.join("cut (3).mov"));
+        assert_eq!(next_free_path(&dir.join("other.mov"), &queue), dir.join("other.mov"));
     }
 
     #[test]

@@ -38,6 +38,6 @@ pub mod transform;
 pub use cache::VRAM_FRAME_CACHE_BUDGET;
 pub use export::{ExportPreset, ExportSettings, GamingDeliveryPreset};
 pub use gpu::GpuContext;
-pub use renderer::{FrameKey, FrameSource, Highlight, RenderOptions, Renderer};
+pub use renderer::{FrameKey, FrameSource, Highlight, PackFormat, RenderOptions, Renderer};
 pub use scopes::{ScopeKind, ScopeSettings};
 pub use wgpu;

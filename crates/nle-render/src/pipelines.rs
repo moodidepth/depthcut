@@ -19,6 +19,7 @@ pub const SHADER_FRAMEBLEND: &str = include_str!("shaders/frameblend.wgsl");
 pub const SHADER_TITLE: &str = include_str!("shaders/title.wgsl");
 pub const SHADER_OUTPUT: &str = include_str!("shaders/output.wgsl");
 pub const SHADER_NV12: &str = include_str!("shaders/nv12.wgsl");
+pub const SHADER_PACK: &str = include_str!("shaders/pack.wgsl");
 pub const SHADER_FILL: &str = include_str!("shaders/fill.wgsl");
 pub const SHADER_SCOPES: &str = include_str!("shaders/scopes.wgsl");
 pub const SHADER_WARP: &str = include_str!("shaders/warp.wgsl");
@@ -37,6 +38,8 @@ pub const ALL_SHADERS: &[(&str, &str, &str)] = &[
     ("title", SHADER_TITLE, "main"),
     ("output", SHADER_OUTPUT, "to_display"),
     ("nv12", SHADER_NV12, "main"),
+    ("pack_p010", SHADER_PACK, "p010"),
+    ("pack_rgba64", SHADER_PACK, "rgba64"),
     ("fill", SHADER_FILL, "main"),
     ("scopes", SHADER_SCOPES, "accumulate"),
     ("correct", SHADER_CORRECT, "main"),
@@ -197,6 +200,8 @@ pub struct Pipelines {
     pub title: Pipe,
     pub to_display: Pipe,
     pub nv12: Pipe,
+    pub pack_p010: Pipe,
+    pub pack_rgba64: Pipe,
     pub fill: Pipe,
     /// Video scopes: clear, accumulate, histogram max, then one draw pass per scope.
     pub scope_clear: Pipe,
@@ -266,6 +271,8 @@ impl Pipelines {
             title: pipe(device, cache, "title", SHADER_TITLE, "main", &[B::Tex, B::Samp, B::Uniform, w]),
             to_display: pipe(device, cache, "to_display", SHADER_OUTPUT, "to_display", &[B::Tex, B::Store(DISPLAY_FORMAT)]),
             nv12: pipe(device, cache, "nv12", SHADER_NV12, "main", &[B::Tex, B::Uniform, B::StorageRw]),
+            pack_p010: pipe(device, cache, "pack_p010", SHADER_PACK, "p010", &[B::Tex, B::Uniform, B::StorageRw]),
+            pack_rgba64: pipe(device, cache, "pack_rgba64", SHADER_PACK, "rgba64", &[B::Tex, B::Uniform, B::StorageRw]),
             fill: pipe(device, cache, "fill", SHADER_FILL, "main", &[B::Uniform, w]),
             scope_clear: pipe_m(device, cache, "scope_clear", &sc, "clear", &sspec),
             scope_accumulate: pipe_m(device, cache, "scope_accumulate", &sc, "accumulate", &sspec),

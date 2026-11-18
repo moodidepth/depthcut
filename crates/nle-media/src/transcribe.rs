@@ -327,6 +327,146 @@ pub fn snap_words_to_energy(words: &mut Vec<CaptionWord>, pcm16k: &[f32], offset
     *words = kept;
 }
 
+/// Words this close (centiseconds) are one back-to-back run for [`warp_to_speech`].
+const WARP_RUN_GAP_CS: i64 = 30;
+/// How far (centiseconds) a run may be pulled outside its stamped span.
+const WARP_SLACK_CS: i64 = 50;
+
+/// Speech islands of the whole recording (10 ms frames = centiseconds), for
+/// [`warp_to_speech`].
+pub fn speech_islands_cs(pcm16k: &[f32]) -> Vec<Range<i64>> {
+    let env = energy_envelope_db(pcm16k);
+    if env.is_empty() {
+        return Vec::new();
+    }
+    let (vad, _) = speech_thresholds_db(&env);
+    speech_islands(&env, vad).into_iter().map(|r| r.start as i64..r.end as i64).collect()
+}
+
+/// Re-time token-timestamp words (no DTW) onto the speech.
+///
+/// Without DTW, whisper.cpp lays a segment's words end to end across the
+/// segment's whole span, pauses included, so the error grows through the
+/// segment. Sentence starts and ends then sat in the silence and the
+/// silence gate in [`snap_words_to_energy`] deleted them (measured on a
+/// 77 s, 141-word clip: 109 words kept on Vulkan, and on the CPU with DTW
+/// off, against 140 with DTW).
+///
+/// Only the word order and the run's rough span are trusted. Each run of
+/// back-to-back words is aligned to the speech islands inside its span
+/// (±0.5 s, never into a neighbouring run) by [`align_groups`]: ordered word
+/// groups go to ordered islands so each island's length matches its words'
+/// character weight, with island breaks preferred after `.?!` and `,`. In
+/// an island, words are spread by character weight; the energy snap
+/// refines the edges afterwards. A run with no speech under it is left
+/// alone, and the gate still drops it as a hallucination.
+///
+/// `raw` is in centiseconds; `islands` likewise, on the same origin.
+pub fn warp_to_speech(raw: &mut [(i64, i64, String)], islands: &[Range<i64>]) {
+    let n = raw.len();
+    let mut i = 0;
+    while i < n {
+        let mut j = i + 1;
+        while j < n && raw[j].0 - raw[j - 1].1 <= WARP_RUN_GAP_CS {
+            j += 1;
+        }
+        let (lo, hi) = (raw[i].0, raw[i..j].iter().map(|w| w.1).max().unwrap_or(raw[i].0));
+        let prev_end = if i == 0 { i64::MIN } else { raw[i - 1].1 };
+        let next_start = raw.get(j).map_or(i64::MAX, |w| w.0);
+        let (a, b) = ((lo - WARP_SLACK_CS).max(prev_end), (hi + WARP_SLACK_CS).min(next_start));
+        let speech: Vec<(i64, i64)> = islands.iter().map(|r| (r.start.max(a), r.end.min(b))).filter(|(s, e)| e > s).collect();
+        if hi > lo && !speech.is_empty() {
+            let weights: Vec<f64> = raw[i..j].iter().map(|w| word_weight(&w.2)).collect();
+            let breaks: Vec<f64> = raw[i..j].iter().map(|w| break_bonus(&w.2)).collect();
+            let lens: Vec<f64> = speech.iter().map(|(s, e)| (e - s) as f64).collect();
+            let groups = align_groups(&weights, &breaks, &lens);
+            for (k, g) in groups.iter().enumerate() {
+                let (s, e) = speech[k];
+                let total: f64 = weights[g.clone()].iter().sum();
+                let mut acc = 0.0;
+                for wi in g.clone() {
+                    let at = |x: f64| s + ((e - s) as f64 * x / total).round() as i64;
+                    let w = &mut raw[i + wi];
+                    w.0 = at(acc);
+                    acc += weights[wi];
+                    w.1 = at(acc).max(w.0);
+                }
+            }
+        }
+        i = j;
+    }
+}
+
+/// Relative spoken length of a word: its letters and digits, plus one.
+fn word_weight(text: &str) -> f64 {
+    1.0 + text.chars().filter(|c| c.is_alphanumeric()).count() as f64
+}
+
+/// How strongly a pause after this word is expected (in weight units).
+fn break_bonus(text: &str) -> f64 {
+    match text.trim_end_matches(['"', '\'', ')', ']']).chars().last() {
+        Some('.' | '?' | '!' | '。' | '？' | '！') => 10.0,
+        Some(',' | ';' | ':' | '、' | '，') => 4.0,
+        _ => 0.0,
+    }
+}
+
+/// Split words `0..n` into one contiguous, possibly empty group per island,
+/// in order, minimising Σ 3·|want − got| / √max(want, got) minus the break
+/// bonus of every group's last word that a pause follows. `want` is the
+/// island's length over the run's overall speech time per weight unit,
+/// `got` the group's weight.
+pub fn align_groups(weights: &[f64], breaks: &[f64], lens: &[f64]) -> Vec<Range<usize>> {
+    let (n, k) = (weights.len(), lens.len());
+    if k == 0 {
+        return Vec::new();
+    }
+    let total_w: f64 = weights.iter().sum();
+    let rate = lens.iter().sum::<f64>() / total_w.max(1e-9);
+    let mut prefix = vec![0.0; n + 1];
+    for (i, w) in weights.iter().enumerate() {
+        prefix[i + 1] = prefix[i] + w;
+    }
+    // dp[m][j]: best cost with words 0..j placed on islands 0..m
+    let inf = f64::INFINITY;
+    let mut dp = vec![vec![inf; n + 1]; k + 1];
+    let mut from = vec![vec![0usize; n + 1]; k + 1];
+    dp[0][0] = 0.0;
+    for m in 0..k {
+        let want = lens[m] / rate.max(1e-9);
+        let last_island = m + 1 == k;
+        for i in 0..=n {
+            if dp[m][i] == inf {
+                continue;
+            }
+            // the last island must take every remaining word
+            let js: Box<dyn Iterator<Item = usize>> = if last_island { Box::new(std::iter::once(n)) } else { Box::new(i..=n) };
+            for j in js {
+                let got = prefix[j] - prefix[i];
+                // speaking rate varies roughly in proportion to length, so the
+                // mismatch is scaled by √size: a long island may be ±20 % off
+                // without outweighing a sentence break
+                let mut c = dp[m][i] + 3.0 * (want - got).abs() / want.max(got).max(1.0).sqrt();
+                if j > i && !last_island {
+                    c -= breaks[j - 1];
+                }
+                if c < dp[m + 1][j] {
+                    dp[m + 1][j] = c;
+                    from[m + 1][j] = i;
+                }
+            }
+        }
+    }
+    let mut out = vec![0..0; k];
+    let mut j = n;
+    for m in (1..=k).rev() {
+        let i = from[m][j];
+        out[m - 1] = i..j;
+        j = i;
+    }
+    out
+}
+
 /// DTW onsets land inside the word's first syllable: measured against the
 /// energy onsets of TTS speech they trail by 150–280 ms (mean ≈ 220 ms) on
 /// both base and large-v3-turbo, so starts are pulled back by this much
@@ -651,10 +791,35 @@ mod engine {
         !user_data.is_null() && unsafe { (*(user_data as *const AtomicBool)).load(Ordering::Relaxed) }
     }
 
+    #[cfg(feature = "whisper-vulkan")]
+    extern "C" {
+        fn ggml_backend_reg_by_name(name: *const std::ffi::c_char) -> *mut c_void;
+        fn ggml_backend_reg_dev_count(reg: *mut c_void) -> usize;
+    }
+
     /// Name of Vulkan device 0 (ggml lists discrete GPUs before integrated).
+    ///
+    /// ggml registers its Vulkan backend with the instance init inside a
+    /// `try`; `list_devices()` re-runs that init without one, so with no
+    /// Vulkan loader, a Vulkan 1.1 driver or no ICD it threw C++ through FFI
+    /// and aborted. Ask the registry first; only a registered backend with
+    /// devices is listed.
     fn vulkan_device() -> Option<String> {
         #[cfg(feature = "whisper-vulkan")]
         {
+            // SAFETY: plain C calls into ggml's backend registry; the name is a
+            // NUL-terminated literal and the returned handle is only passed back.
+            let devices = unsafe {
+                let reg = ggml_backend_reg_by_name(c"Vulkan".as_ptr());
+                if reg.is_null() {
+                    0
+                } else {
+                    ggml_backend_reg_dev_count(reg)
+                }
+            };
+            if devices == 0 {
+                return None;
+            }
             return whisper_rs::vulkan::list_devices().into_iter().next().map(|d| d.name);
         }
         #[allow(unreachable_code)]
@@ -700,6 +865,8 @@ mod engine {
         let threads = threads.clamp(1, i32::MAX as usize) as i32;
         let windows = chunk_windows(audio.len());
         let n = windows.len().max(1) as f32;
+        // token-timestamp words are re-timed onto the speech (see warp_to_speech)
+        let islands = if dtw { Vec::new() } else { speech_islands_cs(audio) };
         let mut chunks = Vec::with_capacity(windows.len());
         let mut detected = None;
 
@@ -749,6 +916,12 @@ mod engine {
             }
             if dtw {
                 dtw_word_ends(&mut raw);
+            } else {
+                // window start in 10 ms frames (windows start on multiples of 8000 samples)
+                let off = (window.start / ENV_HOP) as i64;
+                let len = (window.len() / ENV_HOP) as i64;
+                let local: Vec<Range<i64>> = islands.iter().filter(|r| r.end > off && r.start < off + len).map(|r| r.start - off..r.end - off).collect();
+                warp_to_speech(&mut raw, &local);
             }
             // Lock the language detected on the first window with speech so
             // later windows cannot flip it.
@@ -825,7 +998,7 @@ mod engine {
                         }
                     }
                 }
-                None => fallback_reason = Some("no Vulkan device found".into()),
+                None => fallback_reason = Some("no usable Vulkan 1.2 GPU (Vulkan runtime missing, driver too old, or no device)".into()),
             }
         }
         let threads = cpu_threads();
@@ -974,6 +1147,36 @@ mod tests {
         snap_words_to_energy(&mut words, &pcm, Time::ZERO);
         assert_eq!(words.len(), 1, "quiet voice is not a hallucination");
         assert!((words[0].start.as_secs_f64() - 6.0).abs() <= 0.025, "{:?}", words[0]);
+    }
+
+    #[test]
+    fn gapless_words_are_warped_onto_speech() {
+        // whisper laid six words end to end over 0–6 s; speech is 0.5–2.5 s and 4–5.5 s
+        let mut raw: Vec<(i64, i64, String)> = (0..6).map(|i| (i * 100, i * 100 + 100, format!("w{i}"))).collect();
+        let islands = vec![50..250, 400..550];
+        warp_to_speech(&mut raw, &islands);
+        let inside = |t: i64| islands.iter().any(|r| r.start <= t && t <= r.end);
+        for w in &raw {
+            assert!(inside(w.0) && inside(w.1), "{w:?} not on speech");
+        }
+        assert!(raw.windows(2).all(|p| p[0].1 <= p[1].0), "order kept: {raw:?}");
+        // a run with no speech under it is untouched (the gate handles it)
+        let mut silent = vec![(1000, 1100, "x".to_string())];
+        warp_to_speech(&mut silent, &islands);
+        assert_eq!(silent[0].0, 1000);
+    }
+
+    #[test]
+    fn sentences_land_on_their_own_pause_separated_islands() {
+        // two sentences stamped end to end over 0–6 s; speech: 0–1.5 s, 3.5–5 s
+        let words = ["The", "fox", "ran.", "Then", "it", "slept."];
+        let mut raw: Vec<(i64, i64, String)> = words.iter().enumerate().map(|(i, w)| (i as i64 * 100, i as i64 * 100 + 100, w.to_string())).collect();
+        warp_to_speech(&mut raw, &[0..150, 350..500]);
+        assert!(raw[..3].iter().all(|w| w.1 <= 150), "{raw:?}");
+        assert!(raw[3..].iter().all(|w| w.0 >= 350), "{raw:?}");
+        // a lone noise island between them takes no words
+        let g = align_groups(&[4.0, 4.0, 5.0, 5.0, 3.0, 7.0], &[0.0, 0.0, 8.0, 0.0, 0.0, 8.0], &[130.0, 20.0, 150.0]);
+        assert_eq!(g, vec![0..3, 3..3, 3..6]);
     }
 
     #[test]

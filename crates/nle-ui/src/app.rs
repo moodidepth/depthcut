@@ -131,7 +131,7 @@ pub struct Preview {
     pub renderer: Renderer,
     pub texture: egui::TextureId,
     render_state: egui_wgpu::RenderState,
-    last: Option<PreviewKey>,
+    pub(crate) last: Option<PreviewKey>,
     pending_uploads: bool,
     /// egui ids of the drawn scopes while the scopes drawer is open.
     pub scope_textures: Option<[egui::TextureId; 4]>,
@@ -151,6 +151,9 @@ impl FrameSource for NoBlock<'_> {
     fn matte(&mut self, asset: AssetId, index: i64, kind: nle_core::MatteKind) -> Option<nle_media::matte::Matte> {
         // ~150 KB read per frame on a renderer cache miss; mattes are small
         nle_media::matte::load(self.0.asset(asset)?, kind, index)
+    }
+    fn yuv_matrix(&self, asset: AssetId) -> Option<nle_core::YuvMatrix> {
+        Some(self.0.asset(asset)?.video.as_ref()?.yuv_matrix())
     }
 }
 
@@ -227,6 +230,8 @@ pub struct App {
     /// the "Save changes?" prompt only kick in once the project differs from it.
     saved_state: u64,
     pub assets_changed: bool,
+    /// Relink search / consolidate copy in progress.
+    pub media_job: Option<crate::media_manage::MediaJob>,
     /// A project switch (or quit) waiting on the "Save changes?" answer.
     pending_switch: Option<ProjectSwitch>,
     /// Quit was confirmed; let the next close request through.
@@ -244,7 +249,10 @@ pub enum ProjectSwitch {
     Open,
     Demo,
     ImportFcpxml,
-    DroppedFcpxml(PathBuf),
+    /// Import an EDL / OTIO / FCPXML file picked in a dialog.
+    ImportInterchange,
+    /// A timeline file (FCPXML / EDL / OTIO) dropped on the window.
+    DroppedTimeline(PathBuf),
     Quit(egui::Context),
 }
 
@@ -353,6 +361,7 @@ impl App {
             gpu_label,
             saved_state: 0,
             assets_changed: false,
+            media_job: None,
             pending_switch: None,
             allow_close: false,
             #[cfg(windows)]
@@ -422,7 +431,8 @@ impl App {
             ProjectSwitch::Open => self.open_dialog(),
             ProjectSwitch::Demo => self.set_project(demo::demo_project(), None),
             ProjectSwitch::ImportFcpxml => self.import_fcpxml(),
-            ProjectSwitch::DroppedFcpxml(path) => self.load_fcpxml_file(&path),
+            ProjectSwitch::ImportInterchange => self.import_interchange_dialog(),
+            ProjectSwitch::DroppedTimeline(path) => self.load_timeline_file(&path),
             ProjectSwitch::Quit(ctx) => {
                 self.allow_close = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -1512,7 +1522,7 @@ impl App {
         };
         let key = (self.history.revision(), t, self.viewer.wipe, proxy, self.browser.skim, highlight);
         if p.last != Some(key) || p.pending_uploads {
-            let opts = RenderOptions { wipe: self.viewer.wipe, color: true, highlight };
+            let opts = RenderOptions { wipe: self.viewer.wipe, color: true, highlight, transparent: false };
             p.renderer.render(&comp, &mut NoBlock(&self.project), opts);
             p.last = Some(key);
             p.pending_uploads = false;
@@ -1701,18 +1711,7 @@ impl App {
 
     pub fn import_fcpxml(&mut self) {
         let Some(path) = rfd::FileDialog::new().add_filter("Final Cut Pro XML", &["fcpxml", "xml"]).pick_file() else { return };
-        self.load_fcpxml_file(&path);
-    }
-
-    fn load_fcpxml_file(&mut self, path: &std::path::Path) {
-        let res = std::fs::read_to_string(path).map_err(|e| e.to_string()).and_then(|s| nle_core::fcpxml::import(&s).map_err(|e| e.to_string()));
-        match res {
-            Ok(p) => {
-                self.set_project(p, None);
-                self.status(format!("Imported {}", path.display()));
-            }
-            Err(e) => self.status(format!("FCPXML import failed: {e}")),
-        }
+        self.load_timeline_file(&path);
     }
 
     pub fn export_fcpxml(&mut self) {
@@ -1990,6 +1989,40 @@ impl App {
                 if ui.button("Export FCPXML…").clicked() {
                     ui.close_menu();
                     self.export_fcpxml();
+                }
+                if ui.button("Import EDL / OpenTimelineIO…").on_hover_text("CMX3600 EDL or .otio from Resolve, Premiere, Avid…").clicked() {
+                    ui.close_menu();
+                    self.request_switch(ProjectSwitch::ImportInterchange);
+                }
+                ui.menu_button("Export Timeline As", |ui| {
+                    if ui
+                        .button("EDL (CMX3600)…")
+                        .on_hover_text("Cuts, dissolves and constant speed changes; one .edl per track. Titles, effects and colour are not carried.")
+                        .clicked()
+                    {
+                        ui.close_menu();
+                        self.export_edl();
+                    }
+                    if ui.button("OpenTimelineIO (.otio)…").on_hover_text("All tracks, cuts, dissolves and speed changes. Effects and colour are not carried.").clicked() {
+                        ui.close_menu();
+                        self.export_otio();
+                    }
+                });
+                ui.separator();
+                let missing = nle_core::media_mgmt::missing_assets(&self.project).len();
+                let busy = self.media_job.is_some();
+                let relink = if missing > 0 { format!("Relink Missing Media ({missing})…") } else { "Relink Missing Media…".to_string() };
+                if ui.add_enabled(missing > 0 && !busy, egui::Button::new(relink)).on_disabled_hover_text("Nothing is offline").clicked() {
+                    ui.close_menu();
+                    self.relink_dialog();
+                }
+                if ui
+                    .add_enabled(!busy, egui::Button::new("Consolidate Media…"))
+                    .on_hover_text("Copy every file the timeline uses into one folder and point the project at the copies")
+                    .clicked()
+                {
+                    ui.close_menu();
+                    self.consolidate_dialog();
                 }
                 ui.separator();
                 if ui.button(self.menu_label("Share / Export Movie…", Action::Export)).clicked() {
@@ -2270,6 +2303,13 @@ impl App {
                     ui.spinner();
                     ui.label(format!("Importing {}…", self.library.importing));
                 }
+                if let Some(job) = &self.media_job {
+                    ui.spinner();
+                    ui.label(job.label());
+                    if ui.small_button("Cancel").clicked() {
+                        job.cancel();
+                    }
+                }
                 if let Some(s) = self.status_text() {
                     ui.label(egui::RichText::new(s).color(theme::SNAP));
                 }
@@ -2392,9 +2432,9 @@ impl App {
         if files.is_empty() {
             return;
         }
-        let (xml, media): (Vec<_>, Vec<_>) = files.into_iter().partition(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("fcpxml")));
+        let (xml, media): (Vec<_>, Vec<_>) = files.into_iter().partition(|p| crate::media_manage::is_timeline_file(p));
         if let Some(x) = xml.first() {
-            self.request_switch(ProjectSwitch::DroppedFcpxml(x.clone()));
+            self.open_dropped_timeline(x.clone());
         }
         if !media.is_empty() {
             self.library.import(media);
@@ -2423,6 +2463,7 @@ impl App {
                         a.loudness_lufs = lufs;
                     }
                 }
+                MediaEvent::Refreshed(id, a) => self.apply_reprobe(id, a),
                 MediaEvent::Message(m) => self.status(m),
             }
         }
@@ -2534,6 +2575,7 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_media(ctx);
+        self.poll_media_job(ctx);
         self.poll_jobs(ctx);
         self.handle_dropped_files(ctx);
         self.handle_keys(ctx);

@@ -23,11 +23,36 @@ const WAVE_BUCKETS_PER_SEC: u32 = 200;
 // short-lived channel messages: boxing the big variant would only add allocations
 #[allow(clippy::large_enum_variant)]
 enum JobResult {
-    Probed { path: PathBuf, result: Result<MediaAsset, String> },
-    Filmstrip { asset: AssetId, strip: Filmstrip },
-    Audio { asset: AssetId, buffer: Arc<AudioBuffer>, waveform: Arc<Waveform>, loudness_lufs: Option<f32> },
-    Peaks { asset: AssetId, peaks: Arc<PeakBuffer>, transients: Arc<Vec<Time>> },
-    Failed { asset: AssetId, what: &'static str, error: String },
+    Probed {
+        path: PathBuf,
+        result: Result<MediaAsset, String>,
+    },
+    /// Fresh stream info for an existing asset (relinked / EDL / OTIO media).
+    Reprobed {
+        asset: AssetId,
+        path: PathBuf,
+        result: Result<MediaAsset, String>,
+    },
+    Filmstrip {
+        asset: AssetId,
+        strip: Filmstrip,
+    },
+    Audio {
+        asset: AssetId,
+        buffer: Arc<AudioBuffer>,
+        waveform: Arc<Waveform>,
+        loudness_lufs: Option<f32>,
+    },
+    Peaks {
+        asset: AssetId,
+        peaks: Arc<PeakBuffer>,
+        transients: Arc<Vec<Time>>,
+    },
+    Failed {
+        asset: AssetId,
+        what: &'static str,
+        error: String,
+    },
 }
 
 /// Filmstrip uploaded as egui textures.
@@ -52,6 +77,8 @@ impl StripTextures {
 #[allow(clippy::large_enum_variant)] // one per finished import, consumed immediately
 pub enum MediaEvent {
     Imported(MediaAsset),
+    /// Probe result for an asset already in the project.
+    Refreshed(AssetId, MediaAsset),
     AudioReady(AssetId, Arc<AudioBuffer>, Option<f32>),
     Message(String),
 }
@@ -119,6 +146,28 @@ impl MediaLibrary {
                 let _ = tx.send(JobResult::Probed { path, result });
             });
         }
+    }
+
+    /// Probe an existing asset's file again; arrives as [`MediaEvent::Refreshed`].
+    pub fn reprobe(&mut self, asset: AssetId, path: PathBuf) {
+        self.importing += 1;
+        let tx = self.tx.clone();
+        rayon::spawn(move || {
+            let result = probe::probe(&path).map_err(|e| e.to_string());
+            let _ = tx.send(JobResult::Reprobed { asset, path, result });
+        });
+    }
+
+    /// Drop cached thumbnails / audio for an asset whose file changed, so
+    /// [`Self::ensure`] analyses it again.
+    pub fn forget_asset(&mut self, id: AssetId) {
+        self.filmstrips.remove(&id);
+        self.waveforms.remove(&id);
+        self.peaks.remove(&id);
+        self.transients.remove(&id);
+        self.audio.remove(&id);
+        self.failed.remove(&id);
+        self.requested.retain(|(a, _)| *a != id);
     }
 
     /// Queue thumbnails and audio analysis for an asset (once).
@@ -200,6 +249,13 @@ impl MediaLibrary {
                     match result {
                         Ok(a) => events.push(MediaEvent::Imported(a)),
                         Err(e) => events.push(MediaEvent::Message(format!("Could not import {}: {e}", path.display()))),
+                    }
+                }
+                JobResult::Reprobed { asset, path, result } => {
+                    self.importing = self.importing.saturating_sub(1);
+                    match result {
+                        Ok(a) => events.push(MediaEvent::Refreshed(asset, a)),
+                        Err(e) => events.push(MediaEvent::Message(format!("Could not read {}: {e}", path.display()))),
                     }
                 }
                 JobResult::Filmstrip { asset, strip } => {

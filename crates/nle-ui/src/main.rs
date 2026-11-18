@@ -20,6 +20,7 @@ mod export_ui;
 mod ffmpeg_setup;
 mod inspector;
 mod media;
+mod media_manage;
 mod motion_ui;
 mod online_ui;
 mod presets_ui;
@@ -27,6 +28,7 @@ mod shortcuts_ui;
 mod theme;
 mod timeline_ui;
 mod viewer;
+mod whisper_runtime;
 mod widgets;
 
 use eframe::egui;
@@ -35,6 +37,10 @@ use nle_render::wgpu;
 use std::sync::Arc;
 
 fn main() -> eframe::Result<()> {
+    // before the crash marker is written: this exits straight away
+    if let Some(code) = whisper_runtime::selftest_from_args() {
+        std::process::exit(code);
+    }
     // log file + panic hook + "previous session crashed" detection
     diagnostics::init("info,wgpu_core=warn,wgpu_hal=warn,naga=warn,eframe=warn,egui_wgpu=warn");
     let budget = nle_media::threads::init_media_pool();

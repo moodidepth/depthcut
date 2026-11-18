@@ -59,6 +59,10 @@ fn whisper_vulkan() {
     // The library sits on whisper-rs-sys's link search path.
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") && env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
         println!("cargo:rustc-link-arg-bins=/WHOLEARCHIVE:ggml-vulkan.lib");
+        // vulkan-1.dll is loaded on first use, so the app starts on PCs
+        // without the Vulkan runtime (see src/whisper_runtime.rs)
+        println!("cargo:rustc-link-arg-bins=/DELAYLOAD:vulkan-1.dll");
+        println!("cargo:rustc-link-arg-bins=delayimp.lib");
     }
 }
 

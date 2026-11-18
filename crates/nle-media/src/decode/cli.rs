@@ -8,7 +8,7 @@
 use super::{scaled_dims, DecodeOptions, VideoDecoder};
 use crate::ffmpeg_cli;
 use crate::frame::{PixelFormat, VideoFrame};
-use crate::hwaccel::{self, DecoderPlan, HwBackend, Platform, VideoCodec, INTEL_ARC_A750};
+use crate::hwaccel::{self, Chroma, DecoderPlan, HwBackend, Platform, VideoCodec, INTEL_ARC_A750};
 use crate::MediaError;
 use nle_core::{FrameRate, MediaAsset, Time};
 use std::io::Read;
@@ -27,6 +27,8 @@ pub struct CliDecoder {
     width: u32,
     height: u32,
     format: PixelFormat,
+    /// Source chroma layout (picks the hardware download format).
+    chroma: Chroma,
     rate: FrameRate,
     child: Option<Child>,
     stdout: Option<ChildStdout>,
@@ -41,7 +43,8 @@ impl CliDecoder {
         let path = if use_proxy { asset.proxy_path.clone().unwrap_or_else(|| asset.path.clone()) } else { asset.path.clone() };
         let codec = if use_proxy { VideoCodec::H264 } else { VideoCodec::from_ffmpeg_name(&v.codec) };
         let depth = if use_proxy { 8 } else { v.bit_depth };
-        let plans = hwaccel::plan_decode(codec, depth, Platform::current(), hwaccel::probe_caps(), &INTEL_ARC_A750);
+        let chroma = if use_proxy { Chroma::Yuv420 } else { Chroma::from_pix_fmt(&v.pix_fmt) };
+        let plans = hwaccel::plan_decode(codec, depth, chroma, Platform::current(), hwaccel::probe_caps(), &INTEL_ARC_A750);
         let (width, height) = scaled_dims(v.width, v.height, opts.max_height);
         log::debug!("{}: decode plan {:?}", asset.name, plans.iter().map(|p| p.backend).collect::<Vec<_>>());
         Ok(CliDecoder {
@@ -53,6 +56,7 @@ impl CliDecoder {
             width,
             height,
             format: PixelFormat::for_bit_depth(depth),
+            chroma,
             rate: v.frame_rate,
             child: None,
             stdout: None,
@@ -69,7 +73,7 @@ impl CliDecoder {
     fn filter(&self, out_fmt: &str) -> (Vec<String>, String) {
         let plan = &self.plans[self.plan_idx];
         let (w, h) = (self.width, self.height);
-        let sw_fmt = if self.format == PixelFormat::P010 { "p010le" } else { "nv12" };
+        let sw_fmt = self.chroma.hw_download_format(if self.format == PixelFormat::P010 { 10 } else { 8 });
         let scale = self.needs_scale();
         // QSV / VA-API surfaces stay on the GPU (scaled there when needed) and
         // are downloaded explicitly. Letting FFmpeg auto-download QSV frames

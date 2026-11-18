@@ -6,6 +6,10 @@
 //! (`h264_qsv` / `h264_vaapi`)**, the NVIDIA NVENC / AMD AMF equivalents, or
 //! `libx264` as a software fallback (see `nle_media::encoder_probe`).
 //! Audio is mixed offline (same mixer as playback) and muxed as AAC or PCM.
+//!
+//! Mastering formats (ProRes, DNxHR, PNG / TIFF / EXR sequences) read the
+//! frame back as 16-bit RGBA and let FFmpeg's software encoders do the
+//! 4:2:2 / 4:4:4 conversion. HEVC and AV1 can also be exported 10-bit (P010).
 
 use crate::gpu::GpuContext;
 use crate::renderer::{FrameSource, RenderOptions, Renderer};
@@ -41,6 +45,9 @@ pub enum ExportCodec {
     Av1,
     Hevc,
     H264,
+    ProRes,
+    Dnxhr,
+    ImageSequence,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -56,9 +63,31 @@ pub enum ExportPreset {
     H264Amf,
     H264Vaapi,
     H264Software,
+    ProRes422,
+    ProRes422Hq,
+    ProRes4444,
+    DnxhrHq,
+    DnxhrHqx,
+    Dnxhr444,
+    PngSequence,
+    TiffSequence,
+    ExrSequence,
 }
 
 impl ExportPreset {
+    /// Mastering / intermediate formats (software encoders in every full FFmpeg build).
+    pub const MASTERING: [ExportPreset; 9] = [
+        ExportPreset::ProRes422,
+        ExportPreset::ProRes422Hq,
+        ExportPreset::ProRes4444,
+        ExportPreset::DnxhrHq,
+        ExportPreset::DnxhrHqx,
+        ExportPreset::Dnxhr444,
+        ExportPreset::PngSequence,
+        ExportPreset::TiffSequence,
+        ExportPreset::ExrSequence,
+    ];
+
     /// Fastest first: Intel QSV → NVIDIA NVENC → AMD AMF → VA-API → CPU.
     pub const ALL: [ExportPreset; 11] = [
         ExportPreset::Av1Qsv,
@@ -87,6 +116,15 @@ impl ExportPreset {
             ExportPreset::H264Amf => "H.264 — AMD AMF (h264_amf)",
             ExportPreset::H264Vaapi => "H.264 — VA-API (h264_vaapi)",
             ExportPreset::H264Software => "H.264 — Software (libx264)",
+            ExportPreset::ProRes422 => "Apple ProRes 422 (10-bit)",
+            ExportPreset::ProRes422Hq => "Apple ProRes 422 HQ (10-bit)",
+            ExportPreset::ProRes4444 => "Apple ProRes 4444 (10-bit, alpha)",
+            ExportPreset::DnxhrHq => "Avid DNxHR HQ (8-bit 4:2:2)",
+            ExportPreset::DnxhrHqx => "Avid DNxHR HQX (10-bit 4:2:2)",
+            ExportPreset::Dnxhr444 => "Avid DNxHR 444 (10-bit 4:4:4)",
+            ExportPreset::PngSequence => "PNG sequence (16-bit, alpha)",
+            ExportPreset::TiffSequence => "TIFF sequence (16-bit, alpha)",
+            ExportPreset::ExrSequence => "OpenEXR sequence (half float, linear)",
         }
     }
     pub fn encoder(self) -> &'static str {
@@ -102,6 +140,11 @@ impl ExportPreset {
             ExportPreset::H264Amf => "h264_amf",
             ExportPreset::H264Vaapi => "h264_vaapi",
             ExportPreset::H264Software => "libx264",
+            ExportPreset::ProRes422 | ExportPreset::ProRes422Hq | ExportPreset::ProRes4444 => "prores_ks",
+            ExportPreset::DnxhrHq | ExportPreset::DnxhrHqx | ExportPreset::Dnxhr444 => "dnxhd",
+            ExportPreset::PngSequence => "png",
+            ExportPreset::TiffSequence => "tiff",
+            ExportPreset::ExrSequence => "exr",
         }
     }
     /// Preset for an FFmpeg encoder name.
@@ -112,7 +155,35 @@ impl ExportPreset {
         match self {
             ExportPreset::Av1Qsv | ExportPreset::Av1Nvenc | ExportPreset::Av1Amf => ExportCodec::Av1,
             ExportPreset::HevcQsv | ExportPreset::HevcNvenc | ExportPreset::HevcAmf => ExportCodec::Hevc,
+            ExportPreset::ProRes422 | ExportPreset::ProRes422Hq | ExportPreset::ProRes4444 => ExportCodec::ProRes,
+            ExportPreset::DnxhrHq | ExportPreset::DnxhrHqx | ExportPreset::Dnxhr444 => ExportCodec::Dnxhr,
+            ExportPreset::PngSequence | ExportPreset::TiffSequence | ExportPreset::ExrSequence => ExportCodec::ImageSequence,
             _ => ExportCodec::H264,
+        }
+    }
+    /// Intermediate / mastering format (no rate control, PCM audio).
+    pub fn is_mastering(self) -> bool {
+        matches!(self.codec(), ExportCodec::ProRes | ExportCodec::Dnxhr | ExportCodec::ImageSequence)
+    }
+    pub fn is_image_sequence(self) -> bool {
+        self.codec() == ExportCodec::ImageSequence
+    }
+    /// Can carry an alpha channel.
+    pub fn supports_alpha(self) -> bool {
+        matches!(self, ExportPreset::ProRes4444 | ExportPreset::PngSequence | ExportPreset::TiffSequence | ExportPreset::ExrSequence)
+    }
+    /// Has a 10-bit (Main10 / P010) option.
+    pub fn supports_ten_bit(self) -> bool {
+        matches!(self.codec(), ExportCodec::Hevc | ExportCodec::Av1)
+    }
+    /// File extension of the output (per frame for sequences).
+    pub fn extension(self) -> &'static str {
+        match self {
+            ExportPreset::PngSequence => "png",
+            ExportPreset::TiffSequence => "tif",
+            ExportPreset::ExrSequence => "exr",
+            p if p.is_mastering() => "mov",
+            _ => "mp4",
         }
     }
     pub fn is_qsv(self) -> bool {
@@ -126,7 +197,7 @@ impl ExportPreset {
     }
     /// Whether this preset encodes on a GPU.
     pub fn is_hardware(self) -> bool {
-        self != ExportPreset::H264Software
+        self.is_qsv() || self.is_nvenc() || self.is_amf() || self == ExportPreset::H264Vaapi
     }
     /// Sensible default quality (ICQ / CQ / QP / CRF).
     pub fn default_quality(self) -> u8 {
@@ -134,6 +205,7 @@ impl ExportPreset {
             ExportCodec::Av1 => 28,
             ExportCodec::Hevc => 24,
             ExportCodec::H264 => 22,
+            ExportCodec::ProRes | ExportCodec::Dnxhr | ExportCodec::ImageSequence => 0,
         }
     }
     pub fn supported_on(self, platform: Platform) -> bool {
@@ -146,6 +218,18 @@ impl ExportPreset {
 /// test encode on this machine.
 pub fn available_presets(platform: Platform, caps: &HwCaps) -> Vec<ExportPreset> {
     ExportPreset::ALL.into_iter().filter(|p| p.supported_on(platform) && (caps.encoders.is_empty() || caps.has_encoder(p.encoder()))).collect()
+}
+
+/// Mastering presets whose (software) encoder this FFmpeg build has.
+pub fn mastering_presets(caps: &HwCaps) -> Vec<ExportPreset> {
+    ExportPreset::MASTERING.into_iter().filter(|p| caps.encoders.is_empty() || caps.has_encoder(p.encoder())).collect()
+}
+
+/// `shot.png` → `shot_%06d.png` (FFmpeg image2 pattern) for sequences.
+pub fn sequence_pattern(path: &Path) -> PathBuf {
+    let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "frame".into());
+    let ext = path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_else(|| "png".into());
+    path.with_file_name(format!("{stem}_%06d.{ext}"))
 }
 
 /// Presets whose encoder passed the startup hardware probe, fastest first.
@@ -332,6 +416,10 @@ pub struct ExportSettings {
     /// Normalize the program mix to this integrated loudness (LUFS) with a
     /// -1 dBFS look-ahead limiter; `None` exports the mix as-is.
     pub loudness_target: Option<f32>,
+    /// 10-bit (Main10, P010) for HEVC / AV1.
+    pub ten_bit: bool,
+    /// Keep alpha (transparent background) for formats that carry it.
+    pub alpha: bool,
 }
 
 impl ExportSettings {
@@ -349,6 +437,29 @@ impl ExportSettings {
             end: project.timeline.extent(),
             size_capped: false,
             loudness_target: None,
+            ten_bit: false,
+            alpha: false,
+        }
+    }
+
+    /// How the renderer packs frames for this export.
+    pub fn pack_format(&self) -> crate::PackFormat {
+        use crate::PackFormat;
+        if self.preset.is_mastering() {
+            PackFormat::Rgba64 { alpha: self.alpha && self.preset.supports_alpha(), linear: self.preset == ExportPreset::ExrSequence }
+        } else if self.ten_bit && self.preset.supports_ten_bit() {
+            PackFormat::P010
+        } else {
+            PackFormat::Nv12
+        }
+    }
+
+    /// Where FFmpeg writes: the file, or the numbered pattern for sequences.
+    pub fn output_target(&self) -> PathBuf {
+        if self.preset.is_image_sequence() {
+            sequence_pattern(&self.path)
+        } else {
+            self.path.clone()
         }
     }
 
@@ -374,7 +485,11 @@ impl ExportSettings {
             ExportPreset::H264Vaapi => a.extend(["-vaapi_device", "/dev/dri/renderD128"].map(String::from)),
             _ => {}
         }
-        a.extend(["-f", "rawvideo", "-pix_fmt", "nv12"].map(String::from));
+        if self.preset.is_mastering() {
+            return self.mastering_args(audio_wav);
+        }
+        let pack = self.pack_format();
+        a.extend(["-f".into(), "rawvideo".into(), "-pix_fmt".into(), pack.ffmpeg_name().into()]);
         a.extend(["-s".into(), format!("{w}x{h}"), "-framerate".into(), format!("{}/{}", self.frame_rate.num, self.frame_rate.den)]);
         a.extend(["-i", "pipe:0"].map(String::from));
         let has_audio = audio_wav.is_some() && self.audio != AudioExport::None;
@@ -395,6 +510,7 @@ impl ExportSettings {
             ExportPreset::H264Vaapi => format!("{tags},format=nv12,hwupload"),
             _ => tags.to_string(),
         };
+        let ten = pack == crate::PackFormat::P010;
         a.extend(["-vf".to_string(), vf]);
         a.extend(["-c:v".into(), self.preset.encoder().into()]);
         // Peak rate: 1.5× average normally, pinned to the average for size-capped exports.
@@ -431,6 +547,9 @@ impl ExportSettings {
                 a.extend(abr(k));
             }
         }
+        if ten && self.preset.codec() == ExportCodec::Hevc && (self.preset.is_nvenc() || self.preset.is_amf()) {
+            a.extend(["-profile:v", "main10"].map(String::from));
+        }
         if self.preset.codec() == ExportCodec::Hevc {
             a.extend(["-tag:v", "hvc1"].map(String::from));
         }
@@ -446,6 +565,57 @@ impl ExportSettings {
             a.extend(["-movflags", "+faststart"].map(String::from));
         }
         a.push(self.path.to_string_lossy().into_owned());
+        a
+    }
+}
+
+impl ExportSettings {
+    /// FFmpeg arguments for ProRes / DNxHR / image sequences: 16-bit RGBA in,
+    /// converted on the CPU to the format's native layout.
+    fn mastering_args(&self, audio_wav: Option<&Path>) -> Vec<String> {
+        let (w, h) = self.encoded_size();
+        let alpha = self.alpha && self.preset.supports_alpha();
+        let seq = self.preset.is_image_sequence();
+        let mut a: Vec<String> = ["-hide_banner", "-loglevel", "error", "-y"].map(String::from).to_vec();
+        a.extend(["-f", "rawvideo", "-pix_fmt", "rgba64le"].map(String::from));
+        a.extend(["-s".into(), format!("{w}x{h}"), "-framerate".into(), format!("{}/{}", self.frame_rate.num, self.frame_rate.den)]);
+        a.extend(["-i", "pipe:0"].map(String::from));
+        let has_audio = !seq && audio_wav.is_some() && self.audio != AudioExport::None;
+        if let (Some(wav), true) = (audio_wav, has_audio) {
+            a.push("-i".into());
+            a.push(wav.to_string_lossy().into_owned());
+        }
+        a.extend(["-map", "0:v:0"].map(String::from));
+        if has_audio {
+            a.extend(["-map", "1:a:0"].map(String::from));
+        }
+        let yuv = |fmt: &str| format!("scale=out_color_matrix=bt709:out_range=tv,format={fmt},setparams=range=tv:color_primaries=bt709:color_trc=bt709:colorspace=bt709");
+        let (vf, codec_args): (String, Vec<&str>) = match self.preset {
+            ExportPreset::ProRes422 => (yuv("yuv422p10le"), vec!["-profile:v", "2", "-vendor", "apl0"]),
+            ExportPreset::ProRes422Hq => (yuv("yuv422p10le"), vec!["-profile:v", "3", "-vendor", "apl0"]),
+            ExportPreset::ProRes4444 if alpha => (yuv("yuva444p10le"), vec!["-profile:v", "4", "-vendor", "apl0", "-alpha_bits", "16"]),
+            ExportPreset::ProRes4444 => (yuv("yuv444p10le"), vec!["-profile:v", "4", "-vendor", "apl0"]),
+            ExportPreset::DnxhrHq => (yuv("yuv422p"), vec!["-profile:v", "dnxhr_hq"]),
+            ExportPreset::DnxhrHqx => (yuv("yuv422p10le"), vec!["-profile:v", "dnxhr_hqx"]),
+            ExportPreset::Dnxhr444 => (yuv("yuv444p10le"), vec!["-profile:v", "dnxhr_444"]),
+            ExportPreset::PngSequence => (format!("format={}", if alpha { "rgba64be" } else { "rgb48be" }), vec![]),
+            ExportPreset::TiffSequence => (format!("format={}", if alpha { "rgba64le" } else { "rgb48le" }), vec!["-compression_algo", "deflate"]),
+            ExportPreset::ExrSequence => (format!("format={}", if alpha { "gbrapf32le" } else { "gbrpf32le" }), vec!["-compression", "zip16", "-format", "half"]),
+            _ => unreachable!("not a mastering preset"),
+        };
+        a.extend(["-vf".into(), vf, "-c:v".into(), self.preset.encoder().into()]);
+        a.extend(codec_args.into_iter().map(String::from));
+        if has_audio {
+            match self.audio {
+                AudioExport::Aac { kbps } => a.extend(["-c:a".into(), "aac".into(), "-b:a".into(), format!("{kbps}k")]),
+                AudioExport::Pcm => a.extend(["-c:a", "pcm_s24le"].map(String::from)),
+                AudioExport::None => {}
+            }
+        }
+        if seq {
+            a.extend(["-f", "image2", "-start_number", "0"].map(String::from));
+        }
+        a.push(self.output_target().to_string_lossy().into_owned());
         a
     }
 }
@@ -539,6 +709,9 @@ impl FrameSource for ExportSource {
     fn matte(&mut self, asset: AssetId, index: i64, kind: nle_core::MatteKind) -> Option<nle_media::matte::Matte> {
         nle_media::matte::load(self.assets.get(&asset)?, kind, index)
     }
+    fn yuv_matrix(&self, asset: AssetId) -> Option<nle_core::YuvMatrix> {
+        Some(self.assets.get(&asset)?.video.as_ref()?.yuv_matrix())
+    }
 }
 
 /// Run a complete export (blocking — call from a background thread).
@@ -555,9 +728,15 @@ pub fn run_export(
     }
     let (w, h) = settings.encoded_size();
     let total = settings.total_frames();
+    let pack = settings.pack_format();
+    let seq = settings.preset.is_image_sequence();
+    if let Some(dir) = settings.path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir)?;
+    }
 
+    // sequences get the mix as a sidecar WAV next to the frames
     let wav = if settings.audio != AudioExport::None {
-        let path = std::env::temp_dir().join(format!("rcp-export-{}.wav", std::process::id()));
+        let path = if seq { settings.path.with_extension("wav") } else { std::env::temp_dir().join(format!("rcp-export-{}.wav", std::process::id())) };
         let mut pcm = mix_audio(project, audio_sources, settings.start, settings.end);
         if let Some(target) = settings.loudness_target {
             use nle_media::analysis::loudness::{normalize_program, CEILING_DBFS};
@@ -588,8 +767,8 @@ pub fn run_export(
         }
         let t = settings.start + Time::from_frames(n as i64, settings.frame_rate);
         let comp = eval::evaluate(&project.timeline, t);
-        let nv12 = renderer.render_nv12(&comp, &mut source, RenderOptions::default());
-        if let Err(e) = stdin.write_all(&nv12) {
+        let frame = renderer.render_packed(&comp, &mut source, RenderOptions::default(), pack);
+        if let Err(e) = stdin.write_all(&frame) {
             result = Err(ExportError::Encoder(format!("pipe closed: {e}")));
             break;
         }
@@ -598,7 +777,7 @@ pub fn run_export(
     }
     drop(stdin);
     let out = child.wait_with_output()?;
-    if let Some(w) = &wav {
+    if let Some(w) = wav.as_ref().filter(|_| !seq) {
         let _ = std::fs::remove_file(w);
     }
     if matches!(result, Err(ExportError::Cancelled)) {
@@ -683,6 +862,49 @@ mod tests {
         s.size_capped = true;
         let a = s.ffmpeg_args(Platform::Windows, None).join(" ");
         assert!(a.contains("-rc vbr_peak -b:v 8000k -maxrate 8000k -bufsize 8000k"), "{a}");
+    }
+
+    #[test]
+    fn ten_bit_hevc_and_av1_pack_p010() {
+        let mut s = settings(ExportPreset::HevcQsv, RateControl::Quality(24));
+        s.ten_bit = true;
+        let a = s.ffmpeg_args(Platform::Windows, None).join(" ");
+        assert!(a.contains("-pix_fmt p010le") && a.contains("-c:v hevc_qsv"), "{a}");
+        let mut s = settings(ExportPreset::HevcNvenc, RateControl::Quality(24));
+        s.ten_bit = true;
+        assert!(s.ffmpeg_args(Platform::Windows, None).join(" ").contains("-profile:v main10"));
+        // H.264 has no 10-bit option: the flag is ignored
+        let mut s = settings(ExportPreset::H264Software, RateControl::Quality(20));
+        s.ten_bit = true;
+        assert_eq!(s.pack_format(), crate::PackFormat::Nv12);
+    }
+
+    #[test]
+    fn mastering_formats_convert_from_rgba64() {
+        let mut s = settings(ExportPreset::ProRes4444, RateControl::Quality(0));
+        s.path = PathBuf::from("master.mov");
+        s.alpha = true;
+        s.audio = AudioExport::Pcm;
+        let a = s.ffmpeg_args(Platform::Windows, Some(Path::new("a.wav"))).join(" ");
+        assert!(a.contains("-pix_fmt rgba64le") && a.contains("format=yuva444p10le") && a.contains("-c:v prores_ks -profile:v 4"), "{a}");
+        assert!(a.contains("-alpha_bits 16") && a.contains("pcm_s24le") && a.ends_with("master.mov"), "{a}");
+        assert!(!a.contains("qsv"), "mastering never touches the GPU encoder: {a}");
+        let s = settings(ExportPreset::DnxhrHqx, RateControl::Quality(0));
+        let a = s.ffmpeg_args(Platform::Windows, None).join(" ");
+        assert!(a.contains("format=yuv422p10le") && a.contains("-c:v dnxhd -profile:v dnxhr_hqx"), "{a}");
+        assert_eq!(s.pack_format(), crate::PackFormat::Rgba64 { alpha: false, linear: false });
+    }
+
+    #[test]
+    fn image_sequences_use_a_numbered_pattern_and_no_audio_stream() {
+        let mut s = settings(ExportPreset::ExrSequence, RateControl::Quality(0));
+        s.path = PathBuf::from("out/shot.exr");
+        let a = s.ffmpeg_args(Platform::Windows, Some(Path::new("a.wav")));
+        let j = a.join(" ");
+        assert!(j.contains("-f image2 -start_number 0") && j.contains("-c:v exr") && !j.contains("1:a:0"), "{j}");
+        assert_eq!(Path::new(a.last().unwrap()), Path::new("out/shot_%06d.exr"));
+        assert_eq!(s.pack_format(), crate::PackFormat::Rgba64 { alpha: false, linear: true });
+        assert_eq!(sequence_pattern(Path::new("frames.png")), PathBuf::from("frames_%06d.png"));
     }
 
     #[test]

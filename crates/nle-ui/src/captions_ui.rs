@@ -201,74 +201,8 @@ fn generate_ui(app: &mut App, ui: &mut egui::Ui) {
         });
 
         if btn.clicked() {
-            if let Some(m) = model.filter(|m| match m.remove_if_corrupt() {
-                None => true,
-                Some(e) => {
-                    let m = *m;
-                    // Damaged file: deleted above; fetch a clean copy instead of crashing whisper.cpp.
-                    app.status(format!("Whisper model {} was damaged ({e}); re-downloading…", m.label));
-                    app.captions.model_job = Some(Job::spawn("whisper-model", move |jctx| {
-                        jctx.set_progress(0.0, format!("Re-downloading {} (previous file was damaged)…", m.label));
-                        let c = jctx.cancel_flag();
-                        let p = m.download(|f| jctx.set_fraction(f), c)?;
-                        Ok((m.id, p))
-                    }));
-                    false
-                }
-            }) {
-                let model_path = m.path();
-                let language = (!app.captions.language.trim().is_empty()).then(|| app.captions.language.trim().to_string());
-                let use_gpu = app.captions.use_gpu;
-                let spans = nle_core::audio_spans(&app.project.timeline);
-                let extent = app.project.timeline.extent();
-                let sources = app.library.audio.clone();
-
-                app.captions.gen_job = Some(Job::spawn("captions", move |jctx| {
-                    if spans.is_empty() || extent <= Time::ZERO {
-                        return Err("Timeline has no audible clips".into());
-                    }
-                    if jctx.cancelled() {
-                        return Err("Cancelled".into());
-                    }
-                    jctx.set_progress(0.03, "Mixing timeline audio…");
-                    let mix = mixdown(spans, &sources, Time::ZERO, extent);
-                    if jctx.cancelled() {
-                        return Err("Cancelled".into());
-                    }
-                    jctx.set_progress(0.10, "Converting to 16 kHz mono…");
-                    let mono16k = to_mono_16k(&mix);
-
-                    let mut opts = TranscribeOptions::new(model_path);
-                    opts.language = language;
-                    opts.use_gpu = use_gpu;
-
-                    let cancel = Arc::new(AtomicBool::new(false));
-                    let finished = Arc::new(AtomicBool::new(false));
-                    let cancel_flag = jctx.cancel_flag();
-                    let c_watch = cancel.clone();
-                    let f_watch = finished.clone();
-                    let watcher = std::thread::Builder::new().name("rcp-whisper-cancel".into()).spawn(move || {
-                        while !f_watch.load(Ordering::Relaxed) {
-                            if cancel_flag() {
-                                c_watch.store(true, Ordering::Relaxed);
-                                break;
-                            }
-                            std::thread::sleep(Duration::from_millis(50));
-                        }
-                    });
-
-                    jctx.set_progress(0.15, "Transcribing with Whisper…");
-                    let pfn = jctx.progress_fn();
-                    let prog: Arc<dyn Fn(f32) + Send + Sync> = Arc::new(move |f| pfn(0.15 + 0.85 * f));
-                    let msg = jctx.message_fn();
-                    let status: Arc<dyn Fn(String) + Send + Sync> = Arc::new(msg);
-                    let res = transcribe::transcribe(&mono16k, &opts, prog, status, cancel);
-                    finished.store(true, Ordering::Relaxed);
-                    if let Ok(h) = watcher {
-                        let _ = h.join();
-                    }
-                    res
-                }));
+            if let Err(e) = start_caption_generation(app) {
+                app.status(e);
             }
         }
     });
@@ -283,6 +217,91 @@ fn generate_ui(app: &mut App, ui: &mut egui::Ui) {
             }
         });
     }
+}
+
+/// Start transcribing the timeline into captions (the Generate button and
+/// the Copilot's `generate_captions`). `Err` says why it can't start.
+pub fn start_caption_generation(app: &mut App) -> Result<(), String> {
+    if !transcribe::AVAILABLE {
+        return Err("this build has no Whisper support".into());
+    }
+    if app.captions.gen_job.is_some() || app.captions.model_job.is_some() {
+        return Err("a Whisper job is already running".into());
+    }
+    let Some(model) = WhisperModel::by_id(app.captions.model_id).filter(|m| m.is_installed()) else {
+        return Err("no Whisper model downloaded yet (Captions panel ▸ Models)".into());
+    };
+    if nle_core::audio_spans(&app.project.timeline).is_empty() {
+        return Err("the timeline has no audible clips".into());
+    }
+    if let Some(e) = model.remove_if_corrupt() {
+        // Damaged file: deleted above; fetch a clean copy instead of crashing whisper.cpp.
+        let m = model;
+        app.captions.model_job = Some(Job::spawn("whisper-model", move |jctx| {
+            jctx.set_progress(0.0, format!("Re-downloading {} (previous file was damaged)…", m.label));
+            let c = jctx.cancel_flag();
+            let p = m.download(|f| jctx.set_fraction(f), c)?;
+            Ok((m.id, p))
+        }));
+        return Err(format!("Whisper model {} was damaged ({e}); re-downloading it — generate again when it's done", m.label));
+    }
+    {
+        let m = model;
+        let model_path = m.path();
+        let language = (!app.captions.language.trim().is_empty()).then(|| app.captions.language.trim().to_string());
+        let use_gpu = app.captions.use_gpu;
+        let spans = nle_core::audio_spans(&app.project.timeline);
+        let extent = app.project.timeline.extent();
+        let sources = app.library.audio.clone();
+
+        app.captions.gen_job = Some(Job::spawn("captions", move |jctx| {
+            if spans.is_empty() || extent <= Time::ZERO {
+                return Err("Timeline has no audible clips".into());
+            }
+            if jctx.cancelled() {
+                return Err("Cancelled".into());
+            }
+            jctx.set_progress(0.03, "Mixing timeline audio…");
+            let mix = mixdown(spans, &sources, Time::ZERO, extent);
+            if jctx.cancelled() {
+                return Err("Cancelled".into());
+            }
+            jctx.set_progress(0.10, "Converting to 16 kHz mono…");
+            let mono16k = to_mono_16k(&mix);
+
+            let mut opts = TranscribeOptions::new(model_path);
+            opts.language = language;
+            opts.use_gpu = use_gpu;
+
+            let cancel = Arc::new(AtomicBool::new(false));
+            let finished = Arc::new(AtomicBool::new(false));
+            let cancel_flag = jctx.cancel_flag();
+            let c_watch = cancel.clone();
+            let f_watch = finished.clone();
+            let watcher = std::thread::Builder::new().name("rcp-whisper-cancel".into()).spawn(move || {
+                while !f_watch.load(Ordering::Relaxed) {
+                    if cancel_flag() {
+                        c_watch.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            });
+
+            jctx.set_progress(0.15, "Transcribing with Whisper…");
+            let pfn = jctx.progress_fn();
+            let prog: Arc<dyn Fn(f32) + Send + Sync> = Arc::new(move |f| pfn(0.15 + 0.85 * f));
+            let msg = jctx.message_fn();
+            let status: Arc<dyn Fn(String) + Send + Sync> = Arc::new(msg);
+            let res = transcribe::transcribe(&mono16k, &opts, prog, status, cancel);
+            finished.store(true, Ordering::Relaxed);
+            if let Ok(h) = watcher {
+                let _ = h.join();
+            }
+            res
+        }));
+    }
+    Ok(())
 }
 
 fn track_and_style_ui(app: &mut App, ui: &mut egui::Ui) {

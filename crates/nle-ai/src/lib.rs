@@ -11,13 +11,15 @@ pub mod multimodal;
 pub mod providers;
 pub mod segment;
 pub mod tools;
+pub mod tools_post;
 
 pub use config::{AiConfig, AiProviderKind, ThinkingLevel, DEFAULT_GEMINI_MODEL};
 pub use multimodal::{build_timeline_json, encode_proxy_480p15, upload_gemini_file};
 pub use providers::{
     build_gemini_request_body, parse_gemini_response, parse_ollama_response, parse_openai_response, run_copilot_blocking, ChatMessage, CopilotError, CopilotResponse,
 };
-pub use tools::{apply_copilot_actions, execute_tool_call, offline_copilot_plan, ActionOutcome, CopilotToolCall, QUICK_PROMPTS};
+pub use tools::{apply_copilot_actions, apply_copilot_actions_with, execute_tool_call, offline_copilot_plan, ActionOutcome, CopilotEnv, CopilotToolCall, QUICK_PROMPTS};
+pub use tools_post::UiRequest;
 
 #[cfg(test)]
 mod tests {

@@ -26,7 +26,41 @@ pub struct VideoStreamInfo {
     pub pts_table: Vec<Time>,
 }
 
+/// YCbCr -> RGB matrix of a video stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum YuvMatrix {
+    Bt709,
+    Bt601,
+    Bt2020,
+}
+
 impl VideoStreamInfo {
+    /// The stream's YCbCr matrix: its `colorspace` tag, else its primaries,
+    /// else the usual guess for untagged video (mpv / FFmpeg / Resolve):
+    /// SD (narrower than 1280 and at most 576 lines) is BT.601, HD is BT.709,
+    /// and high-bit-depth UHD is BT.2020.
+    pub fn yuv_matrix(&self) -> YuvMatrix {
+        match self.color_space.as_str() {
+            "bt709" | "smpte240m" => return YuvMatrix::Bt709,
+            "smpte170m" | "bt470bg" | "fcc" => return YuvMatrix::Bt601,
+            "bt2020nc" | "bt2020c" => return YuvMatrix::Bt2020,
+            _ => {}
+        }
+        match self.color_primaries.as_str() {
+            "bt709" => return YuvMatrix::Bt709,
+            "smpte170m" | "bt470bg" | "bt470m" => return YuvMatrix::Bt601,
+            "bt2020" => return YuvMatrix::Bt2020,
+            _ => {}
+        }
+        if self.width < 1280 && self.height <= 576 {
+            YuvMatrix::Bt601
+        } else if self.bit_depth > 8 && self.height > 1100 {
+            YuvMatrix::Bt2020
+        } else {
+            YuvMatrix::Bt709
+        }
+    }
+
     /// Nearest frame index for a source presentation timestamp.
     pub fn frame_index_for_pts(&self, t: Time) -> usize {
         if self.pts_table.is_empty() {
@@ -195,5 +229,39 @@ impl MediaAsset {
             parts.push(format!("{} Hz {}ch {}", a.sample_rate, a.channels, a.codec));
         }
         parts.join(" · ")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn info(w: u32, h: u32, depth: u8, space: &str, prim: &str) -> VideoStreamInfo {
+        VideoStreamInfo {
+            width: w,
+            height: h,
+            frame_rate: FrameRate::default(),
+            codec: "h264".into(),
+            pix_fmt: "yuv420p".into(),
+            bit_depth: depth,
+            color_space: space.into(),
+            color_transfer: String::new(),
+            color_primaries: prim.into(),
+            is_vfr: false,
+            pts_table: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn yuv_matrix_prefers_tags_then_guesses_from_size() {
+        assert_eq!(info(640, 480, 8, "bt709", "").yuv_matrix(), YuvMatrix::Bt709);
+        assert_eq!(info(1920, 1080, 8, "smpte170m", "").yuv_matrix(), YuvMatrix::Bt601);
+        assert_eq!(info(1920, 1080, 10, "bt2020nc", "").yuv_matrix(), YuvMatrix::Bt2020);
+        assert_eq!(info(720, 576, 8, "unknown", "bt709").yuv_matrix(), YuvMatrix::Bt709);
+        // untagged: SD -> 601, HD -> 709, 10-bit UHD -> 2020
+        assert_eq!(info(640, 360, 8, "unknown", "").yuv_matrix(), YuvMatrix::Bt601);
+        assert_eq!(info(1280, 720, 8, "unknown", "").yuv_matrix(), YuvMatrix::Bt709);
+        assert_eq!(info(3840, 2160, 8, "unknown", "").yuv_matrix(), YuvMatrix::Bt709);
+        assert_eq!(info(3840, 2160, 10, "unknown", "").yuv_matrix(), YuvMatrix::Bt2020);
     }
 }

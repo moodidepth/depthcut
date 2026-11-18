@@ -36,6 +36,10 @@ pub trait FrameSource {
     fn matte(&mut self, _asset: AssetId, _index: i64, _kind: MatteKind) -> Option<nle_media::matte::Matte> {
         None
     }
+    /// YCbCr matrix of the asset's video. `None` = guess from the frame size.
+    fn yuv_matrix(&self, _asset: AssetId) -> Option<nle_core::YuvMatrix> {
+        None
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -47,6 +51,41 @@ pub struct RenderOptions {
     /// Preview the qualifier / mask key of one correction node instead of
     /// its result.
     pub highlight: Option<Highlight>,
+    /// Start from transparent black instead of opaque black, so the result
+    /// carries the layers' coverage in alpha (ProRes 4444 / PNG exports).
+    pub transparent: bool,
+}
+
+/// Pixel layout [`Renderer::render_packed`] reads back for the encoder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PackFormat {
+    /// 8-bit 4:2:0, BT.709 limited range. Width % 4 == 0, height even.
+    Nv12,
+    /// 10-bit 4:2:0 (`p010le`), BT.709 limited range. Width and height even.
+    P010,
+    /// 16-bit RGBA (`rgba64le`), full range. `alpha` keeps (and
+    /// un-premultiplies) coverage, otherwise alpha is 1; `linear` removes the
+    /// BT.1886 gamma (for EXR).
+    Rgba64 { alpha: bool, linear: bool },
+}
+
+impl PackFormat {
+    pub fn frame_bytes(self, w: u32, h: u32) -> usize {
+        let px = w as usize * h as usize;
+        match self {
+            PackFormat::Nv12 => px * 3 / 2,
+            PackFormat::P010 => px * 3,
+            PackFormat::Rgba64 { .. } => px * 8,
+        }
+    }
+    /// FFmpeg `-pix_fmt` of the packed frames.
+    pub fn ffmpeg_name(self) -> &'static str {
+        match self {
+            PackFormat::Nv12 => "nv12",
+            PackFormat::P010 => "p010le",
+            PackFormat::Rgba64 { .. } => "rgba64le",
+        }
+    }
 }
 
 /// Which correction node's key to show, and how.
@@ -60,7 +99,7 @@ pub struct Highlight {
 
 impl Default for RenderOptions {
     fn default() -> Self {
-        RenderOptions { wipe: None, color: true, highlight: None }
+        RenderOptions { wipe: None, color: true, highlight: None, transparent: false }
     }
 }
 
@@ -943,7 +982,15 @@ impl Renderer {
         self.dispatch(enc, &self.p.fill, &[entry(0, u.as_entire_binding()), entry(1, tv(&t.view))], ceil8(t.width), ceil8(t.height));
     }
 
-    fn convert(&mut self, enc: &mut wgpu::CommandEncoder, f: &GpuFrame) -> Target {
+    fn convert(&mut self, enc: &mut wgpu::CommandEncoder, f: &GpuFrame, matrix: Option<nle_core::YuvMatrix>) -> Target {
+        use nle_core::YuvMatrix;
+        let matrix = matrix.unwrap_or(if f.height > 1100 && f.format == PixelFormat::P010 {
+            YuvMatrix::Bt2020
+        } else if f.width < 1280 && f.height <= 576 {
+            YuvMatrix::Bt601
+        } else {
+            YuvMatrix::Bt709
+        });
         let out = self.pool.get(&self.gpu.device, f.width, f.height);
         let bps = if f.format == PixelFormat::P010 { 2 } else { 1 };
         let params = YuvParams {
@@ -955,7 +1002,11 @@ impl Renderer {
                 PixelFormat::P010 => 1,
                 PixelFormat::Rgba8 => 2,
             },
-            matrix: if f.height > 1100 && f.format == PixelFormat::P010 { 2 } else { 0 },
+            matrix: match matrix {
+                YuvMatrix::Bt709 => 0,
+                YuvMatrix::Bt601 => 1,
+                YuvMatrix::Bt2020 => 2,
+            },
             full_range: 0,
             _pad: [0; 2],
         };
@@ -1757,7 +1808,8 @@ impl Renderer {
             }
             None => return None,
         };
-        Some(self.convert(enc, &gf))
+        let matrix = src.yuv_matrix(asset);
+        Some(self.convert(enc, &gf, matrix))
     }
 
     /// The layer's pixels before grading, plus a motion field (and velocity
@@ -2009,7 +2061,8 @@ impl Renderer {
         let (w, h) = (self.width, self.height);
         let ctx = Ctx { time: comp.time.as_secs_f64() as f32, prev: comp.prev.as_deref() };
         let mut acc = self.pool.get(&self.gpu.device, w, h);
-        self.fill(enc, &acc, [0.0, 0.0, 0.0, 1.0]);
+        let clear = if opts.transparent && depth == 0 { [0.0; 4] } else { [0.0, 0.0, 0.0, 1.0] };
+        self.fill(enc, &acc, clear);
         for node in &comp.nodes {
             match node {
                 RenderNode::Layer(l) => acc = self.draw_layer(enc, acc, l, src, opts, depth, ctx),
@@ -2019,7 +2072,7 @@ impl Renderer {
                     let side = |r: &mut Self, enc: &mut wgpu::CommandEncoder, l: &Option<Box<Layer>>, acc: &Target, src: &mut dyn FrameSource| -> Target {
                         let base = r.pool.get(&r.gpu.device, w, h);
                         // copy acc → base with an identity, opaque, normal-blend composite
-                        r.fill(enc, &base, [0.0, 0.0, 0.0, 1.0]);
+                        r.fill(enc, &base, clear);
                         let copy_layer = Layer::new(nle_core::ClipId(0), 0, LayerSource::Solid([0.0; 4]));
                         let id = layer_to_output(&copy_layer.video, [w as f32, h as f32], [w as f32, h as f32]).inverse().expect("identity");
                         let copied = r.composite(enc, &base, &acc.view, id, &copy_layer);
@@ -2087,32 +2140,39 @@ impl Renderer {
     /// Render and read back the frame as packed NV12 (for the encoder).
     /// Width must be a multiple of 4 and height even.
     pub fn render_nv12(&mut self, comp: &Composition, src: &mut dyn FrameSource, opts: RenderOptions) -> Vec<u8> {
+        self.render_packed(comp, src, opts, PackFormat::Nv12)
+    }
+
+    /// Render and read back the frame in `fmt` (see [`PackFormat`] for the
+    /// size constraints).
+    pub fn render_packed(&mut self, comp: &Composition, src: &mut dyn FrameSource, opts: RenderOptions, fmt: PackFormat) -> Vec<u8> {
         self.stats = RenderStats::default();
         let (w, h) = (self.width, self.height);
-        let size = (w as u64 * h as u64 * 3 / 2).next_multiple_of(4);
+        let bytes = fmt.frame_bytes(w, h);
+        let size = (bytes as u64).next_multiple_of(4);
         let device = self.gpu.device.clone();
         let storage = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("rcp-nv12"),
+            label: Some("rcp-pack"),
             size,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("rcp-nv12-readback"),
+            label: Some("rcp-pack-readback"),
             size,
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("rcp-export") });
+        let opts = RenderOptions { transparent: opts.transparent || matches!(fmt, PackFormat::Rgba64 { alpha: true, .. }), ..opts };
         let out = self.render_comp(&mut enc, comp, src, opts, 0);
-        let u = self.uniform(&SizeU { width: w, height: h, _pad: [0; 2] });
-        self.dispatch(
-            &mut enc,
-            &self.p.nv12,
-            &[entry(0, tv(&out.view)), entry(1, u.as_entire_binding()), entry(2, storage.as_entire_binding())],
-            (w / 4).div_ceil(8),
-            (h / 2).div_ceil(8),
-        );
+        let (pipe, flags, groups) = match fmt {
+            PackFormat::Nv12 => (&self.p.nv12, 0, ((w / 4).div_ceil(8), (h / 2).div_ceil(8))),
+            PackFormat::P010 => (&self.p.pack_p010, 0, ((w / 2).div_ceil(8), (h / 2).div_ceil(8))),
+            PackFormat::Rgba64 { alpha, linear } => (&self.p.pack_rgba64, linear as u32 | (alpha as u32) << 1, (w.div_ceil(8), h.div_ceil(8))),
+        };
+        let u = self.uniform(&SizeU { width: w, height: h, _pad: [flags, 0] });
+        self.dispatch(&mut enc, pipe, &[entry(0, tv(&out.view)), entry(1, u.as_entire_binding()), entry(2, storage.as_entire_binding())], groups.0, groups.1);
         enc.copy_buffer_to_buffer(&storage, 0, &readback, 0, size);
         self.gpu.queue.submit(Some(enc.finish()));
         self.pool.put(out);
@@ -2128,7 +2188,7 @@ impl Renderer {
         if ok {
             readback.unmap();
         }
-        data.truncate((w as usize * h as usize * 3) / 2);
+        data.truncate(bytes);
         data
     }
 }

@@ -115,5 +115,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             out = mix(sa(uv), sb(uv), p);
         }
     }
-    textureStore(dst, vec2<i32>(id.xy), vec4<f32>(out, 1.0));
+    // coverage cross-fades (exact for dissolves; opaque renders stay at 1)
+    let alpha = mix(textureSampleLevel(a_tex, samp, uv, 0.0).a, textureSampleLevel(b_tex, samp, uv, 0.0).a, p);
+    textureStore(dst, vec2<i32>(id.xy), vec4<f32>(out, alpha));
 }
