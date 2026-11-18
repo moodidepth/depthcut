@@ -9,6 +9,7 @@ pub mod config;
 pub mod connection;
 pub mod multimodal;
 pub mod providers;
+pub mod segment;
 pub mod tools;
 
 pub use config::{AiConfig, AiProviderKind, ThinkingLevel, DEFAULT_GEMINI_MODEL};

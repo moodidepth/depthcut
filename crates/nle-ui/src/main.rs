@@ -19,6 +19,7 @@ mod export_ui;
 mod ffmpeg_setup;
 mod inspector;
 mod media;
+mod motion_ui;
 mod online_ui;
 mod presets_ui;
 mod shortcuts_ui;

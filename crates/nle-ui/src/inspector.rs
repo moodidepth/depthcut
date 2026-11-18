@@ -19,9 +19,13 @@ const INSPECTOR_TAG: u64 = 0x1f;
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
-        for (tab, label) in
-            [(InspectorTab::Video, "Video"), (InspectorTab::Color, "Color"), (InspectorTab::Audio, "Audio"), (InspectorTab::TitlesTransitions, "Titles & Transitions")]
-        {
+        for (tab, label) in [
+            (InspectorTab::Video, "Video"),
+            (InspectorTab::Color, "Color"),
+            (InspectorTab::Audio, "Audio"),
+            (InspectorTab::TitlesTransitions, "Titles & Transitions"),
+            (InspectorTab::Motion, "Motion"),
+        ] {
             ui.selectable_value(&mut app.inspector_tab, tab, label);
         }
     });
@@ -64,6 +68,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         ClipKind::Asset { asset } => app.project.asset(*asset).and_then(|a| a.video.as_ref()).and_then(|v| nle_core::color::ColorSpace::from_ffmpeg_transfer(&v.color_transfer)),
         _ => None,
     };
+    let motion_cx = crate::motion_ui::tab_ctx(app, id, local);
+    let mut motion_action = None;
+    let motion_ui = &mut app.motion;
     let color_view = &mut app.color_view;
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match app.inspector_tab {
         InspectorTab::Video => video_tab(ui, &mut c, local, frame, &mut retime_action, &mut toggle_reframe_916, &mut app.punch, &mut punch_request, color_view),
@@ -72,6 +79,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             audio_tab(ui, &mut c, local, frame, asset_lufs, beat_busy, kill_busy, mb_busy, &mut analyze_beats, &mut multiband_beats, &mut scan_kills, &mut sync_beats)
         }
         InspectorTab::TitlesTransitions => titles_tab(ui, &mut c, &mut add_title),
+        InspectorTab::Motion => motion_action = crate::motion_ui::tab(ui, &mut c, &motion_cx, motion_ui),
     });
 
     // transitions are separate commands (they alter edit points)
@@ -127,6 +135,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     }
     if let Some(hard) = punch_request {
         app.zoom_punch(hard);
+    }
+    if let Some(a) = motion_action {
+        app.run_motion_action(id, a);
     }
 }
 

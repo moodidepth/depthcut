@@ -38,6 +38,18 @@ const COLOR_PIPELINE_PARAM: &str = "rcp.colorPipeline";
 /// RustCut Pro effects: one `filter-video` each, the effect as JSON.
 const RCP_EFFECT: &str = "RustCut Pro Effect";
 const RCP_EFFECT_PARAM: &str = "rcp.effect";
+const RCP_MOTION: &str = "RustCut Pro Motion";
+const RCP_MOTION_PARAM: &str = "rcp.motion";
+
+/// Tracks, stabilization, follow and Speed Warp (no FCPXML equivalent).
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+#[serde(default)]
+struct MotionMd {
+    tracks: Vec<crate::motion::Track>,
+    stabilization: Option<crate::motion::Stabilization>,
+    follow: Option<crate::motion::Follow>,
+    speed_warp: bool,
+}
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 #[serde(default)]
@@ -335,6 +347,18 @@ fn adjustments(c: &Clip, origin: Time, fmt: &VideoFormat, ctx: &mut ExportCtx) -
             }
             out.push(f);
         }
+        let md = MotionMd {
+            tracks: c.tracks.clone(),
+            stabilization: c.stabilization.clone(),
+            follow: c.video.follow.clone(),
+            speed_warp: c.retime.as_ref().is_some_and(|r| r.blend == crate::speed::FrameBlendMode::SpeedWarp),
+        };
+        if !md.tracks.is_empty() || md.stabilization.is_some() || md.follow.is_some() || md.speed_warp {
+            if let Ok(json) = serde_json::to_string(&md) {
+                let fx = ctx.effect_ref(RCP_MOTION, "com.rustcutpro.motion");
+                out.push(Element::new("filter-video").set("ref", fx).set("name", RCP_MOTION).with_child(Element::new("param").set("name", RCP_MOTION_PARAM).set("value", json)));
+            }
+        }
     }
     if c.has_audio() {
         let a = &c.audio;
@@ -529,7 +553,7 @@ fn clip_el(c: &Clip, offset: Time, fmt: &VideoFormat, ctx: &mut ExportCtx) -> El
         let v = match b {
             crate::speed::FrameBlendMode::FloorFrame => "floor",
             crate::speed::FrameBlendMode::FrameBlend => "frameBlending",
-            crate::speed::FrameBlendMode::OpticalFlow => "opticalFlow",
+            crate::speed::FrameBlendMode::OpticalFlow | crate::speed::FrameBlendMode::SpeedWarp => "opticalFlow",
             crate::speed::FrameBlendMode::WeightedAccumulation => "weightedAccumulation",
         };
         body.push(Element::new("conform-rate").set("scaleEnabled", "0").set("srcFrameRate", v));
@@ -822,6 +846,19 @@ fn apply_adjustments(el: &Element, c: &mut Clip, origin: Time, fmt: &VideoFormat
                     }
                 }
                 c.color.lut = lut_path.map(|path| LutRef { path, intensity: lut_int });
+            }
+            "filter-video" if adj.children_named("param").any(|p| p.attr("name") == Some(RCP_MOTION_PARAM)) => {
+                let json = adj.children_named("param").find(|p| p.attr("name") == Some(RCP_MOTION_PARAM)).and_then(|p| p.attr("value"));
+                if let Some(md) = json.and_then(|j| serde_json::from_str::<MotionMd>(j).ok()) {
+                    c.tracks = md.tracks;
+                    c.stabilization = md.stabilization;
+                    c.video.follow = md.follow;
+                    if md.speed_warp {
+                        if let Some(r) = c.retime.as_mut() {
+                            r.blend = crate::speed::FrameBlendMode::SpeedWarp;
+                        }
+                    }
+                }
             }
             "filter-video" => {
                 let json = adj.children_named("param").find(|p| p.attr("name") == Some(RCP_EFFECT_PARAM)).and_then(|p| p.attr("value"));
@@ -1215,6 +1252,7 @@ pub fn import(src: &str) -> Result<Project, FcpxmlError> {
     let mut timeline = Timeline::new(tl_name, fmt);
     timeline.spine = spine;
     fill_media_durations(&mut timeline.spine, &assets);
+    timeline.relink_follows();
     let mut project = Project::new(proj_name);
     project.assets = assets;
     project.timeline = timeline;

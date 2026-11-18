@@ -16,6 +16,8 @@ default = ["whisper-vulkan"]
 ffmpeg = ["nle-media/ffmpeg"]
 whisper = ["nle-media/whisper"]
 whisper-vulkan = ["nle-media/whisper-vulkan"]
+# Local ONNX person / depth mattes (ONNX Runtime loaded at run time).
+onnx = ["nle-ai/onnx"]
 
 [dependencies]
 nle-core.workspace = true

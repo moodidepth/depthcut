@@ -528,6 +528,9 @@ impl FrameSource for ExportSource {
         let t = Time::from_frames(index, a.frame_rate());
         self.server.frame_sync(a, t, false).ok()
     }
+    fn matte(&mut self, asset: AssetId, index: i64, kind: nle_core::MatteKind) -> Option<nle_media::matte::Matte> {
+        nle_media::matte::load(self.assets.get(&asset)?, kind, index)
+    }
 }
 
 /// Run a complete export (blocking — call from a background thread).

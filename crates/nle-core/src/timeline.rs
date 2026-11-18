@@ -1126,6 +1126,51 @@ impl Timeline {
     }
 }
 
+fn track_owner_in(clips: &[Clip], track: u64) -> Option<ClipId> {
+    for c in clips {
+        if c.tracks.iter().any(|t| t.id == track) {
+            return Some(c.id);
+        }
+        if let Some(f) = track_owner_in(&c.connected, track) {
+            return Some(f);
+        }
+        if let ClipKind::Compound(comp) = &c.kind {
+            if let Some(f) = track_owner_in(&comp.spine, track) {
+                return Some(f);
+            }
+        }
+    }
+    None
+}
+
+fn relink_follows_in(clips: &mut [Clip], owners: &dyn Fn(u64) -> Option<ClipId>) {
+    for c in clips {
+        if let Some(f) = c.video.follow.as_mut() {
+            if let Some(owner) = owners(f.track) {
+                f.clip = owner;
+            }
+        }
+        relink_follows_in(&mut c.connected, owners);
+        if let ClipKind::Compound(comp) = &mut c.kind {
+            relink_follows_in(&mut comp.spine, owners);
+        }
+    }
+}
+
+impl Timeline {
+    /// The clip that owns motion track `track` (track ids are unique).
+    pub fn track_owner(&self, track: u64) -> Option<ClipId> {
+        track_owner_in(&self.spine, track)
+    }
+
+    /// Point every follow at the clip that now owns its track (after an
+    /// import or paste re-minted clip ids).
+    pub fn relink_follows(&mut self) {
+        let snapshot = self.spine.clone();
+        relink_follows_in(&mut self.spine, &|t| track_owner_in(&snapshot, t));
+    }
+}
+
 fn find_in(clips: &[Clip], id: ClipId) -> Option<&Clip> {
     for c in clips {
         if c.id == id {

@@ -124,7 +124,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 
     if app.punch.picking {
         pick_punch_anchor(app, ui, &resp, img, (fw, fh));
-    } else if app.browser.skim.is_none() && !app.playback.playing && !wipe_drag && !crate::color_ui::mask_gizmo(app, ui, img, (fw, fh)) {
+    } else if app.browser.skim.is_none() && !app.playback.playing && !wipe_drag && !crate::motion_ui::overlay(app, ui, img) && !crate::color_ui::mask_gizmo(app, ui, img, (fw, fh))
+    {
         gizmo(app, ui, &resp, img, (fw, fh), &to_screen);
     }
     if resp.double_clicked() {

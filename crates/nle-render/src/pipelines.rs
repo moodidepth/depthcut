@@ -21,6 +21,7 @@ pub const SHADER_OUTPUT: &str = include_str!("shaders/output.wgsl");
 pub const SHADER_NV12: &str = include_str!("shaders/nv12.wgsl");
 pub const SHADER_FILL: &str = include_str!("shaders/fill.wgsl");
 pub const SHADER_SCOPES: &str = include_str!("shaders/scopes.wgsl");
+pub const SHADER_WARP: &str = include_str!("shaders/warp.wgsl");
 
 /// Every shader with its entry point (used by the WGSL validation test).
 pub const ALL_SHADERS: &[(&str, &str, &str)] = &[
@@ -40,6 +41,8 @@ pub const ALL_SHADERS: &[(&str, &str, &str)] = &[
     ("scopes", SHADER_SCOPES, "accumulate"),
     ("correct", SHADER_CORRECT, "main"),
     ("mask", SHADER_MASK, "mask_mix"),
+    ("warp", SHADER_WARP, "main"),
+    ("optical_flow_median", SHADER_OPTICAL_FLOW, "vec_median"),
 ];
 
 /// Every compute entry point of `scopes.wgsl`.
@@ -71,6 +74,8 @@ pub const EFFECT_ENTRY_POINTS: &[&str] = &[
     "lens_distortion",
     "hue_sat_lightness",
     "levels",
+    "person_matte",
+    "depth_map",
 ];
 
 #[derive(Clone, Copy)]
@@ -157,6 +162,10 @@ pub struct Pipelines {
     pub flow_up: Pipe,
     pub flow_lk: Pipe,
     pub interpolate: Pipe,
+    /// 3×3 vector-median filter of a flow field (Speed Warp).
+    pub flow_median: Pipe,
+    /// Projective warp (stabilization).
+    pub warp: Pipe,
     pub motion_blur: Pipe,
     pub fx_bright: Pipe,
     pub fx_blur_h: Pipe,
@@ -181,6 +190,8 @@ pub struct Pipelines {
     pub fx_lens_distortion: Pipe,
     pub fx_hue_sat_lightness: Pipe,
     pub fx_levels: Pipe,
+    pub fx_person_matte: Pipe,
+    pub fx_depth_map: Pipe,
     pub flow_format: wgpu::TextureFormat,
     pub frameblend: Pipe,
     pub title: Pipe,
@@ -216,6 +227,8 @@ impl Pipelines {
             flow_up: pipe_m(device, cache, "flow_up", &flow, "upsample", &fspec),
             flow_lk: pipe_m(device, cache, "flow_lk", &flow, "lk_iter", &fspec),
             interpolate: pipe(device, cache, "interpolate_frame", SHADER_INTERPOLATE, "main", &[B::Tex, B::Tex, B::Tex, B::Tex, B::Samp, B::Uniform, w]),
+            flow_median: pipe_m(device, cache, "flow_median", &flow, "vec_median", &fspec),
+            warp: pipe(device, cache, "warp", SHADER_WARP, "main", &[B::Tex, B::Samp, B::Uniform, w]),
             motion_blur: pipe(device, cache, "motion_blur", SHADER_MOTION_BLUR, "main", &xspec),
             fx_bright: pipe_m(device, cache, "fx_bright", &fx, "bright_pass", &xspec),
             fx_blur_h: pipe_m(device, cache, "fx_blur_h", &fx, "blur_h", &xspec),
@@ -240,6 +253,8 @@ impl Pipelines {
             fx_lens_distortion: pipe_m(device, cache, "fx_lens_distortion", &fx, "lens_distortion", &xspec),
             fx_hue_sat_lightness: pipe_m(device, cache, "fx_hue_sat_lightness", &fx, "hue_sat_lightness", &xspec),
             fx_levels: pipe_m(device, cache, "fx_levels", &fx, "levels", &xspec),
+            fx_person_matte: pipe_m(device, cache, "fx_person_matte", &fx, "person_matte", &xspec),
+            fx_depth_map: pipe_m(device, cache, "fx_depth_map", &fx, "depth_map", &xspec),
             flow_format,
             yuv: pipe(device, cache, "yuv", SHADER_YUV, "main", &[B::StorageRo, B::Uniform, w]),
             grade: pipe(device, cache, "grade", SHADER_GRADE, "main", &[B::Tex, B::Tex3d, B::Samp, B::Uniform, w, B::Tex3d]),

@@ -300,6 +300,8 @@ fn gpu_effects_and_animated_titles() {
             EffectKind::FilmGrain => assert!((y - base_y).abs() < 8.0, "grain is zero-mean: {y}"),
             EffectKind::NeonOutline => assert!(y <= base_y + 1.0, "flat frame has no edges: {y}"),
             EffectKind::ChromaKey => {}
+            // no matte from this source: AI mattes pass through (tests/matte.rs)
+            EffectKind::PersonMatte | EffectKind::DepthMap => assert!((y - base_y).abs() < 1.0, "{kind:?} without a matte: {y}"),
         }
     }
 

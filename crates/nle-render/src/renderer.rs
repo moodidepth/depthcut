@@ -19,7 +19,7 @@ use bytemuck::{Pod, Zeroable};
 use nle_core::color::{ColorCorrection, MaskShape, ResolvedMask, WorkingSpace};
 use nle_core::eval::{Layer, LayerSource, RenderNode, ResolvedColor, ResolvedTransition};
 use nle_core::ClipId;
-use nle_core::{AssetId, Composition, EffectKind, FrameBlendMode, FrameRate, ResolvedEffect, TitleAnim, TitleParams};
+use nle_core::{AssetId, Composition, EffectKind, FrameBlendMode, FrameRate, MatteKind, ResolvedEffect, TitleAnim, TitleParams};
 use nle_media::{PixelFormat, VideoFrame};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -31,6 +31,11 @@ pub trait FrameSource {
     fn frame_rate(&self, asset: AssetId) -> FrameRate;
     /// The decoded frame `index` of `asset`, if available right now.
     fn frame(&mut self, asset: AssetId, index: i64) -> Option<VideoFrame>;
+    /// The cached AI matte of source frame `index` (Person Matte / Depth Map
+    /// effects). `None` = not generated: those effects pass through.
+    fn matte(&mut self, _asset: AssetId, _index: i64, _kind: MatteKind) -> Option<nle_media::matte::Matte> {
+        None
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -97,7 +102,7 @@ fn make_tex(device: &wgpu::Device, w: u32, h: u32, format: wgpu::TextureFormat, 
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -385,6 +390,12 @@ struct FlowU {
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
+struct WarpU {
+    rows: [[f32; 4]; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
 struct InterpU {
     t: f32,
     sigma: f32,
@@ -501,6 +512,10 @@ pub struct Renderer {
     luts: HashMap<String, Option<Arc<GpuLut>>>,
     identity_lut: Arc<GpuLut>,
     masks: HashMap<u64, Arc<MaskTex>>,
+    /// Uploaded AI mattes by (asset, source frame, kind).
+    mattes: HashMap<(AssetId, i64, MatteKind), Arc<Target>>,
+    /// Mattes of the layer whose effects are running (`MatteKind as usize`).
+    matte_now: [Option<wgpu::TextureView>; 2],
     fonts: FontBook,
     stats: RenderStats,
     /// Automatic preview proxy scale factor during fast J/K/L timeline shuttling (1.0 = full).
@@ -524,8 +539,51 @@ fn entry(binding: u32, resource: wgpu::BindingResource<'_>) -> wgpu::BindGroupEn
 
 /// Optical-flow field size for a `w × h` image (≤ [`FLOW_MAX_WIDTH`] wide).
 pub fn flow_size(w: u32, h: u32) -> (u32, u32) {
-    let f = (FLOW_MAX_WIDTH as f32 / w.max(1) as f32).min(1.0);
+    flow_size_max(w, h, FLOW_MAX_WIDTH)
+}
+
+/// Speed Warp computes flow up to this width (full HD).
+pub const SPEED_WARP_MAX_WIDTH: u32 = 1920;
+
+fn flow_size_max(w: u32, h: u32, max_w: u32) -> (u32, u32) {
+    let f = (max_w as f32 / w.max(1) as f32).min(1.0);
     (((w as f32 * f).ceil() as u32).max(8), ((h as f32 * f).ceil() as u32).max(8))
+}
+
+/// Flow quality settings.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FlowQuality {
+    pub max_width: u32,
+    pub iters: u32,
+    pub radius: i32,
+    pub search: i32,
+    /// Vector-median filter after each level.
+    pub median: bool,
+}
+
+impl FlowQuality {
+    pub fn standard(iters: u32) -> Self {
+        FlowQuality { max_width: FLOW_MAX_WIDTH, iters, radius: 3, search: 4, median: false }
+    }
+    /// Speed Warp / analysis quality.
+    pub fn high() -> Self {
+        FlowQuality { max_width: SPEED_WARP_MAX_WIDTH, iters: 4, radius: 4, search: 6, median: true }
+    }
+}
+
+/// A dense flow field read back from the GPU: `data[y * width + x]` is the
+/// motion (in field pixels) such that `B(p + v) ≈ A(p)`.
+#[derive(Clone, Debug, Default)]
+pub struct FlowField {
+    pub width: u32,
+    pub height: u32,
+    pub data: Vec<[f32; 2]>,
+}
+
+impl FlowField {
+    pub fn at(&self, x: u32, y: u32) -> [f32; 2] {
+        self.data.get((y.min(self.height.saturating_sub(1)) * self.width + x.min(self.width.saturating_sub(1))) as usize).copied().unwrap_or([0.0; 2])
+    }
 }
 
 /// Pyramid level sizes, finest first (coarsest ≥ 24 px, at most 5 levels).
@@ -581,6 +639,8 @@ impl Renderer {
             luts: HashMap::new(),
             identity_lut,
             masks: HashMap::new(),
+            mattes: HashMap::new(),
+            matte_now: [None, None],
             fonts: FontBook::system(),
             stats: RenderStats::default(),
             shuttle_proxy_scale: 1.0,
@@ -1111,6 +1171,7 @@ impl Renderer {
             "down" => &self.p.flow_down,
             "init" => &self.p.flow_init,
             "up" => &self.p.flow_up,
+            "median" => &self.p.flow_median,
             _ => &self.p.flow_lk,
         };
         self.dispatch(
@@ -1134,11 +1195,16 @@ impl Renderer {
     /// level. `backward` estimates B → A instead of A → B. The returned field
     /// (in the flow pool's format) holds vectors in its own pixel units.
     fn optical_flow(&mut self, enc: &mut wgpu::CommandEncoder, a: &wgpu::TextureView, b: &wgpu::TextureView, size: (u32, u32), backward: bool, iters: u32) -> Target {
+        self.optical_flow_q(enc, a, b, size, backward, FlowQuality::standard(iters))
+    }
+
+    fn optical_flow_q(&mut self, enc: &mut wgpu::CommandEncoder, a: &wgpu::TextureView, b: &wgpu::TextureView, size: (u32, u32), backward: bool, q: FlowQuality) -> Target {
         self.stats.flow_fields += 1;
         let dev = self.gpu.device.clone();
-        let (fw, fh) = flow_size(size.0, size.1);
+        let iters = q.iters;
+        let (fw, fh) = flow_size_max(size.0, size.1, q.max_width);
         let sizes = pyramid_sizes(fw, fh);
-        let base = FlowU { swap: u32::from(backward), radius: 3, search: 4, _pad: 0 };
+        let base = FlowU { swap: u32::from(backward), radius: q.radius, search: q.search, _pad: 0 };
         let mut pyr: Vec<Target> = Vec::with_capacity(sizes.len());
         let l0 = self.flow_pool.get(&dev, sizes[0].0, sizes[0].1);
         self.flow_pass(enc, "luma", a, b, a, base, &l0);
@@ -1163,6 +1229,11 @@ impl Renderer {
                 self.flow_pass(enc, "lk", &pyr[level].view, &pyr[level].view, &flow.view, base, &next);
                 self.flow_pool.put(std::mem::replace(&mut flow, next));
             }
+            if q.median {
+                let next = self.flow_pool.get(&dev, sizes[level].0, sizes[level].1);
+                self.flow_pass(enc, "median", &flow.view, &flow.view, &flow.view, base, &next);
+                self.flow_pool.put(std::mem::replace(&mut flow, next));
+            }
         }
         for t in pyr {
             self.flow_pool.put(t);
@@ -1171,12 +1242,15 @@ impl Renderer {
     }
 
     /// Optical-flow in-between frame at `t` (0..1) between `a` and `b`.
-    fn interpolate(&mut self, enc: &mut wgpu::CommandEncoder, a: &Target, b: &Target, t: f32) -> Target {
+    fn interpolate(&mut self, enc: &mut wgpu::CommandEncoder, a: &Target, b: &Target, t: f32, high: bool) -> Target {
         let size = (a.width, a.height);
-        let fwd = self.optical_flow(enc, &a.view, &b.view, size, false, 2);
-        let bwd = self.optical_flow(enc, &a.view, &b.view, size, true, 2);
+        let q = if high { FlowQuality::high() } else { FlowQuality::standard(2) };
+        let fwd = self.optical_flow_q(enc, &a.view, &b.view, size, false, q);
+        let bwd = self.optical_flow_q(enc, &a.view, &b.view, size, true, q);
         let out = self.pool.get(&self.gpu.device, a.width, a.height);
-        let u = self.uniform(&InterpU { t, sigma: 1.5, _pad: [0.0; 2] });
+        // Speed Warp: denser vectors make the consistency test reliable enough
+        // to be stricter (sharper occlusion handling).
+        let u = self.uniform(&InterpU { t, sigma: if high { 1.0 } else { 1.5 }, _pad: [0.0; 2] });
         self.dispatch(
             enc,
             &self.p.interpolate,
@@ -1199,8 +1273,8 @@ impl Renderer {
 
     /// Synthesize an in-between frame (`t` in 0..1) from two source frames.
     fn frame_blend(&mut self, enc: &mut wgpu::CommandEncoder, a: &Target, b: &Target, t: f32, mode: FrameBlendMode, flow: Option<&Target>) -> Target {
-        if mode == FrameBlendMode::OpticalFlow {
-            return self.interpolate(enc, a, b, t);
+        if matches!(mode, FrameBlendMode::OpticalFlow | FrameBlendMode::SpeedWarp) {
+            return self.interpolate(enc, a, b, t, mode == FrameBlendMode::SpeedWarp);
         }
         let (w, h) = (a.width, a.height);
         let out = self.pool.get(&self.gpu.device, w, h);
@@ -1224,6 +1298,93 @@ impl Renderer {
             ceil8(h),
         );
         out
+    }
+
+    /// Resample `src` through the output-uv → source-uv homography `m`.
+    fn warp(&mut self, enc: &mut wgpu::CommandEncoder, src: &Target, m: &[f32; 9]) -> Target {
+        let out = self.pool.get(&self.gpu.device, src.width, src.height);
+        let u = self.uniform(&WarpU { rows: [[m[0], m[1], m[2], 0.0], [m[3], m[4], m[5], 0.0], [m[6], m[7], m[8], 0.0]] });
+        self.dispatch(
+            enc,
+            &self.p.warp,
+            &[entry(0, tv(&src.view)), entry(1, wgpu::BindingResource::Sampler(&self.sampler)), entry(2, u.as_entire_binding()), entry(3, tv(&out.view))],
+            ceil8(src.width),
+            ceil8(src.height),
+        );
+        out
+    }
+
+    /// Dense optical flow between two RGBA8 images of `w × h` (motion
+    /// analysis: trackers, stabilizer, scene-cut detection). Blocks until
+    /// the field is read back.
+    pub fn flow_field(&mut self, a: &[u8], b: &[u8], w: u32, h: u32, q: FlowQuality) -> FlowField {
+        let (w, h) = (w.max(1), h.max(1));
+        if a.len() < (w * h * 4) as usize || b.len() < (w * h * 4) as usize {
+            return FlowField::default();
+        }
+        let dev = self.gpu.device.clone();
+        let upload = |px: &[u8]| {
+            let tex = dev.create_texture(&wgpu::TextureDescriptor {
+                label: Some("rcp-analysis-frame"),
+                size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            self.gpu.queue.write_texture(
+                tex.as_image_copy(),
+                &px[..(w * h * 4) as usize],
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) },
+                wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            );
+            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+            (tex, view)
+        };
+        let (_ta, va) = upload(a);
+        let (_tb, vb) = upload(b);
+        let mut enc = dev.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("rcp-flow-field") });
+        let flow = self.optical_flow_q(&mut enc, &va, &vb, (w, h), false, q);
+        let (fw, fh) = (flow.width, flow.height);
+        let bpp = self.gpu.flow_format.block_copy_size(None).unwrap_or(8);
+        let row = (fw * bpp).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        let readback = dev.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("rcp-flow-readback"),
+            size: (row * fh) as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        enc.copy_texture_to_buffer(
+            flow.texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo { buffer: &readback, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(fh) } },
+            wgpu::Extent3d { width: fw, height: fh, depth_or_array_layers: 1 },
+        );
+        self.gpu.queue.submit(Some(enc.finish()));
+        self.flow_pool.put(flow);
+        let slice = readback.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        let _ = dev.poll(wgpu::Maintain::Wait);
+        if !matches!(rx.recv(), Ok(Ok(()))) {
+            return FlowField::default();
+        }
+        let bytes = slice.get_mapped_range();
+        let mut data = Vec::with_capacity((fw * fh) as usize);
+        for y in 0..fh {
+            for x in 0..fw {
+                let o = (y * row + x * bpp) as usize;
+                let hx = half::f16::from_le_bytes([bytes[o], bytes[o + 1]]).to_f32();
+                let hy = half::f16::from_le_bytes([bytes[o + 2], bytes[o + 3]]).to_f32();
+                data.push([hx, hy]);
+            }
+        }
+        drop(bytes);
+        readback.unmap();
+        FlowField { width: fw, height: fh, data }
     }
 
     // ----- effects -------------------------------------------------------------
@@ -1254,6 +1415,8 @@ impl Renderer {
             "lens_distortion" => &self.p.fx_lens_distortion,
             "hue_sat_lightness" => &self.p.fx_hue_sat_lightness,
             "levels" => &self.p.fx_levels,
+            "person_matte" => &self.p.fx_person_matte,
+            "depth_map" => &self.p.fx_depth_map,
             other => unreachable!("unknown effect pipeline {other}"),
         };
         self.dispatch(
@@ -1434,6 +1597,14 @@ impl Renderer {
             EffectKind::LensDistortion => simple(self, enc, "lens_distortion", base),
             EffectKind::HueSatLightness => simple(self, enc, "hue_sat_lightness", base),
             EffectKind::Levels => simple(self, enc, "levels", base),
+            EffectKind::PersonMatte | EffectKind::DepthMap => {
+                let (kind, pipe) = if e.kind == EffectKind::PersonMatte { (MatteKind::Person, "person_matte") } else { (MatteKind::Depth, "depth_map") };
+                // no generated matte for this frame: pass through
+                let m = self.matte_now[kind as usize].clone()?;
+                let out = self.pool.get(&self.gpu.device, size.0, size.1);
+                self.fx(enc, pipe, src, &m, base, &out);
+                out
+            }
         })
     }
 
@@ -1641,7 +1812,17 @@ impl Renderer {
 
     fn layer_image(&mut self, enc: &mut wgpu::CommandEncoder, layer: &Layer, src: &mut dyn FrameSource, opts: RenderOptions, depth: u32, ctx: Ctx) -> Option<Img> {
         let (img, flow, vel) = self.layer_source(enc, layer, src, opts, depth)?;
+        let img = match layer.video.stabilize {
+            Some(m) => {
+                let Img::Pooled(t) = img;
+                let out = self.warp(enc, &t, &m);
+                self.pool.put(t);
+                Img::Pooled(out)
+            }
+            None => img,
+        };
         let img = self.maybe_grade(enc, img, layer, opts);
+        let warped_mattes = self.bind_mattes(enc, layer, src);
         let out = if layer.effects.is_empty() {
             img
         } else {
@@ -1657,10 +1838,69 @@ impl Renderer {
                 None => img,
             }
         };
+        self.matte_now = [None, None];
+        for t in warped_mattes {
+            self.pool.put(t);
+        }
         if let Some(f) = flow {
             self.flow_pool.put(f);
         }
         Some(out)
+    }
+
+    /// Upload the AI mattes `layer`'s effects read (media layers only) into
+    /// [`Self::matte_now`], warped by the stabilization like the image.
+    /// Returns pooled warp targets to release after the effects ran.
+    fn bind_mattes(&mut self, enc: &mut wgpu::CommandEncoder, layer: &Layer, src: &mut dyn FrameSource) -> Vec<Target> {
+        let mut pooled = Vec::new();
+        let LayerSource::Media { asset, source_time, .. } = &layer.source else { return pooled };
+        for kind in MatteKind::ALL {
+            if !layer.effects.iter().any(|e| e.kind.matte() == Some(kind)) {
+                continue;
+            }
+            let idx = (source_time.as_secs_f64() * src.frame_rate(*asset).fps()).floor() as i64;
+            let Some(tex) = self.matte_texture(*asset, idx, kind, src) else { continue };
+            self.matte_now[kind as usize] = Some(match layer.video.stabilize {
+                Some(m) => {
+                    let w = self.warp(enc, &tex, &m);
+                    let v = w.view.clone();
+                    pooled.push(w);
+                    v
+                }
+                None => tex.view.clone(),
+            });
+        }
+        pooled
+    }
+
+    fn matte_texture(&mut self, asset: AssetId, idx: i64, kind: MatteKind, src: &mut dyn FrameSource) -> Option<Arc<Target>> {
+        if let Some(t) = self.mattes.get(&(asset, idx, kind)) {
+            return Some(t.clone());
+        }
+        // misses are not cached: a matte generated later shows up at once
+        let m = src.matte(asset, idx, kind)?;
+        let texture = self.gpu.device.create_texture_with_data(
+            &self.gpu.queue,
+            &wgpu::TextureDescriptor {
+                label: Some("rcp-ai-matte"),
+                size: wgpu::Extent3d { width: m.width, height: m.height, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::R8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            &m.data,
+        );
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        if self.mattes.len() > 48 {
+            self.mattes.clear();
+        }
+        let t = Arc::new(Target { texture, view, width: m.width, height: m.height });
+        self.mattes.insert((asset, idx, kind), t.clone());
+        Some(t)
     }
 
     fn maybe_grade(&mut self, enc: &mut wgpu::CommandEncoder, img: Img, layer: &Layer, opts: RenderOptions) -> Img {

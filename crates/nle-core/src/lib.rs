@@ -34,6 +34,7 @@ pub mod focus;
 pub mod ids;
 pub mod keyframe;
 pub mod keymap;
+pub mod motion;
 pub mod presets;
 pub mod project;
 pub mod speed;
@@ -50,7 +51,7 @@ pub use clip::{
     TitleParams, TitleStyle, Transition, TransitionKind, VideoParams,
 };
 pub use command::{Command, History};
-pub use effects::{Effect, EffectKind, ParamDef, ParamKind, ResolvedEffect};
+pub use effects::{Effect, EffectKind, MatteKind, ParamDef, ParamKind, ResolvedEffect};
 pub use eval::{audio_spans, evaluate, AudioSpan, Composition, Layer, LayerSource, RenderNode};
 pub use ids::{AssetId, ClipId};
 pub use keyframe::{Curve, Handle, Interpolation, Keyframe, Param};

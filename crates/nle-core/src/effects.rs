@@ -57,6 +57,38 @@ pub enum EffectKind {
     HueSatLightness,
     /// Input / output black & white points with gamma, per channel or RGB.
     Levels,
+    /// AI person / subject matte (local ONNX segmentation model): cut out
+    /// the subject or the background, or show the matte.
+    PersonMatte,
+    /// AI depth map (local ONNX depth model): show depth, depth fog, or
+    /// keep only a near / far range.
+    DepthMap,
+}
+
+/// Which per-frame AI matte an effect reads (see `FrameSource::matte`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum MatteKind {
+    Person,
+    Depth,
+}
+
+impl MatteKind {
+    pub const ALL: [MatteKind; 2] = [MatteKind::Person, MatteKind::Depth];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            MatteKind::Person => "Person Matte",
+            MatteKind::Depth => "Depth Map",
+        }
+    }
+
+    /// File-system friendly name (cache folders, model files).
+    pub fn slug(self) -> &'static str {
+        match self {
+            MatteKind::Person => "person",
+            MatteKind::Depth => "depth",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -207,6 +239,19 @@ const LENS_DISTORTION: &[ParamDef] = &[
 ];
 const HUE_SAT_LIGHTNESS: &[ParamDef] = &[num("Hue", -180.0, 180.0, 0.0, "°"), num("Saturation", -100.0, 100.0, 0.0, "%"), num("Lightness", -100.0, 100.0, 0.0, "%")];
 pub const LEVELS_CHANNELS: &[&str] = &["RGB", "Red", "Green", "Blue"];
+pub const PERSON_MATTE_OUTPUTS: &[&str] = &["Cut Out Subject", "Cut Out Background", "Show Matte"];
+const PERSON_MATTE: &[ParamDef] = &[choice("Output", PERSON_MATTE_OUTPUTS, 0.0), num("Choke", -0.5, 0.5, 0.0, ""), num("Softness", 0.0, 0.5, 0.08, "")];
+pub const DEPTH_OUTPUTS: &[&str] = &["Show Depth", "Depth Fog", "Keep Range"];
+const DEPTH_MAP: &[ParamDef] = &[
+    choice("Output", DEPTH_OUTPUTS, 0.0),
+    num("Near", 0.0, 1.0, 1.0, ""),
+    num("Far", 0.0, 1.0, 0.4, ""),
+    num("Softness", 0.0, 0.5, 0.05, ""),
+    num("Fog Amount", 0.0, 1.0, 0.7, ""),
+    color("Fog Red", 0.75),
+    color("Fog Green", 0.8),
+    color("Fog Blue", 0.85),
+];
 const LEVELS: &[ParamDef] = &[
     num("Input Black", 0.0, 1.0, 0.0, ""),
     num("Input White", 0.0, 1.0, 1.0, ""),
@@ -217,7 +262,7 @@ const LEVELS: &[ParamDef] = &[
 ];
 
 impl EffectKind {
-    pub const ALL: [EffectKind; 20] = [
+    pub const ALL: [EffectKind; 22] = [
         EffectKind::MotionBlur,
         EffectKind::Halation,
         EffectKind::CameraShake,
@@ -238,6 +283,8 @@ impl EffectKind {
         EffectKind::LensDistortion,
         EffectKind::HueSatLightness,
         EffectKind::Levels,
+        EffectKind::PersonMatte,
+        EffectKind::DepthMap,
     ];
 
     pub fn label(self) -> &'static str {
@@ -262,6 +309,8 @@ impl EffectKind {
             EffectKind::LensDistortion => "Lens Distortion",
             EffectKind::HueSatLightness => "Hue / Saturation / Lightness",
             EffectKind::Levels => "Levels",
+            EffectKind::PersonMatte => "Person Matte (AI)",
+            EffectKind::DepthMap => "Depth Map (AI)",
         }
     }
 
@@ -273,6 +322,7 @@ impl EffectKind {
             EffectKind::Pixelate => "Stylize",
             EffectKind::LensDistortion => "Distort",
             EffectKind::HueSatLightness | EffectKind::Levels => "Color",
+            EffectKind::PersonMatte | EffectKind::DepthMap => "AI Matte",
             EffectKind::Halation | EffectKind::FilmGrain => "Film Look",
             EffectKind::Glow => "Light",
             EffectKind::CameraShake => "Motion",
@@ -305,12 +355,23 @@ impl EffectKind {
             EffectKind::LensDistortion => LENS_DISTORTION,
             EffectKind::HueSatLightness => HUE_SAT_LIGHTNESS,
             EffectKind::Levels => LEVELS,
+            EffectKind::PersonMatte => PERSON_MATTE,
+            EffectKind::DepthMap => DEPTH_MAP,
         }
     }
 
     /// Needs the next source frame (motion vectors).
     pub fn needs_motion(self) -> bool {
         self == EffectKind::MotionBlur
+    }
+
+    /// The AI matte this effect reads, if any.
+    pub fn matte(self) -> Option<MatteKind> {
+        match self {
+            EffectKind::PersonMatte => Some(MatteKind::Person),
+            EffectKind::DepthMap => Some(MatteKind::Depth),
+            _ => None,
+        }
     }
 }
 
@@ -338,11 +399,14 @@ pub struct Effect {
     /// Limits the effect to a shape (outside it the clip stays unaffected).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mask: Option<crate::color::ShapeMask>,
+    /// Drive the effect's position from a clip track (Smart Reframe pan).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track: Option<u64>,
 }
 
 impl Effect {
     pub fn new(kind: EffectKind) -> Self {
-        Effect { id: new_effect_id(), kind, enabled: true, params: kind.params().iter().map(|d| Param::new(d.default)).collect(), from_preset: false, mask: None }
+        Effect { id: new_effect_id(), kind, enabled: true, params: kind.params().iter().map(|d| Param::new(d.default)).collect(), from_preset: false, mask: None, track: None }
     }
 
     /// Repair the parameter list after loading an older project (missing
@@ -411,6 +475,7 @@ impl ResolvedEffect {
             EffectKind::LensDistortion => v[0] == 0.0 && v[1] == 0.0 && v[2] == 1.0 && v[3] <= 0.0,
             EffectKind::HueSatLightness => v[0] == 0.0 && v[1] == 0.0 && v[2] == 0.0,
             EffectKind::Levels => v[0] <= 0.0 && v[1] >= 1.0 && v[2] == 1.0 && v[3] <= 0.0 && v[4] >= 1.0,
+            EffectKind::PersonMatte | EffectKind::DepthMap => false,
         }
     }
 }
@@ -484,7 +549,10 @@ mod tests {
         let mut e = Effect::new(Vignette);
         e.params[0].value = -0.4; // white vignette is still an effect
         assert!(!e.resolve(Time::ZERO).is_noop());
-        assert_eq!(EffectKind::ALL.len(), 20);
+        assert_eq!(EffectKind::ALL.len(), 22);
+        for k in [PersonMatte, DepthMap] {
+            assert!(!Effect::new(k).resolve(Time::ZERO).is_noop() && k.matte().is_some(), "{k:?}");
+        }
         let mut seen = std::collections::HashSet::new();
         assert!(EffectKind::ALL.iter().all(|k| seen.insert(k.label())), "labels are unique");
     }

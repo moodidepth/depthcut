@@ -65,6 +65,7 @@ pub enum InspectorTab {
     Color,
     Audio,
     TitlesTransitions,
+    Motion,
 }
 
 /// Where a browser clip goes on the timeline (FCP E / W / Q / D).
@@ -147,6 +148,10 @@ impl FrameSource for NoBlock<'_> {
     fn frame(&mut self, _asset: AssetId, _index: i64) -> Option<nle_media::VideoFrame> {
         None
     }
+    fn matte(&mut self, asset: AssetId, index: i64, kind: nle_core::MatteKind) -> Option<nle_media::matte::Matte> {
+        // ~150 KB read per frame on a renderer cache miss; mattes are small
+        nle_media::matte::load(self.0.asset(asset)?, kind, index)
+    }
 }
 
 pub struct Playback {
@@ -185,6 +190,7 @@ pub struct App {
     pub punch: PunchState,
     /// Colour-page viewer state: qualifier highlight, mask being edited.
     pub color_view: crate::color_ui::ColorView,
+    pub motion: crate::motion_ui::MotionUi,
     pub inspector_tab: InspectorTab,
     pub browser: BrowserState,
     pub export: ExportDialog,
@@ -309,6 +315,7 @@ impl App {
             },
             punch: PunchState::default(),
             color_view: Default::default(),
+            motion: Default::default(),
             inspector_tab: InspectorTab::Video,
             browser: BrowserState { search: String::new(), tag: None, selected: None, favorites_only: false, thumb_size: 132.0, new_tag: String::new(), skim: None },
             export: ExportDialog::default(),
@@ -2353,6 +2360,7 @@ impl App {
     }
 
     fn poll_jobs(&mut self, ctx: &egui::Context) {
+        self.poll_motion(ctx);
         if let Some(job) = self.beat_job.as_ref() {
             if let Some(res) = job.take() {
                 self.beat_job = None;

@@ -369,11 +369,15 @@ pub struct ShapeMask {
     pub points: Vec<[f32; 2]>,
     #[serde(default)]
     pub smooth: bool,
+    /// Follow a track of the clip (see `Clip::tracks`); the shape is drawn
+    /// at the track's reference frame.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track: Option<u64>,
 }
 
 impl Default for ShapeMask {
     fn default() -> Self {
-        ShapeMask { shape: MaskShape::Ellipse, center: [0.5, 0.5], size: [0.3, 0.3], rotation: 0.0, feather: 0.05, invert: false, points: Vec::new(), smooth: false }
+        ShapeMask { shape: MaskShape::Ellipse, center: [0.5, 0.5], size: [0.3, 0.3], rotation: 0.0, feather: 0.05, invert: false, points: Vec::new(), smooth: false, track: None }
     }
 }
 

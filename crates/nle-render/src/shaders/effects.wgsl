@@ -772,3 +772,58 @@ fn levels(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     textureStore(dst, vec2<i32>(id.xy), vec4<f32>(c, base.a));
 }
+
+// ----- AI mattes ---------------------------------------------------------
+// `aux` is the clip's cached per-frame matte (single channel in .r, sampled
+// in the layer's source space).
+
+// Person Matte. a = (output, choke, softness, -): output 0 cut out subject,
+// 1 cut out background, 2 show matte. Softness 0.5 keeps the model's own
+// edge; lower values harden it around the (choked) 50 % threshold.
+@compute @workgroup_size(8, 8, 1)
+fn person_matte(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (!inside(id)) {
+        return;
+    }
+    let base = textureLoad(src, vec2<i32>(id.xy), 0);
+    let raw = textureSampleLevel(aux, samp, px_uv(id), 0.0).r;
+    let w = max(u.a.z * 2.0, 0.001);
+    let m = clamp((raw - (0.5 + u.a.y - 0.5 * w)) / w, 0.0, 1.0);
+    let mode = u32(u.a.x + 0.5);
+    if (mode == 2u) {
+        textureStore(dst, vec2<i32>(id.xy), vec4<f32>(vec3<f32>(m), base.a));
+        return;
+    }
+    let keep = select(m, 1.0 - m, mode == 1u);
+    textureStore(dst, vec2<i32>(id.xy), vec4<f32>(base.rgb, base.a * keep));
+}
+
+// Depth Map. aux.r = relative nearness (1 = near). a = (output, near, far,
+// softness), b = (fog amount, fog rgb): output 0 shows depth, 1 fades into
+// fog from `near` (clear) to `far` (full fog), 2 keeps nearness in
+// [far, near] (near ≥ 0.999 = no upper limit).
+@compute @workgroup_size(8, 8, 1)
+fn depth_map(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (!inside(id)) {
+        return;
+    }
+    let base = textureLoad(src, vec2<i32>(id.xy), 0);
+    let d = textureSampleLevel(aux, samp, px_uv(id), 0.0).r;
+    let near = u.a.y;
+    let far = u.a.z;
+    let s = max(u.a.w, 0.001);
+    let mode = u32(u.a.x + 0.5);
+    if (mode == 0u) {
+        textureStore(dst, vec2<i32>(id.xy), vec4<f32>(vec3<f32>(d), base.a));
+        return;
+    }
+    if (mode == 1u) {
+        let clear = smoothstep(min(far, near - 0.001), max(near, far + 0.001), d);
+        let f = clamp(u.b.x, 0.0, 1.0) * (1.0 - clear);
+        textureStore(dst, vec2<i32>(id.xy), vec4<f32>(mix(base.rgb, u.b.yzw, f), base.a));
+        return;
+    }
+    let lo = smoothstep(far - s, far + s, d);
+    let hi = select(1.0 - smoothstep(near - s, near + s, d), 1.0, near >= 0.999);
+    textureStore(dst, vec2<i32>(id.xy), vec4<f32>(base.rgb, base.a * lo * hi));
+}

@@ -112,6 +112,9 @@ pub struct VideoParams {
     pub ken_burns_start: NormRect,
     pub ken_burns_end: NormRect,
     pub blend_mode: BlendMode,
+    /// Ride along with a track on another clip (titles, callouts, stickers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow: Option<crate::motion::Follow>,
 }
 
 impl Default for VideoParams {
@@ -133,6 +136,7 @@ impl Default for VideoParams {
             ken_burns_start: [0.0, 0.0, 1.0, 1.0],
             ken_burns_end: [0.1, 0.1, 0.8, 0.8],
             blend_mode: BlendMode::Normal,
+            follow: None,
         }
     }
 }
@@ -934,6 +938,12 @@ pub struct Clip {
     /// Audition: the alternate takes. This clip is the active pick.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub audition: Vec<Clip>,
+    /// Point / region / planar tracks measured on this clip's source media.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tracks: Vec<crate::motion::Track>,
+    /// Camera stabilization (analysed camera path + smoothing settings).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stabilization: Option<crate::motion::Stabilization>,
 }
 
 impl Clip {
@@ -961,6 +971,8 @@ impl Clip {
             preset_base: None,
             anchor: Time::ZERO,
             audition: Vec::new(),
+            tracks: Vec::new(),
+            stabilization: None,
         }
     }
 

@@ -16,5 +16,12 @@ log.workspace = true
 reqwest.workspace = true
 tokio.workspace = true
 
+# Local ONNX matte models (person segmentation / depth). ONNX Runtime is
+# loaded at run time (`load-dynamic`), never linked.
+ort = { version = "=2.0.0-rc.10", default-features = false, features = ["load-dynamic"], optional = true }
+
+[features]
+onnx = ["dep:ort"]
+
 [target.'cfg(windows)'.dependencies]
 keyring.workspace = true

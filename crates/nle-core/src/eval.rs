@@ -2,7 +2,7 @@
 //! speakers) at a given time into a flat, renderer-friendly description.
 
 use crate::clip::{AudioParams, BlendMode, Clip, ClipKind, Direction, LutRef, TitleParams, TransitionKind};
-use crate::effects::{resolve_stack, EffectKind, ResolvedEffect};
+use crate::effects::{EffectKind, ResolvedEffect};
 use crate::ids::{AssetId, ClipId};
 use crate::speed::{FrameBlendMode, Retime};
 use crate::text_anim::{title_anim, TitleAnim};
@@ -21,6 +21,8 @@ pub struct ResolvedVideo {
     /// Ken Burns source rectangle `[x, y, w, h]` (full frame when unused).
     pub source_rect: [f32; 4],
     pub blend: BlendMode,
+    /// Stabilization warp: output uv -> source uv (applied before grading).
+    pub stabilize: Option<crate::motion::Mat3>,
 }
 
 impl Default for ResolvedVideo {
@@ -34,6 +36,7 @@ impl Default for ResolvedVideo {
             crop: [0.0; 4],
             source_rect: [0.0, 0.0, 1.0, 1.0],
             blend: BlendMode::Normal,
+            stabilize: None,
         }
     }
 }
@@ -253,6 +256,7 @@ fn resolve_video(c: &Clip, t: Time) -> ResolvedVideo {
         crop: [v.crop_left.at_f32(t).clamp(0.0, 1.0), v.crop_right.at_f32(t).clamp(0.0, 1.0), v.crop_top.at_f32(t).clamp(0.0, 1.0), v.crop_bottom.at_f32(t).clamp(0.0, 1.0)],
         source_rect,
         blend: v.blend_mode,
+        stabilize: None,
     }
 }
 
@@ -297,15 +301,106 @@ pub fn clip_layer(c: &Clip, local: Time, lane: i32) -> Option<Layer> {
             LayerSource::Compound(Box::new(evaluate_spine(&comp.spine, inner_t)))
         }
     };
-    Some(Layer {
-        clip: c.id,
-        lane,
-        source,
-        video: resolve_video(c, local),
-        color: resolve_color(c, local),
-        adjustment: matches!(c.kind, ClipKind::Adjustment),
-        effects: resolve_stack(&c.effects, local),
-    })
+    // Source seconds drive tracks and stabilization (they survive trims and retimes).
+    let src = matches!(c.kind, ClipKind::Asset { .. }).then(|| c.source_time(local).as_secs_f64());
+    let mut video = resolve_video(c, local);
+    let mut color = resolve_color(c, local);
+    if let Some(s) = src {
+        video.stabilize = c.stabilization.as_ref().and_then(|st| st.correction(s));
+        for n in &mut color.nodes {
+            if let Some(m) = &mut n.mask {
+                *m = tracked_mask(c, m, s);
+            }
+        }
+    }
+    Some(Layer { clip: c.id, lane, source, video, color, adjustment: matches!(c.kind, ClipKind::Adjustment), effects: resolve_effects(c, local, src) })
+}
+
+/// `m` moved along its track (unchanged without one).
+fn tracked_mask(c: &Clip, m: &crate::color::ShapeMask, src_secs: f64) -> crate::color::ShapeMask {
+    match m.track.and_then(|id| c.tracks.iter().find(|t| t.id == id)) {
+        Some(t) => t.move_mask(m, src_secs),
+        None => m.clone(),
+    }
+}
+
+/// Smart-reframe pan (-1..1) that centres the reframe window on `x` (0..1).
+pub fn reframe_pan_for(x: f32, layout: usize, top_four_three: bool, src_aspect: f32) -> Option<f32> {
+    let rect_aspect = match layout {
+        0 => {
+            if top_four_three {
+                4.0 / 3.0
+            } else {
+                1.6
+            }
+        }
+        2 => 9.0 / 16.0,
+        _ => return None,
+    };
+    let w = rect_aspect / src_aspect;
+    (w < 0.999).then(|| ((2.0 * x - 1.0) / (1.0 - w)).clamp(-1.0, 1.0))
+}
+
+/// The effect stack at `local`, with masks and smart-reframe pans following
+/// the clip's tracks.
+fn resolve_effects(c: &Clip, local: Time, src: Option<f64>) -> Vec<ResolvedEffect> {
+    c.effects
+        .iter()
+        .filter(|e| e.enabled)
+        .map(|e| {
+            let mut r = e.resolve(local);
+            if let Some(s) = src {
+                if let Some(m) = e.mask.as_ref().filter(|m| m.track.is_some()) {
+                    r.mask = Some(tracked_mask(c, m, s).resolve());
+                }
+                if e.kind == EffectKind::GamingReframe916 {
+                    if let Some(t) = e.track.and_then(|id| c.tracks.iter().find(|t| t.id == id)) {
+                        let (layout, top43) = (r.get("Layout") as usize, r.get("Top Aspect") > 0.5);
+                        if let Some(pan) = reframe_pan_for(t.point_at(s)[0], layout, top43, t.aspect) {
+                            if let Some(i) = e.kind.params().iter().position(|d| d.name == "Pan X") {
+                                r.values[i] = pan;
+                            }
+                        }
+                    }
+                }
+            }
+            r
+        })
+        .filter(|r| !r.is_noop())
+        .collect()
+}
+
+/// Move layers whose clips follow a track on another clip.
+fn apply_follows(timeline: &Timeline, comp: &mut Composition) {
+    fn each(l: &mut Layer, timeline: &Timeline, t: Time) {
+        let Some(f) = timeline.clip(l.clip).and_then(|c| c.video.follow.clone()) else { return };
+        // the stored clip id may be stale (duplicates, pastes): fall back to the track's owner
+        let owner = timeline.clip(f.clip).filter(|c| c.tracks.iter().any(|t| t.id == f.track)).map(|c| c.id).or_else(|| timeline.track_owner(f.track));
+        let Some(owner) = owner else { return };
+        let (Some(target), Some(start)) = (timeline.clip(owner), timeline.clip_start(owner)) else { return };
+        let Some(track) = target.tracks.iter().find(|tr| tr.id == f.track) else { return };
+        let local = (t - start).max(Time::ZERO).min(target.duration);
+        let h = track.at(crate::motion::source_secs(target, local));
+        let p0 = [0.5 + l.video.position[0], 0.5 + l.video.position[1]];
+        let p1 = crate::motion::apply(&h, p0);
+        l.video.position = [p1[0] - 0.5, p1[1] - 0.5];
+        if f.transform {
+            let (s, rot) = crate::motion::local_similarity(&h, p0, track.aspect);
+            l.video.scale = [l.video.scale[0] * s, l.video.scale[1] * s];
+            l.video.rotation += rot.to_degrees();
+        }
+    }
+    let t = comp.time;
+    for n in &mut comp.nodes {
+        match n {
+            RenderNode::Layer(l) => each(l, timeline, t),
+            RenderNode::Transition { from, to, .. } => {
+                for l in [from, to].into_iter().flatten() {
+                    each(l, timeline, t);
+                }
+            }
+        }
+    }
 }
 
 fn transition_progress(tr: &crate::clip::Transition, elapsed: Time) -> ResolvedTransition {
@@ -433,6 +528,7 @@ fn connected_node(cc: &Clip, local: Time) -> Option<RenderNode> {
 /// The timeline at `t` with the active caption on top (no previous frame).
 fn evaluate_frame(timeline: &Timeline, t: Time) -> Composition {
     let mut comp = evaluate_spine(&timeline.spine, t);
+    apply_follows(timeline, &mut comp);
     if timeline.captions.enabled {
         let ct = timeline.captions.caption_time(t);
         if let Some((_, seg)) = timeline.captions.segment_at(ct) {

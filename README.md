@@ -100,10 +100,24 @@ and tells you where the log is. Please attach it to bug reports.
   the inspector. Bézier easing; an animation lane (`Ctrl+V`) and a retime editor
   (`Ctrl+R`) with speed ramps, reverse, hold frames, frame blending and optical
   flow.
-- **GPU effects and colour.** 20 effects (five blurs, glow, vignette, sharpen,
-  grain, lens distortion, chroma key, hue/sat/lightness, levels…), 14 blend
-  modes, colour wheels, `.cube` LUTs, 7 transitions, titles. Everything is
-  rendered in WGSL compute shaders.
+- **GPU effects and colour.** 22 effects (five blurs, glow, vignette, sharpen,
+  grain, lens distortion, chroma key, hue/sat/lightness, levels, AI person
+  matte and depth map…), 14 blend modes, colour wheels, `.cube` LUTs, 7
+  transitions, titles. Everything is rendered in WGSL compute shaders.
+- **Motion** (Inspector → Motion tab, with viewer overlays).
+  - **Point / Region / Planar trackers** (translation, similarity or
+    perspective, fitted with RANSAC on GPU optical flow). Masks, censor boxes
+    (blur / pixelate), titles and callouts (Follow Track) and **Smart 9:16
+    Reframe** can follow a track.
+  - **Camera stabilization**: Translation / Similarity / Perspective, tripod
+    mode, smoothing and auto-crop.
+  - **Scene-cut detection** with auto-blade in one undo step.
+  - **Speed Warp**: the high-quality optical-flow retime mode.
+  - **AI mattes** (optional, local ONNX models): Person Matte (cut out the
+    subject or the background) and Depth Map (show depth, depth fog, keep a
+    range). The person matte also builds a subject track for Smart 9:16
+    Reframe on any footage. You supply the models and the ONNX Runtime; see
+    *AI mattes* below.
 - **Audio.** EQ, Vocal Clarity, −14 LUFS normalize, and **look-ahead
   auto-ducking**: music ducks *before* the voice starts. Preview and export
   sound identical.
@@ -285,7 +299,9 @@ All pixel work runs in WGSL compute shaders on the GPU:
 - NV12 / P010 → working RGBA16F (display-encoded BT.709 values, limited-range expanded). Exposure and white balance convert to linear light internally.
 - Exposure, white balance, lift/gamma/gain wheels, contrast, saturation and **trilinear `.cube` 3D LUTs**. A before/after split wipe is available for comparison.
 - **Video scopes** (`scopes.wgsl`): luma or RGB waveform, RGB parade, vectorscope with a skin-tone line and 75 % targets, and an RGB + luma histogram. The final frame is binned on the GPU with atomics (sampling every n-th pixel above 960 px wide), and each scope is drawn into a small texture that egui shows directly. No frame is read back to the CPU. Scopes cost nothing while hidden.
-- Modular **effect stack** compute shaders for 20 effects: Gaussian/Radial/Directional/Zoom/Motion Blur, Glow, Vignette, Sharpen, Film Grain, Halation, Camera Shake, RGB Split Glitch, Impact Flash, Neon Outline, Pixelate, Lens Distortion (with chromatic aberration), Chroma Key, Hue/Sat/Lightness, Levels and 9:16 Gaming Reframe, including **Adjustment clip** passes over layers below.
+- Modular **effect stack** compute shaders for 22 effects: Gaussian/Radial/Directional/Zoom/Motion Blur, Glow, Vignette, Sharpen, Film Grain, Halation, Camera Shake, RGB Split Glitch, Impact Flash, Neon Outline, Pixelate, Lens Distortion (with chromatic aberration), Chroma Key, Hue/Sat/Lightness, Levels, 9:16 Gaming Reframe, Person Matte and Depth Map, including **Adjustment clip** passes over layers below.
+- **Motion analysis** (`nle_render::motion`, `nle_core::motion`): dense GPU optical flow read back at ≤ 960 px. Robust RANSAC fits give translation, similarity or homography per frame, which drive the trackers, the stabilizer (a smoothed camera path, the correction warp in `warp.wgsl`, auto-crop) and a scene-change score (residual after motion compensation) for cut detection. Tracks, stabilization and Speed Warp round-trip through `.rcp` and FCPXML.
+- **AI mattes**: per-frame 8-bit mattes from `nle_media::matte` (a file cache keyed by the source file) are uploaded as `R8Unorm` textures and read by the `person_matte` / `depth_map` effect shaders. Preview and export read the same cache. Without a matte for a frame, the effect passes through.
 - **Colour management** (`colorspace.wgsl`): input transforms for Rec.709, sRGB, linear, Rec.2100 PQ / HLG, ARRI LogC3, Sony S-Log3 and Panasonic V-Log (decode + gamut matrix to Rec.709), or an input `.cube` LUT. The working space is Rec.709 gamma (the legacy maths, bit-for-bit) or ACEScct. Scene-referred and HDR sources roll their highlights off smoothly above display white. `Use … (from media)` picks the input from the probed transfer tag.
 - **Stacked colour corrections** (`correct.wgsl`): after the primary, any number of serial nodes, each with lift / gamma / gain / offset wheels, log wheels (shadow / midtone / highlight with adjustable ranges), exposure, white balance, contrast about a movable pivot, saturation, master + R / G / B curves (monotone cubic, so no overshoot) and Hue-vs-Hue / Sat / Lum curves. A node can be limited by an **HSL qualifier** (hue, saturation and luma ranges with softness, matte denoise and invert) and by a **window** (ellipse, rectangle or Bézier polygon, with rotation, feather and invert), and mixed back with a node opacity. Highlight shows the key in colour over grey or as a black-and-white matte. Masks are edited on the viewer with handles.
 - **Masked effects** (`mask.wgsl`): every effect in the stack can take the same shape mask. Effects that change the frame size (9:16 reframe) ignore it.
@@ -437,6 +453,7 @@ regenerate the license file with `python scripts/gen_third_party_notices.py`.
     It also encodes HEVC Main10 and AV1 sources with the Arc's Quick Sync encoders and checks that they decode in hardware (P010 / NV12). This runs only where those encoders work.
   - `nle-render/tests/export_ffmpeg.rs` exports a two-clip timeline with a dissolve through **every encoder FFmpeg reports** (`av1_qsv`, `hevc_qsv`, `h264_qsv`, `h264_vaapi`, `libx264`). Each output is verified with ffprobe for size, duration and audio track.
   - A hardware-encoder failure is excused only if FFmpeg also cannot use that encoder directly. Otherwise the test fails.
+- **Motion and mattes:** `nle-core/tests/motion_tests.rs` covers tracked masks, follow, reframe pan, stabilization timing, scene-cut blading and FCPXML round trips. The GPU tests `nle-render/tests/motion.rs` and `nle-render/tests/matte.rs` use synthetic moving scenes (flow, similarity / perspective fits, the region tracker, stabilizer, cut scores, Speed Warp) and a synthetic matte source (every Person Matte / Depth Map output, plus pass-through without a matte). `nle-ai` tests the ONNX pre- and post-processing; no real model runs in the tests.
 - **Release smoke test** (manual, `#[ignore]`): `nle-render/tests/e2e_smoke.rs` exercises the whole pipeline on generated media. It synthesizes speech with Windows TTS, then imports → trims → applies Zoom Punch → runs Whisper auto-captions → applies look-ahead ducking → exports → validates with ffprobe, and measures the duck in the exported audio. It needs ffmpeg, a GPU and `ggml-base-q5_1.bin` in the models folder:
 
   ```powershell
@@ -461,3 +478,8 @@ The `ffmpeg` feature (`ffmpeg-next` 9.1) was built and tested against the same F
   - `hwupload=extra_hw_frames=N` fails on D3D11 with `E_INVALIDARG`, so Windows uses a plain `hwupload,format=qsv`.
   - Output colour flags (`-colorspace` etc.) make FFmpeg insert an auto-scale filter that cannot accept QSV frames. BT.709 tags are therefore set with `setparams` before the upload.
   - QSV decode uses `-hwaccel_output_format qsv` with an explicit `hwdownload`. Without it, HEVC 10-bit and AV1 fail format negotiation.
+- **AI mattes (optional `onnx` feature):** build with `cargo build --release -p nle-ui --features onnx`. The app loads ONNX Runtime at run time (`ort` 2.0.0-rc.10, which targets ONNX Runtime 1.22). It looks for `onnxruntime.dll` in `ORT_DYLIB_PATH`, next to `rust-cut-pro.exe`, then in `%LOCALAPPDATA%\RustCutPro\models\`. Put the models in that same folder:
+  - `person.onnx`: a portrait matting / segmentation model with a `1×3×H×W` input normalised as `(x − 0.5) / 0.5` and a `1×1×H×W` output in 0..1 (probabilities or logits), e.g. MODNet.
+  - `depth.onnx`: a relative depth model with ImageNet normalisation whose output grows towards the camera, e.g. Depth Anything V2 Small.
+
+  Fixed input sizes are read from the model; dynamic ones use 512² (person) or 518² (depth). Mattes are cached at ≤ 480 px wide (about 130 KB per frame) in `%LOCALAPPDATA%\RustCutPro\mattes\`. Inference runs on the CPU. **No model has been run against this code yet**: only the pre- and post-processing are tested.

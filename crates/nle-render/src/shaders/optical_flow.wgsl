@@ -171,3 +171,32 @@ fn lk_iter(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     textureStore(dst, p, vec4<f32>(v + delta, 0.0, 1.0));
 }
+
+// 3×3 vector median of the flow (Speed Warp): replaces each vector with the
+// neighbour that minimises the summed distance to all others, removing
+// isolated outliers without blurring motion boundaries.
+@compute @workgroup_size(8, 8, 1)
+fn vec_median(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (!inside(id)) {
+        return;
+    }
+    let p = vec2<i32>(id.xy);
+    let fd = vec2<i32>(textureDimensions(flow_in)) - vec2<i32>(1);
+    var v: array<vec2<f32>, 9>;
+    for (var i = 0; i < 9; i = i + 1) {
+        v[i] = textureLoad(flow_in, clamp(p + vec2<i32>(i % 3 - 1, i / 3 - 1), vec2<i32>(0), fd), 0).xy;
+    }
+    var best = v[4];
+    var best_cost = 1e30;
+    for (var i = 0; i < 9; i = i + 1) {
+        var cost = 0.0;
+        for (var j = 0; j < 9; j = j + 1) {
+            cost = cost + length(v[i] - v[j]);
+        }
+        if (cost < best_cost) {
+            best_cost = cost;
+            best = v[i];
+        }
+    }
+    textureStore(dst, p, vec4<f32>(best, 0.0, 1.0));
+}

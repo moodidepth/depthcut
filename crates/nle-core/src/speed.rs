@@ -23,16 +23,22 @@ pub enum FrameBlendMode {
     OpticalFlow,
     /// HLAE-style multi-tap optical-flow weighted frame accumulation.
     WeightedAccumulation,
+    /// High-quality bidirectional optical flow: full-resolution vectors,
+    /// more refinement passes, vector-median outlier rejection and
+    /// occlusion-aware blending (slower; for hero slow-motion shots).
+    SpeedWarp,
 }
 
 impl FrameBlendMode {
-    pub const ALL: [FrameBlendMode; 4] = [FrameBlendMode::FloorFrame, FrameBlendMode::FrameBlend, FrameBlendMode::OpticalFlow, FrameBlendMode::WeightedAccumulation];
+    pub const ALL: [FrameBlendMode; 5] =
+        [FrameBlendMode::FloorFrame, FrameBlendMode::FrameBlend, FrameBlendMode::OpticalFlow, FrameBlendMode::SpeedWarp, FrameBlendMode::WeightedAccumulation];
     pub fn label(self) -> &'static str {
         match self {
             FrameBlendMode::FloorFrame => "Normal",
             FrameBlendMode::FrameBlend => "Frame Blending",
             FrameBlendMode::OpticalFlow => "Optical Flow",
             FrameBlendMode::WeightedAccumulation => "Weighted Accum (HLAE)",
+            FrameBlendMode::SpeedWarp => "Speed Warp (Better Flow)",
         }
     }
 }

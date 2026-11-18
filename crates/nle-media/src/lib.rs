@@ -26,6 +26,7 @@ pub mod frame;
 pub mod frame_server;
 pub mod hwaccel;
 pub mod jobs;
+pub mod matte;
 #[cfg(feature = "online")]
 pub mod online;
 pub mod paths;

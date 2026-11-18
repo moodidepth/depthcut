@@ -27,6 +27,7 @@ pub mod colormath;
 pub mod export;
 pub mod gpu;
 pub mod lut;
+pub mod motion;
 pub mod pipelines;
 pub mod reframe;
 pub mod renderer;
