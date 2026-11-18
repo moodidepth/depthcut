@@ -16,6 +16,7 @@ pub const SHADER_TITLE: &str = include_str!("shaders/title.wgsl");
 pub const SHADER_OUTPUT: &str = include_str!("shaders/output.wgsl");
 pub const SHADER_NV12: &str = include_str!("shaders/nv12.wgsl");
 pub const SHADER_FILL: &str = include_str!("shaders/fill.wgsl");
+pub const SHADER_SCOPES: &str = include_str!("shaders/scopes.wgsl");
 
 /// Every shader with its entry point (used by the WGSL validation test).
 pub const ALL_SHADERS: &[(&str, &str, &str)] = &[
@@ -32,7 +33,11 @@ pub const ALL_SHADERS: &[(&str, &str, &str)] = &[
     ("output", SHADER_OUTPUT, "to_display"),
     ("nv12", SHADER_NV12, "main"),
     ("fill", SHADER_FILL, "main"),
+    ("scopes", SHADER_SCOPES, "accumulate"),
 ];
+
+/// Every compute entry point of `scopes.wgsl`.
+pub const SCOPE_ENTRY_POINTS: &[&str] = &["clear", "accumulate", "hist_max", "draw_waveform", "draw_parade", "draw_vector", "draw_histogram"];
 
 /// Every compute entry point of `effects.wgsl` the renderer builds a pipeline
 /// for (validated individually so a typo in a new effect fails the test).
@@ -172,6 +177,14 @@ pub struct Pipelines {
     pub to_display: Pipe,
     pub nv12: Pipe,
     pub fill: Pipe,
+    /// Video scopes: clear, accumulate, histogram max, then one draw pass per scope.
+    pub scope_clear: Pipe,
+    pub scope_accumulate: Pipe,
+    pub scope_hist_max: Pipe,
+    pub scope_waveform: Pipe,
+    pub scope_parade: Pipe,
+    pub scope_vector: Pipe,
+    pub scope_histogram: Pipe,
 }
 
 impl Pipelines {
@@ -184,6 +197,8 @@ impl Pipelines {
         let fspec = [B::Tex, B::Tex, B::Tex, B::Samp, B::Uniform, B::Store(flow_format)];
         let fx = module(device, "effects", SHADER_EFFECTS);
         let xspec = [B::Tex, B::Tex, B::Samp, B::Uniform, w];
+        let sc = module(device, "scopes", SHADER_SCOPES);
+        let sspec = [B::Tex, B::Uniform, B::StorageRw, B::Store(DISPLAY_FORMAT)];
         Pipelines {
             flow_luma: pipe_m(device, cache, "flow_luma", &flow, "luma", &fspec),
             flow_down: pipe_m(device, cache, "flow_down", &flow, "downsample", &fspec),
@@ -225,6 +240,13 @@ impl Pipelines {
             to_display: pipe(device, cache, "to_display", SHADER_OUTPUT, "to_display", &[B::Tex, B::Store(DISPLAY_FORMAT)]),
             nv12: pipe(device, cache, "nv12", SHADER_NV12, "main", &[B::Tex, B::Uniform, B::StorageRw]),
             fill: pipe(device, cache, "fill", SHADER_FILL, "main", &[B::Uniform, w]),
+            scope_clear: pipe_m(device, cache, "scope_clear", &sc, "clear", &sspec),
+            scope_accumulate: pipe_m(device, cache, "scope_accumulate", &sc, "accumulate", &sspec),
+            scope_hist_max: pipe_m(device, cache, "scope_hist_max", &sc, "hist_max", &sspec),
+            scope_waveform: pipe_m(device, cache, "scope_waveform", &sc, "draw_waveform", &sspec),
+            scope_parade: pipe_m(device, cache, "scope_parade", &sc, "draw_parade", &sspec),
+            scope_vector: pipe_m(device, cache, "scope_vector", &sc, "draw_vector", &sspec),
+            scope_histogram: pipe_m(device, cache, "scope_histogram", &sc, "draw_histogram", &sspec),
         }
     }
 }

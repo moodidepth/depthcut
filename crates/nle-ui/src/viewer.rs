@@ -48,6 +48,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     app.viewer.half_res = half;
                     app.resize_preview();
                 }
+                ui.separator();
+                let mut scopes = app.viewer.scopes;
+                if ui.checkbox(&mut scopes, format!("Video Scopes ({})", app.keymap.hint(nle_core::keymap::Action::ToggleScopes))).changed() {
+                    app.set_scopes(scopes);
+                }
             });
             ui.selectable_value(&mut app.viewer.gizmo, Gizmo::Crop, "⛶ Crop");
             ui.selectable_value(&mut app.viewer.gizmo, Gizmo::Transform, "✥ Transform");
@@ -57,7 +62,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 
     // ----- image area
     let transport_h = 46.0;
-    let area = Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), (ui.available_height() - transport_h).max(80.0)));
+    let scopes_h = if app.viewer.scopes { (ui.available_height() * 0.38).clamp(150.0, 330.0) } else { 0.0 };
+    let area = Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), (ui.available_height() - transport_h - scopes_h).max(80.0)));
     let resp = ui.allocate_rect(area, Sense::click_and_drag());
     ui.painter().rect_filled(area, CornerRadius::same(4), theme::VIEWER_BG);
     let fmt = app.project.timeline.format;
@@ -125,8 +131,80 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         app.viewer.zoom = None;
     }
 
+    // ----- video scopes drawer
+    if app.viewer.scopes {
+        scopes_drawer(app, ui, scopes_h);
+    }
+
     // ----- transport bar
     transport(app, ui);
+}
+
+/// The video scopes drawer: toolbar plus the selected scopes side by side,
+/// each drawn by the renderer into its own texture.
+fn scopes_drawer(app: &mut App, ui: &mut egui::Ui, height: f32) {
+    use nle_render::ScopeKind;
+    let rect = Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), height));
+    ui.allocate_rect(rect, Sense::hover());
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(Vec2::new(2.0, 4.0))));
+    let ui = &mut child;
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("Scopes").strong());
+        for (i, k) in ScopeKind::ALL.iter().enumerate() {
+            ui.toggle_value(&mut app.viewer.scope_kinds[i], k.label());
+        }
+        ui.separator();
+        let Some(p) = app.preview.as_mut() else { return };
+        let s = &mut p.renderer.scope_settings;
+        if app.viewer.scope_kinds[0] {
+            changed |= ui.selectable_value(&mut s.rgb_waveform, false, "Luma").on_hover_text("Waveform shows luma").changed();
+            changed |= ui.selectable_value(&mut s.rgb_waveform, true, "RGB").on_hover_text("Waveform overlays red, green and blue").changed();
+            ui.separator();
+        }
+        ui.label("Brightness");
+        changed |= ui.add(egui::Slider::new(&mut s.gain, 0.25..=8.0).logarithmic(true).show_value(false)).changed();
+        if app.viewer.scope_kinds[2] {
+            ui.label("Vector zoom");
+            changed |= ui.selectable_value(&mut s.vec_zoom, 1.0, "1×").changed();
+            changed |= ui.selectable_value(&mut s.vec_zoom, 2.0, "2×").on_hover_text("Magnify the centre: the rim is 50 % saturation").changed();
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.small_button("✕").on_hover_text("Hide scopes").clicked() {
+                app.set_scopes(false);
+            }
+        });
+    });
+    if changed {
+        app.refresh_preview();
+    }
+    let Some(ids) = app.preview.as_ref().and_then(|p| p.scope_textures) else {
+        ui.label(egui::RichText::new("Scopes need the GPU renderer").color(theme::TEXT_DIM));
+        return;
+    };
+    let shown: Vec<(ScopeKind, egui::TextureId)> = ScopeKind::ALL.iter().zip(ids).zip(app.viewer.scope_kinds).filter(|(_, on)| *on).map(|((k, id), _)| (*k, id)).collect();
+    if shown.is_empty() {
+        ui.label(egui::RichText::new("Pick a scope above").color(theme::TEXT_DIM));
+        return;
+    }
+    let avail = Rect::from_min_size(ui.cursor().min, ui.available_size());
+    let gap = 6.0;
+    // widths proportional to each scope's aspect at the drawer height
+    let aspect = |k: ScopeKind| {
+        let (w, h) = k.size();
+        w as f32 / h as f32
+    };
+    let total: f32 = shown.iter().map(|(k, _)| aspect(*k)).sum();
+    let h = avail.height().min((avail.width() - gap * (shown.len() as f32 - 1.0)) / total).max(20.0);
+    let mut x = avail.left();
+    let painter = ui.painter_at(avail);
+    for (k, id) in shown {
+        let r = Rect::from_min_size(Pos2::new(x, avail.top()), Vec2::new(h * aspect(k), h));
+        painter.rect_filled(r, CornerRadius::same(3), Color32::BLACK);
+        painter.image(id, r, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+        painter.text(r.left_top() + Vec2::new(5.0, 3.0), egui::Align2::LEFT_TOP, k.label(), egui::FontId::proportional(10.0), Color32::from_gray(150));
+        x = r.right() + gap;
+    }
 }
 
 /// Native size of `clip`'s layer as the compositor fits it (the 9:16

@@ -196,6 +196,7 @@ presets: **Argon Montage** (the default, below), **Final Cut Pro** and
 | **Ctrl+-** | Zoom Out | View |
 | **Ctrl+0** | Zoom to Fit | View |
 | **Ctrl+Shift+L** | Show Audio Lanes by Role | View |
+| **Ctrl+7** | Show Video Scopes | View |
 | **Ctrl+Shift+C** | Auto Captions | Captions |
 | **Ctrl+I** | Import Media | File |
 | **Ctrl+Shift+I** | Import FCPXML | File |
@@ -283,6 +284,7 @@ All pixel work runs in WGSL compute shaders on the GPU:
 
 - NV12 / P010 → working RGBA16F (display-encoded BT.709 values, limited-range expanded). Exposure and white balance convert to linear light internally.
 - Exposure, white balance, lift/gamma/gain wheels, contrast, saturation and **trilinear `.cube` 3D LUTs**. A before/after split wipe is available for comparison.
+- **Video scopes** (`scopes.wgsl`): luma or RGB waveform, RGB parade, vectorscope with a skin-tone line and 75 % targets, and an RGB + luma histogram. The final frame is binned on the GPU with atomics (sampling every n-th pixel above 960 px wide), and each scope is drawn into a small texture that egui shows directly. No frame is read back to the CPU. Scopes cost nothing while hidden.
 - Modular **effect stack** compute shaders for 20 effects: Gaussian/Radial/Directional/Zoom/Motion Blur, Glow, Vignette, Sharpen, Film Grain, Halation, Camera Shake, RGB Split Glitch, Impact Flash, Neon Outline, Pixelate, Lens Distortion (with chromatic aberration), Chroma Key, Hue/Sat/Lightness, Levels and 9:16 Gaming Reframe, including **Adjustment clip** passes over layers below.
 - Transform, crop, Ken Burns, opacity and 14 blend modes: Normal, Multiply, Screen, Overlay, Add, Soft Light, Hard Light, Color Dodge, Color Burn, Darken, Lighten, Difference, Exclusion and Luminosity. They round-trip through FCPXML `adjust-blend`.
 - **Transitions:** Cross Dissolve, Dip to Black, Dip to White, Whip Pan (directional blur), Slide, Push and Luma Wipe.
@@ -303,7 +305,7 @@ device, so the viewer displays the rendered frame without any copies.
   - hover-scrub filmstrips, which also play in the viewer;
   - an Original/Proxy toggle;
   - proxy creation and a metadata panel (including LUFS loudness and licence/attribution credits).
-- **Viewer:** GPU texture with fit/zoom, HH:MM:SS:FF timecode (click it to type a new position), transport controls, audio meters, title/action safe zones, a before/after wipe, and on-screen gizmos for position, scale, rotation and crop.
+- **Viewer:** GPU texture with fit/zoom, HH:MM:SS:FF timecode (click it to type a new position), transport controls, audio meters, title/action safe zones, a before/after wipe, a **video scopes drawer** (`Ctrl+7`: waveform, parade, vectorscope, histogram, with luma/RGB, brightness and 2× vector zoom), and on-screen gizmos for position, scale, rotation and crop.
 - **Inspector tabs:**
   - **Video:** compositing, transform, crop/Ken Burns, Rate Conform, speed, and reorderable GPU Effect stack with grouped `+ Add Effect` and keyframable parameters.
   - **Color:** colour wheels, primaries and LUT.
@@ -425,7 +427,7 @@ regenerate the license file with `python scripts/gen_third_party_notices.py`.
 - **`nle-render`:**
   - every WGSL shader validated with naga;
   - LUT parsing and sampling, transforms, the LRU cache and export arguments;
-  - an end-to-end GPU test (`tests/gpu.rs`), skipped automatically when no adapter is present. It covers the YUV round trip, dissolve, grading with the wipe, opacity, frame blending and optical flow, every transition, titles (glyphs lit and centred) and the display path.
+  - an end-to-end GPU test (`tests/gpu.rs`), skipped automatically when no adapter is present. It covers the YUV round trip, dissolve, grading with the wipe, opacity, frame blending and optical flow, every transition, titles (glyphs lit and centred) and the display path. The scopes test checks that the GPU's histogram, waveform and vectorscope bins match the CPU mirror in `scopes.rs`, and that each drawn scope shows its trace.
 - **Real-media tests** run automatically when `ffmpeg`/`ffprobe` are found, and are skipped otherwise:
   - `nle-media/tests/ffmpeg_pipeline.rs` generates a test clip, then checks probing, hardware/software decode (full and downscaled), 48 kHz audio decode, filmstrip thumbnails and the proxy transcode.
     It also encodes HEVC Main10 and AV1 sources with the Arc's Quick Sync encoders and checks that they decode in hardware (P010 / NV12). This runs only where those encoders work.

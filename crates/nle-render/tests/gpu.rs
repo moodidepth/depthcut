@@ -4,7 +4,7 @@
 use nle_core::eval::{Composition, Layer, LayerSource, RenderNode, ResolvedColor, ResolvedTransition};
 use nle_core::{AssetId, ClipId, Direction, Effect, EffectKind, FrameBlendMode, FrameRate, Time, TitleAnim, TitleParams, TransitionKind};
 use nle_media::{PixelFormat, VideoFrame};
-use nle_render::pipelines::{ALL_SHADERS, EFFECT_ENTRY_POINTS, SHADER_EFFECTS};
+use nle_render::pipelines::{ALL_SHADERS, EFFECT_ENTRY_POINTS, SCOPE_ENTRY_POINTS, SHADER_EFFECTS, SHADER_SCOPES};
 use nle_render::{FrameSource, GpuContext, RenderOptions, Renderer};
 use std::collections::HashMap;
 
@@ -25,6 +25,12 @@ fn all_wgsl_shaders_validate() {
         assert_eq!(ep.workgroup_size, [8, 8, 1], "{entry}: the renderer dispatches 8×8 groups");
     }
     assert_eq!(fx.entry_points.len(), EFFECT_ENTRY_POINTS.len(), "every effects.wgsl entry point is listed");
+    let sc = naga::front::wgsl::parse_str(SHADER_SCOPES).unwrap();
+    for entry in SCOPE_ENTRY_POINTS {
+        let ep = sc.entry_points.iter().find(|ep| ep.name == *entry).unwrap_or_else(|| panic!("scopes.wgsl: missing entry point {entry}"));
+        assert_eq!(ep.stage, naga::ShaderStage::Compute, "{entry}");
+    }
+    assert_eq!(sc.entry_points.len(), SCOPE_ENTRY_POINTS.len(), "every scopes.wgsl entry point is listed");
 }
 
 // ---------------------------------------------------------------------------
@@ -480,4 +486,86 @@ fn gpu_every_blend_mode_matches_the_reference() {
             assert!((y - want).abs() <= 2.0, "{mode:?} base {yb} layer {yl}: got {y}, want {want}");
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Video scopes
+
+#[test]
+fn gpu_scopes_bin_a_solid_frame_like_the_cpu_mirror() {
+    use nle_render::scopes::{self, Channel};
+    let Some(gpu) = gpu() else { return };
+    let mut r = Renderer::new(gpu, W, H);
+    let mut src = Solid(HashMap::new());
+    assert!(r.read_scope_counts().is_none(), "scopes are off by default");
+    r.set_scopes_enabled(true);
+    assert!(r.scopes_enabled());
+    let rgb = [0.75f32, 0.25, 0.5];
+    let comp = Composition::new(Time::ZERO, vec![RenderNode::Layer(Layer::new(ClipId(1), 0, LayerSource::Solid([rgb[0], rgb[1], rgb[2], 1.0])))]);
+    r.render(&comp, &mut src, RenderOptions::default());
+    let c = r.read_scope_counts().expect("scope counts");
+    assert_eq!(c.len(), scopes::COUNT_LEN as usize);
+    let n = W * H; // stride 1 at this size
+    assert_eq!(scopes::sample_count(W, H, scopes::sample_stride(W)), n);
+
+    // the histogram puts every sample into one bin per channel (±1 level of the CPU value)
+    let peak = |ch: Channel| (0..scopes::LEVELS).max_by_key(|&lv| c[scopes::hist_index(ch, lv)]).unwrap();
+    for (ch, v) in [(Channel::Luma, scopes::luma(rgb)), (Channel::Red, rgb[0]), (Channel::Green, rgb[1]), (Channel::Blue, rgb[2])] {
+        let lv = peak(ch);
+        eprintln!("{ch:?}: GPU level {lv}, CPU {}", scopes::level(v));
+        assert!(lv.abs_diff(scopes::level(v)) <= 1, "{ch:?}");
+        assert_eq!(c[scopes::hist_index(ch, lv)], n, "{ch:?}: all samples in one bin");
+        assert_eq!(c[(scopes::MAX_OFF + ch as u32) as usize], n, "{ch:?}: histogram max");
+    }
+    // waveform: every sample counted once per channel, only in the peak level row
+    for ch in [Channel::Luma, Channel::Red, Channel::Green, Channel::Blue] {
+        let lv = peak(ch);
+        let total: u32 = (0..scopes::WAVE_COLS).map(|col| c[scopes::wave_index(ch, col, lv)]).sum();
+        assert_eq!(total, n, "{ch:?} waveform");
+    }
+    // vectorscope: one bin, matching the CPU mirror within a bin
+    let vec: Vec<(u32, u32, u32)> = (0..scopes::VEC_N * scopes::VEC_N)
+        .filter_map(|i| {
+            let k = c[(scopes::VEC_OFF + i) as usize];
+            (k > 0).then_some((i % scopes::VEC_N, i / scopes::VEC_N, k))
+        })
+        .collect();
+    let (ex, ey) = scopes::vec_bin(rgb, 1.0);
+    eprintln!("vectorscope bins {vec:?}, CPU ({ex}, {ey})");
+    assert_eq!(vec.iter().map(|v| v.2).sum::<u32>(), n);
+    assert!(vec.iter().all(|v| v.0.abs_diff(ex) <= 1 && v.1.abs_diff(ey) <= 1));
+
+    // the drawn scopes show the trace where the bins are
+    let px = |img: &[u8], w: u32, x: u32, y: u32| {
+        let i = ((y * w + x) * 4) as usize;
+        [img[i], img[i + 1], img[i + 2]]
+    };
+    let bright = |p: [u8; 3]| p.iter().map(|&v| v as u32).sum::<u32>();
+    let (vw, _) = nle_render::ScopeKind::Vectorscope.size();
+    let vimg = r.read_scope_image(nle_render::ScopeKind::Vectorscope).unwrap();
+    let at_trace = bright(px(&vimg, vw, ex, ey));
+    let empty = bright(px(&vimg, vw, 255 - ex, 255 - ey));
+    eprintln!("vectorscope trace {at_trace} vs opposite {empty}");
+    assert!(at_trace > empty + 150, "vectorscope trace visible");
+    let (ww, wh) = nle_render::ScopeKind::Waveform.size();
+    let wimg = r.read_scope_image(nle_render::ScopeKind::Waveform).unwrap();
+    let ly = wh - 1 - peak(Channel::Luma); // level 255 at the top
+                                           // a 64 px frame fills every 6th of the 384 columns (col = x · 384 / 64)
+    let lit = |y: u32| (0..W).map(|x| bright(px(&wimg, ww, x * scopes::WAVE_COLS / W, y))).sum::<u32>() / W;
+    let (row, off) = (lit(ly), lit(20));
+    eprintln!("waveform row {ly}: {row} vs row 20: {off}");
+    assert!(row > off + 150, "waveform trace visible on the luma level");
+    let himg = r.read_scope_image(nle_render::ScopeKind::Histogram).unwrap();
+    assert!(himg.chunks(4).any(|p| p[0] > 100), "histogram draws red");
+    let pimg = r.read_scope_image(nle_render::ScopeKind::Parade).unwrap();
+    assert!(pimg.chunks(4).any(|p| p[0] > 100) && pimg.chunks(4).any(|p| p[2] > 100), "parade draws red and blue");
+
+    // second frame in RGB-waveform mode: counts are cleared, not accumulated
+    r.scope_settings.rgb_waveform = true;
+    r.render(&comp, &mut src, RenderOptions::default());
+    let c2 = r.read_scope_counts().unwrap();
+    assert_eq!(c2[(scopes::MAX_OFF + Channel::Luma as u32) as usize], n);
+    assert!(r.scope_view(nle_render::ScopeKind::Vectorscope).is_some());
+    r.set_scopes_enabled(false);
+    assert!(r.scope_view(nle_render::ScopeKind::Waveform).is_none());
 }

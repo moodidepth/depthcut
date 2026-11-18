@@ -12,6 +12,7 @@ use crate::cache::{LruCache, Weighted, VRAM_FRAME_CACHE_BUDGET};
 use crate::gpu::GpuContext;
 use crate::lut::CubeLut;
 use crate::pipelines::{Pipe, Pipelines, DISPLAY_FORMAT, WORKING_FORMAT};
+use crate::scopes::{self, ScopeKind, ScopeParams, ScopeSettings, ScopeTargets};
 use crate::text::{self, FontBook};
 use crate::transform::{layer_to_output, Affine};
 use bytemuck::{Pod, Zeroable};
@@ -405,6 +406,9 @@ pub struct Renderer {
     stats: RenderStats,
     /// Automatic preview proxy scale factor during fast J/K/L timeline shuttling (1.0 = full).
     pub shuttle_proxy_scale: f32,
+    /// Scope buffers while the scopes are shown ([`Self::set_scopes_enabled`]).
+    scopes: Option<ScopeTargets>,
+    pub scope_settings: ScopeSettings,
 }
 
 fn ceil8(x: u32) -> u32 {
@@ -481,6 +485,8 @@ impl Renderer {
             fonts: FontBook::system(),
             stats: RenderStats::default(),
             shuttle_proxy_scale: 1.0,
+            scopes: None,
+            scope_settings: ScopeSettings::default(),
             gpu,
         }
     }
@@ -553,6 +559,118 @@ impl Renderer {
     /// sRGB view of the final frame, for sampling by the UI (egui).
     pub fn display_view(&self) -> &wgpu::TextureView {
         &self.display_srgb
+    }
+
+    /// Compute video scopes with every [`Self::render`] (off by default:
+    /// they cost a few compute passes per frame).
+    pub fn set_scopes_enabled(&mut self, on: bool) {
+        match (on, self.scopes.is_some()) {
+            (true, false) => self.scopes = Some(ScopeTargets::new(&self.gpu.device)),
+            (false, true) => self.scopes = None,
+            _ => {}
+        }
+    }
+
+    pub fn scopes_enabled(&self) -> bool {
+        self.scopes.is_some()
+    }
+
+    /// sRGB view of a drawn scope (for egui), while the scopes are enabled.
+    pub fn scope_view(&self, kind: ScopeKind) -> Option<&wgpu::TextureView> {
+        self.scopes.as_ref().map(|s| &s.image(kind).srgb)
+    }
+
+    /// The raw scope counts of the last rendered frame (layout in
+    /// [`crate::scopes`]). Reads back ~1.8 MB and blocks: for tests and
+    /// diagnostics, not per-frame use.
+    pub fn read_scope_counts(&self) -> Option<Vec<u32>> {
+        let s = self.scopes.as_ref()?;
+        let device = &self.gpu.device;
+        let size = scopes::COUNT_LEN as u64 * 4;
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("rcp-scope-readback"),
+            size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("rcp-scope-read") });
+        enc.copy_buffer_to_buffer(&s.counts, 0, &readback, 0, size);
+        self.gpu.queue.submit(Some(enc.finish()));
+        let slice = readback.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        let _ = device.poll(wgpu::Maintain::Wait);
+        if !matches!(rx.recv(), Ok(Ok(()))) {
+            return None;
+        }
+        let data = bytemuck::cast_slice::<u8, u32>(&slice.get_mapped_range()).to_vec();
+        readback.unmap();
+        Some(data)
+    }
+
+    /// RGBA8 pixels of a drawn scope (display-encoded, row-major, `kind.size()`).
+    /// Blocks: for tests and diagnostics.
+    pub fn read_scope_image(&self, kind: ScopeKind) -> Option<Vec<u8>> {
+        let s = self.scopes.as_ref()?;
+        let (w, h) = kind.size();
+        // every scope width × 4 bytes is a multiple of 256, so rows need no padding
+        debug_assert_eq!(w * 4 % wgpu::COPY_BYTES_PER_ROW_ALIGNMENT, 0);
+        let device = &self.gpu.device;
+        let size = (w * h * 4) as u64;
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("rcp-scope-image-readback"),
+            size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("rcp-scope-image-read") });
+        enc.copy_texture_to_buffer(
+            s.image(kind).storage_tex.as_image_copy(),
+            wgpu::TexelCopyBufferInfo { buffer: &readback, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) } },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        self.gpu.queue.submit(Some(enc.finish()));
+        let slice = readback.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        let _ = device.poll(wgpu::Maintain::Wait);
+        if !matches!(rx.recv(), Ok(Ok(()))) {
+            return None;
+        }
+        let data = slice.get_mapped_range().to_vec();
+        readback.unmap();
+        Some(data)
+    }
+
+    /// Bin `src` (the final working frame) and draw every scope.
+    fn run_scopes(&self, enc: &mut wgpu::CommandEncoder, src: &Target) {
+        let Some(s) = &self.scopes else { return };
+        let params = ScopeParams::new(&self.scope_settings, src.width, src.height);
+        let u = self.uniform(&params);
+        let any = &s.images[0].storage;
+        fn entries<'a>(src: &'a wgpu::TextureView, u: &'a wgpu::Buffer, counts: &'a wgpu::Buffer, dst: &'a wgpu::TextureView) -> [wgpu::BindGroupEntry<'a>; 4] {
+            [entry(0, tv(src)), entry(1, u.as_entire_binding()), entry(2, counts.as_entire_binding()), entry(3, tv(dst))]
+        }
+        let bind = |dst| entries(&src.view, &u, &s.counts, dst);
+        self.dispatch(enc, &self.p.scope_clear, &bind(any), scopes::COUNT_LEN.div_ceil(256), 1);
+        let (sw, sh) = (src.width.div_ceil(params.stride), src.height.div_ceil(params.stride));
+        self.dispatch(enc, &self.p.scope_accumulate, &bind(any), ceil8(sw), ceil8(sh));
+        self.dispatch(enc, &self.p.scope_hist_max, &bind(any), 1, 1);
+        for (kind, pipe) in [
+            (ScopeKind::Waveform, &self.p.scope_waveform),
+            (ScopeKind::Parade, &self.p.scope_parade),
+            (ScopeKind::Vectorscope, &self.p.scope_vector),
+            (ScopeKind::Histogram, &self.p.scope_histogram),
+        ] {
+            let img = s.image(kind);
+            let (w, h) = kind.size();
+            self.dispatch(enc, pipe, &bind(&img.storage), ceil8(w), ceil8(h));
+            enc.copy_texture_to_texture(img.storage_tex.as_image_copy(), img.srgb_tex.as_image_copy(), wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 });
+        }
     }
 
     /// The sRGB display texture (what [`Self::display_view`] views).
@@ -1452,6 +1570,7 @@ impl Renderer {
             self.render_comp(&mut enc, comp, src, opts, 0)
         };
         let (w, h) = (self.width, self.height);
+        self.run_scopes(&mut enc, &out);
         self.dispatch(&mut enc, &self.p.to_display, &[entry(0, tv(&out.view)), entry(1, tv(&self.display_storage))], ceil8(w), ceil8(h));
         enc.copy_texture_to_texture(
             self.display.as_image_copy(),

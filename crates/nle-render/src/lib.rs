@@ -12,6 +12,7 @@
 //!   interpolation (`motion.wgsl` + `frameblend.wgsl`)
 //! * titles / lower thirds with shadow and pill background (`title.wgsl`)
 //! * NV12 packing for hardware export (`nv12.wgsl`, [`export`])
+//! * video scopes: waveform, RGB parade, vectorscope, histogram (`scopes.wgsl`, [`scopes`])
 //!
 //! Decoded frames live in VRAM in an LRU cache capped at 2.5 GB
 //! ([`cache::VRAM_FRAME_CACHE_BUDGET`]) for the 8 GB Arc A750.
@@ -23,6 +24,7 @@ pub mod lut;
 pub mod pipelines;
 pub mod reframe;
 pub mod renderer;
+pub mod scopes;
 pub mod text;
 pub mod transform;
 
@@ -30,4 +32,5 @@ pub use cache::VRAM_FRAME_CACHE_BUDGET;
 pub use export::{ExportPreset, ExportSettings, GamingDeliveryPreset};
 pub use gpu::GpuContext;
 pub use renderer::{FrameKey, FrameSource, RenderOptions, Renderer};
+pub use scopes::{ScopeKind, ScopeSettings};
 pub use wgpu;

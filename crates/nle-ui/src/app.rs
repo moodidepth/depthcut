@@ -88,6 +88,10 @@ pub struct ViewerState {
     /// Preview monitoring volume, 0..150 % (never affects export).
     pub volume_pct: f32,
     pub muted: bool,
+    /// Video scopes drawer under the viewer (Ctrl+7).
+    pub scopes: bool,
+    /// Which scopes the drawer shows, in [`nle_render::ScopeKind::ALL`] order.
+    pub scope_kinds: [bool; 4],
 }
 
 /// Zoom-punch settings shared by the inspector button and the Z / Shift+Z hotkeys.
@@ -128,6 +132,8 @@ pub struct Preview {
     render_state: egui_wgpu::RenderState,
     last: Option<PreviewKey>,
     pending_uploads: bool,
+    /// egui ids of the drawn scopes while the scopes drawer is open.
+    pub scope_textures: Option<[egui::TextureId; 4]>,
 }
 
 /// FrameSource used by the interactive preview: frames are uploaded from the
@@ -260,7 +266,7 @@ impl App {
                 let (w, h) = preview_size(&project, false);
                 let renderer = Renderer::new(gpu.clone(), w, h);
                 let texture = rs.renderer.write().register_native_texture(&rs.device, renderer.display_view(), nle_render::wgpu::FilterMode::Linear);
-                (Some(Preview { renderer, texture, render_state: rs.clone(), last: None, pending_uploads: true }), Some(gpu), label)
+                (Some(Preview { renderer, texture, render_state: rs.clone(), last: None, pending_uploads: true, scope_textures: None }), Some(gpu), label)
             }
             None => (None, None, "no wgpu device".to_string()),
         };
@@ -287,7 +293,18 @@ impl App {
             frames: FrameServer::new(64, Some(1080)),
             audio: AudioEngine::new(),
             use_proxy: false,
-            viewer: ViewerState { zoom: None, safe_zones: false, wipe: None, gizmo: viewer::Gizmo::Transform, half_res: false, editing_tc: None, volume_pct: 100.0, muted: false },
+            viewer: ViewerState {
+                zoom: None,
+                safe_zones: false,
+                wipe: None,
+                gizmo: viewer::Gizmo::Transform,
+                half_res: false,
+                editing_tc: None,
+                volume_pct: 100.0,
+                muted: false,
+                scopes: false,
+                scope_kinds: [true, false, true, false],
+            },
             punch: PunchState::default(),
             inspector_tab: InspectorTab::Video,
             browser: BrowserState { search: String::new(), tag: None, selected: None, favorites_only: false, thumb_size: 132.0, new_tag: String::new(), skim: None },
@@ -1385,6 +1402,36 @@ impl App {
         }
     }
 
+    /// Show or hide the video scopes. The renderer only computes them while
+    /// they are shown.
+    pub fn set_scopes(&mut self, on: bool) {
+        self.viewer.scopes = on;
+        let Some(p) = &mut self.preview else { return };
+        let rs = &p.render_state;
+        if let Some(ids) = p.scope_textures.take() {
+            let mut r = rs.renderer.write();
+            for id in ids {
+                r.free_texture(&id);
+            }
+        }
+        p.renderer.set_scopes_enabled(on);
+        if on {
+            let mut r = rs.renderer.write();
+            p.scope_textures = Some(nle_render::ScopeKind::ALL.map(|k| {
+                let view = p.renderer.scope_view(k).expect("scopes enabled");
+                r.register_native_texture(&rs.device, view, nle_render::wgpu::FilterMode::Linear)
+            }));
+        }
+        p.last = None;
+    }
+
+    /// Re-render the current frame (after a scope setting changed).
+    pub fn refresh_preview(&mut self) {
+        if let Some(p) = &mut self.preview {
+            p.last = None;
+        }
+    }
+
     pub fn toggle_proxy(&mut self, proxy: bool) {
         if self.use_proxy == proxy {
             return;
@@ -1730,6 +1777,7 @@ impl App {
             Action::ZoomIn => self.tl.zoom_by(1.5),
             Action::ZoomOut => self.tl.zoom_by(1.0 / 1.5),
             Action::ZoomToFit => self.tl.fit_pending = true,
+            Action::ToggleScopes => self.set_scopes(!self.viewer.scopes),
             Action::AutoCaptions => self.show_captions = !self.show_captions,
             Action::Import => self.import_dialog(),
             Action::ImportFcpxml => self.request_switch(ProjectSwitch::ImportFcpxml),
@@ -2077,6 +2125,11 @@ impl App {
                 if ui.button(self.menu_label("Zoom to Fit", Action::ZoomToFit)).clicked() {
                     self.tl.fit_pending = true;
                     ui.close_menu();
+                }
+                ui.separator();
+                let mut scopes = self.viewer.scopes;
+                if ui.checkbox(&mut scopes, self.menu_label("Video Scopes", Action::ToggleScopes)).changed() {
+                    self.set_scopes(scopes);
                 }
             });
             ui.menu_button("Help", |ui| {
