@@ -27,6 +27,7 @@ pub mod command;
 pub mod effects;
 pub mod eval;
 pub mod fcpxml;
+pub mod focus;
 pub mod ids;
 pub mod keyframe;
 pub mod keymap;

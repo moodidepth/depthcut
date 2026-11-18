@@ -490,3 +490,285 @@ fn gaming_reframe_916(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     textureStore(dst, vec2<i32>(id.xy), out);
 }
+
+// ----- Gaussian blur (RGBA, straight alpha) -----------------------------------
+//
+// Large radii run on a 2×2-box pyramid (`downsample`) so 25 taps stay dense;
+// the final vertical pass upsamples bilinearly straight into the full-size
+// target. Colour is weighted by alpha, so transparent pixels never bleed a
+// dark fringe into the blurred edge.
+
+@compute @workgroup_size(8, 8, 1)
+fn downsample(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (!inside(id)) {
+        return;
+    }
+    let uv = px_uv(id);
+    let t = 0.25 / vec2<f32>(textureDimensions(dst));
+    let s0 = textureSampleLevel(src, samp, uv + vec2<f32>(-t.x, -t.y), 0.0);
+    let s1 = textureSampleLevel(src, samp, uv + vec2<f32>(t.x, -t.y), 0.0);
+    let s2 = textureSampleLevel(src, samp, uv + vec2<f32>(-t.x, t.y), 0.0);
+    let s3 = textureSampleLevel(src, samp, uv + vec2<f32>(t.x, t.y), 0.0);
+    let a = s0.a + s1.a + s2.a + s3.a;
+    let rgb = s0.rgb * s0.a + s1.rgb * s1.a + s2.rgb * s2.a + s3.rgb * s3.a;
+    textureStore(dst, vec2<i32>(id.xy), vec4<f32>(rgb / max(a, 1e-5), a * 0.25));
+}
+
+// x.x = σ in source pixels (< 0.3 = pass through).
+fn gauss_rgba(id: vec3<u32>, dir: vec2<f32>) {
+    let uv = px_uv(id);
+    let sigma = u.x.x;
+    if (sigma < 0.3) {
+        textureStore(dst, vec2<i32>(id.xy), textureSampleLevel(src, samp, uv, 0.0));
+        return;
+    }
+    let step = sigma * 3.0 / 12.0;
+    let texel = dir / vec2<f32>(textureDimensions(src));
+    var rgb = vec3<f32>(0.0);
+    var a = 0.0;
+    var wsum = 0.0;
+    for (var i = -12; i <= 12; i = i + 1) {
+        let o = f32(i) * step;
+        let w = exp(-o * o / (2.0 * sigma * sigma));
+        let s = textureSampleLevel(src, samp, uv + texel * o, 0.0);
+        rgb = rgb + s.rgb * (s.a * w);
+        a = a + s.a * w;
+        wsum = wsum + w;
+    }
+    textureStore(dst, vec2<i32>(id.xy), vec4<f32>(rgb / max(a, 1e-5), a / wsum));
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn gblur_h(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (!inside(id)) {
+        return;
+    }
+    gauss_rgba(id, vec2<f32>(1.0, 0.0));
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn gblur_v(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (!inside(id)) {
+        return;
+    }
+    gauss_rgba(id, vec2<f32>(0.0, 1.0));
+}
+
+// ----- radial (spin) blur -------------------------------------------------------
+
+// a = (centre x, centre y (-0.5..0.5), angle°, samples)
+@compute @workgroup_size(8, 8, 1)
+fn radial_blur(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (!inside(id)) {
+        return;
+    }
+    let uv = px_uv(id);
+    let aspect = u.dims.x / max(u.dims.y, 1.0);
+    let c = vec2<f32>(0.5) + u.a.xy;
+    var p = uv - c;
+    p.x = p.x * aspect;
+    let n = max(u32(u.a.w), 2u);
+    let ang = radians(u.a.z);
+    var acc = vec4<f32>(0.0);
+    for (var i = 0u; i < n; i = i + 1u) {
+        let t = ((f32(i) + 0.5) / f32(n) - 0.5) * ang;
+        let cs = cos(t);
+        let sn = sin(t);
+        var q = vec2<f32>(cs * p.x - sn * p.y, sn * p.x + cs * p.y);
+        q.x = q.x / aspect;
+        acc = acc + textureSampleLevel(src, samp, c + q, 0.0);
+    }
+    textureStore(dst, vec2<i32>(id.xy), acc / f32(n));
+}
+
+// ----- vignette -----------------------------------------------------------------
+
+// a = (amount -1..1 (negative = white), size, feather, roundness 0 = frame ellipse / 1 = circle),
+// b = (centre x, centre y)
+@compute @workgroup_size(8, 8, 1)
+fn vignette(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (!inside(id)) {
+        return;
+    }
+    let base = textureLoad(src, vec2<i32>(id.xy), 0);
+    let aspect = u.dims.x / max(u.dims.y, 1.0);
+    var d = (px_uv(id) - (vec2<f32>(0.5) + u.b.xy)) * 2.0;
+    d.x = d.x * mix(1.0, aspect, clamp(u.a.w, 0.0, 1.0));
+    let r = length(d);
+    let m = smoothstep(u.a.y, u.a.y + max(u.a.z, 0.01), r);
+    let amt = clamp(u.a.x, -1.0, 1.0);
+    var rgb: vec3<f32>;
+    if (amt >= 0.0) {
+        rgb = base.rgb * (1.0 - amt * m);
+    } else {
+        rgb = mix(base.rgb, vec3<f32>(1.0), -amt * m);
+    }
+    textureStore(dst, vec2<i32>(id.xy), vec4<f32>(rgb, base.a));
+}
+
+// ----- sharpen (luma unsharp mask) -------------------------------------------
+
+fn tap(uv: vec2<f32>) -> vec3<f32> {
+    return textureSampleLevel(src, samp, uv, 0.0).rgb;
+}
+
+// a = (amount, radius px @1080p, threshold)
+@compute @workgroup_size(8, 8, 1)
+fn sharpen(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (!inside(id)) {
+        return;
+    }
+    let uv = px_uv(id);
+    let base = textureSampleLevel(src, samp, uv, 0.0);
+    let s = vec2<f32>(max(u.a.y * u.k, 0.5)) / max(u.dims, vec2<f32>(1.0));
+    let sx = vec2<f32>(s.x, 0.0);
+    let sy = vec2<f32>(0.0, s.y);
+    // 3×3 tent kernel (1 2 1 / 2 4 2 / 1 2 1) at the radius
+    let edges = tap(uv + sx) + tap(uv - sx) + tap(uv + sy) + tap(uv - sy);
+    let corners = tap(uv + s) + tap(uv - s) + tap(uv + sx - sy) + tap(uv - sx + sy);
+    let blur = (base.rgb * 4.0 + edges * 2.0 + corners) / 16.0;
+    // luma only, so edges do not pick up colour fringes
+    let d = dot(base.rgb - blur, LUMA);
+    let dd = sign(d) * max(abs(d) - u.a.z, 0.0);
+    let out = max(base.rgb + vec3<f32>(dd * u.a.x), vec3<f32>(0.0));
+    textureStore(dst, vec2<i32>(id.xy), vec4<f32>(out, base.a));
+}
+
+// ----- pixelate -----------------------------------------------------------------
+
+// a = (block px @1080p, shape 0 = square / 1 = dots)
+@compute @workgroup_size(8, 8, 1)
+fn pixelate(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (!inside(id)) {
+        return;
+    }
+    let b = max(u.a.x * u.k, 1.0);
+    let dims = max(u.dims, vec2<f32>(1.0));
+    let p = vec2<f32>(id.xy) + vec2<f32>(0.5);
+    let cc = (floor(p / b) + vec2<f32>(0.5)) * b;
+    // average a 4×4 grid inside the block so the mosaic does not shimmer
+    var rgb = vec3<f32>(0.0);
+    var a = 0.0;
+    for (var j = 0; j < 4; j = j + 1) {
+        for (var i = 0; i < 4; i = i + 1) {
+            let o = (vec2<f32>(f32(i), f32(j)) + vec2<f32>(0.5)) / 4.0 - vec2<f32>(0.5);
+            let s = textureSampleLevel(src, samp, (cc + o * b) / dims, 0.0);
+            rgb = rgb + s.rgb * s.a;
+            a = a + s.a;
+        }
+    }
+    var col = vec4<f32>(rgb / max(a, 1e-5), a / 16.0);
+    if (u.a.y > 0.5) {
+        let r = length(p - cc) / (0.5 * b);
+        let m = 1.0 - smoothstep(1.0 - 1.5 / b, 1.0, r);
+        col = vec4<f32>(col.rgb * m, col.a);
+    }
+    textureStore(dst, vec2<i32>(id.xy), col);
+}
+
+// ----- lens distortion ----------------------------------------------------------
+
+// a = (k1, k2, zoom, chromatic aberration), b = (centre x, centre y, edges 0 fit / 1 transparent / 2 mirror)
+fn lens_f(r2: f32) -> f32 {
+    return 1.0 + u.a.x * r2 + u.a.y * r2 * r2;
+}
+
+fn lens_uv(uv: vec2<f32>, scale: f32) -> vec2<f32> {
+    let aspect = u.dims.x / max(u.dims.y, 1.0);
+    let c = vec2<f32>(0.5) + u.b.xy;
+    var p = (uv - c) * 2.0;
+    p.x = p.x * aspect;
+    // r² = 1 at the frame corners
+    let r2 = dot(p, p) / (aspect * aspect + 1.0);
+    p = p * lens_f(r2) * scale / max(u.a.z, 0.01);
+    p.x = p.x / aspect;
+    return c + p * 0.5;
+}
+
+fn lens_sample(uv: vec2<f32>) -> vec4<f32> {
+    let mode = u32(u.b.z + 0.5);
+    if (mode == 2u) {
+        return textureSampleLevel(src, samp, mirror(uv), 0.0);
+    }
+    if (mode == 1u && (any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)))) {
+        return vec4<f32>(0.0);
+    }
+    return textureSampleLevel(src, samp, clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)), 0.0);
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn lens_distortion(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (!inside(id)) {
+        return;
+    }
+    let uv = px_uv(id);
+    let ca = max(u.a.w, 0.0) * 0.02;
+    var fit = 1.0;
+    if (u32(u.b.z + 0.5) == 0u) {
+        // pull the corners back inside the source (barrel distortion + red fringe)
+        fit = 1.0 / max(lens_f(1.0) * (1.0 + ca), 1.0);
+    }
+    let g = lens_sample(lens_uv(uv, fit));
+    var out = g;
+    if (ca > 0.0) {
+        out = vec4<f32>(lens_sample(lens_uv(uv, fit * (1.0 + ca))).r, g.g, lens_sample(lens_uv(uv, fit * (1.0 - ca))).b, g.a);
+    }
+    textureStore(dst, vec2<i32>(id.xy), out);
+}
+
+// ----- hue / saturation / lightness ---------------------------------------------
+
+// a = (hue°, saturation %, lightness %)
+@compute @workgroup_size(8, 8, 1)
+fn hue_sat_lightness(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (!inside(id)) {
+        return;
+    }
+    let base = textureLoad(src, vec2<i32>(id.xy), 0);
+    var c = base.rgb;
+    // hue: rotate around the grey axis (Rodrigues), which keeps greys grey
+    let h = radians(u.a.x);
+    let ax = vec3<f32>(0.57735027);
+    let cs = cos(h);
+    c = c * cs + cross(ax, c) * sin(h) + ax * dot(ax, c) * (1.0 - cs);
+    let l = dot(c, LUMA);
+    c = vec3<f32>(l) + (c - vec3<f32>(l)) * max(1.0 + u.a.y / 100.0, 0.0);
+    let lt = clamp(u.a.z / 100.0, -1.0, 1.0);
+    if (lt >= 0.0) {
+        c = mix(c, vec3<f32>(1.0), lt);
+    } else {
+        c = c * (1.0 + lt);
+    }
+    textureStore(dst, vec2<i32>(id.xy), vec4<f32>(max(c, vec3<f32>(0.0)), base.a));
+}
+
+// ----- levels -------------------------------------------------------------------
+
+// a = (input black, input white, gamma, output black), b = (output white, channel 0 RGB / 1 R / 2 G / 3 B).
+// The working space holds display-encoded values, so the points act on them
+// directly and match a display histogram.
+fn level(x: f32) -> f32 {
+    let t = max((x - u.a.x) / max(u.a.y - u.a.x, 1e-4), 0.0);
+    let g = pow(t, 1.0 / max(u.a.z, 0.01));
+    return max(u.a.w + g * (u.b.x - u.a.w), 0.0);
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn levels(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (!inside(id)) {
+        return;
+    }
+    let base = textureLoad(src, vec2<i32>(id.xy), 0);
+    let ch = u32(u.b.y + 0.5);
+    var c = base.rgb;
+    if (ch == 0u || ch == 1u) {
+        c.r = level(c.r);
+    }
+    if (ch == 0u || ch == 2u) {
+        c.g = level(c.g);
+    }
+    if (ch == 0u || ch == 3u) {
+        c.b = level(c.b);
+    }
+    textureStore(dst, vec2<i32>(id.xy), vec4<f32>(c, base.a));
+}

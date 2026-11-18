@@ -41,6 +41,22 @@ pub enum EffectKind {
     /// Stretch-free 9:16 gaming layouts (split stack / centre fit / full crop)
     /// with an aspect-locked killfeed PiP. Outputs a 9:16 layer.
     GamingReframe916,
+    /// Separable RGBA Gaussian blur with independent horizontal / vertical radius.
+    GaussianBlur,
+    /// Rotational (spin) blur around a centre point.
+    RadialBlur,
+    /// Elliptical darkening (or brightening) towards the frame edges.
+    Vignette,
+    /// Luma unsharp mask with a noise threshold.
+    Sharpen,
+    /// Mosaic blocks or halftone-style dots.
+    Pixelate,
+    /// Brown–Conrady barrel / pincushion lens model with lateral chromatic aberration.
+    LensDistortion,
+    /// Hue rotation, saturation and lightness.
+    HueSatLightness,
+    /// Input / output black & white points with gamma, per channel or RGB.
+    Levels,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -164,9 +180,44 @@ const CHROMA_KEY: &[ParamDef] = &[
     num("Edge Feather", 0.0, 1.0, 0.12, ""),
     num("Spill Suppression", 0.0, 1.0, 0.6, ""),
 ];
+const GAUSSIAN_BLUR: &[ParamDef] = &[num("Radius", 0.0, 200.0, 12.0, " px"), num("Horizontal", 0.0, 2.0, 1.0, "x"), num("Vertical", 0.0, 2.0, 1.0, "x")];
+const RADIAL_BLUR: &[ParamDef] =
+    &[num("Center X", -0.5, 0.5, 0.0, ""), num("Center Y", -0.5, 0.5, 0.0, ""), num("Angle", 0.0, 90.0, 8.0, "°"), int("Sample Count", 8.0, 64.0, 24.0)];
+const VIGNETTE: &[ParamDef] = &[
+    num("Amount", -1.0, 1.0, 0.5, ""),
+    num("Size", 0.0, 1.5, 0.75, ""),
+    num("Feather", 0.01, 1.0, 0.5, ""),
+    num("Roundness", 0.0, 1.0, 0.0, ""),
+    num("Center X", -0.5, 0.5, 0.0, ""),
+    num("Center Y", -0.5, 0.5, 0.0, ""),
+];
+const SHARPEN: &[ParamDef] = &[num("Amount", 0.0, 5.0, 1.0, ""), num("Radius", 0.5, 10.0, 1.5, " px"), num("Threshold", 0.0, 0.2, 0.0, "")];
+pub const PIXELATE_SHAPES: &[&str] = &["Square", "Dots"];
+const PIXELATE: &[ParamDef] = &[num("Block Size", 1.0, 200.0, 24.0, " px"), choice("Shape", PIXELATE_SHAPES, 0.0)];
+/// "Fit" scales the image so a barrel distortion never pulls the corners inside.
+pub const LENS_EDGE_OPTIONS: &[&str] = &["Fit", "Transparent", "Mirror"];
+const LENS_DISTORTION: &[ParamDef] = &[
+    num("Distortion", -1.0, 1.0, 0.2, ""),
+    num("Cubic", -1.0, 1.0, 0.0, ""),
+    num("Zoom", 0.5, 2.0, 1.0, "x"),
+    num("Chromatic Aberration", 0.0, 1.0, 0.0, ""),
+    num("Center X", -0.5, 0.5, 0.0, ""),
+    num("Center Y", -0.5, 0.5, 0.0, ""),
+    choice("Edges", LENS_EDGE_OPTIONS, 0.0),
+];
+const HUE_SAT_LIGHTNESS: &[ParamDef] = &[num("Hue", -180.0, 180.0, 0.0, "°"), num("Saturation", -100.0, 100.0, 0.0, "%"), num("Lightness", -100.0, 100.0, 0.0, "%")];
+pub const LEVELS_CHANNELS: &[&str] = &["RGB", "Red", "Green", "Blue"];
+const LEVELS: &[ParamDef] = &[
+    num("Input Black", 0.0, 1.0, 0.0, ""),
+    num("Input White", 0.0, 1.0, 1.0, ""),
+    num("Gamma", 0.1, 10.0, 1.0, ""),
+    num("Output Black", 0.0, 1.0, 0.0, ""),
+    num("Output White", 0.0, 1.0, 1.0, ""),
+    choice("Channel", LEVELS_CHANNELS, 0.0),
+];
 
 impl EffectKind {
-    pub const ALL: [EffectKind; 12] = [
+    pub const ALL: [EffectKind; 20] = [
         EffectKind::MotionBlur,
         EffectKind::Halation,
         EffectKind::CameraShake,
@@ -179,6 +230,14 @@ impl EffectKind {
         EffectKind::ImpactFlash,
         EffectKind::NeonOutline,
         EffectKind::GamingReframe916,
+        EffectKind::GaussianBlur,
+        EffectKind::RadialBlur,
+        EffectKind::Vignette,
+        EffectKind::Sharpen,
+        EffectKind::Pixelate,
+        EffectKind::LensDistortion,
+        EffectKind::HueSatLightness,
+        EffectKind::Levels,
     ];
 
     pub fn label(self) -> &'static str {
@@ -195,12 +254,25 @@ impl EffectKind {
             EffectKind::ImpactFlash => "Impact Flash / Scope",
             EffectKind::NeonOutline => "Neon / Saber Edge",
             EffectKind::GamingReframe916 => "Gaming 9:16 Reframe",
+            EffectKind::GaussianBlur => "Gaussian Blur",
+            EffectKind::RadialBlur => "Radial Blur",
+            EffectKind::Vignette => "Vignette",
+            EffectKind::Sharpen => "Sharpen",
+            EffectKind::Pixelate => "Pixelate",
+            EffectKind::LensDistortion => "Lens Distortion",
+            EffectKind::HueSatLightness => "Hue / Saturation / Lightness",
+            EffectKind::Levels => "Levels",
         }
     }
 
     pub fn category(self) -> &'static str {
         match self {
-            EffectKind::MotionBlur | EffectKind::DirectionalBlur | EffectKind::ZoomBlur => "Blur",
+            EffectKind::MotionBlur | EffectKind::DirectionalBlur | EffectKind::ZoomBlur | EffectKind::GaussianBlur | EffectKind::RadialBlur => "Blur",
+            EffectKind::Sharpen => "Sharpen",
+            EffectKind::Vignette => "Light",
+            EffectKind::Pixelate => "Stylize",
+            EffectKind::LensDistortion => "Distort",
+            EffectKind::HueSatLightness | EffectKind::Levels => "Color",
             EffectKind::Halation | EffectKind::FilmGrain => "Film Look",
             EffectKind::Glow => "Light",
             EffectKind::CameraShake => "Motion",
@@ -225,6 +297,14 @@ impl EffectKind {
             EffectKind::ImpactFlash => IMPACT_FLASH,
             EffectKind::NeonOutline => NEON_OUTLINE,
             EffectKind::GamingReframe916 => GAMING_REFRAME_916,
+            EffectKind::GaussianBlur => GAUSSIAN_BLUR,
+            EffectKind::RadialBlur => RADIAL_BLUR,
+            EffectKind::Vignette => VIGNETTE,
+            EffectKind::Sharpen => SHARPEN,
+            EffectKind::Pixelate => PIXELATE,
+            EffectKind::LensDistortion => LENS_DISTORTION,
+            EffectKind::HueSatLightness => HUE_SAT_LIGHTNESS,
+            EffectKind::Levels => LEVELS,
         }
     }
 
@@ -319,6 +399,14 @@ impl ResolvedEffect {
             EffectKind::ImpactFlash => v[0] <= 0.0 && v[5] <= 0.0 && v[6] <= 1.0,
             EffectKind::NeonOutline => v[0] <= 0.0,
             EffectKind::GamingReframe916 => false,
+            EffectKind::GaussianBlur => v[0] <= 0.0 || (v[1] <= 0.0 && v[2] <= 0.0),
+            EffectKind::RadialBlur => v[2] <= 0.0,
+            EffectKind::Vignette => v[0] == 0.0,
+            EffectKind::Sharpen => v[0] <= 0.0,
+            EffectKind::Pixelate => v[0] <= 1.0 && v[1] < 0.5,
+            EffectKind::LensDistortion => v[0] == 0.0 && v[1] == 0.0 && v[2] == 1.0 && v[3] <= 0.0,
+            EffectKind::HueSatLightness => v[0] == 0.0 && v[1] == 0.0 && v[2] == 0.0,
+            EffectKind::Levels => v[0] <= 0.0 && v[1] >= 1.0 && v[2] == 1.0 && v[3] <= 0.0 && v[4] >= 1.0,
         }
     }
 }
@@ -370,6 +458,31 @@ mod tests {
         e.normalize();
         assert_eq!(e.params.len(), EffectKind::CameraShake.params().len());
         assert_eq!(e.params[5].value, 7.0);
+    }
+
+    #[test]
+    fn new_effects_defaults_are_active_and_neutral_settings_are_noops() {
+        use EffectKind::*;
+        // defaults must do something visible, otherwise "+ Add Effect" looks broken
+        for k in [GaussianBlur, RadialBlur, Vignette, Sharpen, Pixelate, LensDistortion] {
+            assert!(!Effect::new(k).resolve(Time::ZERO).is_noop(), "{k:?}");
+        }
+        // colour tools default to neutral (a no-op) until a slider moves
+        for k in [HueSatLightness, Levels] {
+            assert!(Effect::new(k).resolve(Time::ZERO).is_noop(), "{k:?}");
+        }
+        let mut e = Effect::new(GaussianBlur);
+        e.params[0].value = 0.0;
+        assert!(e.resolve(Time::ZERO).is_noop());
+        let mut e = Effect::new(Levels);
+        e.params[2].value = 1.8;
+        assert!(!e.resolve(Time::ZERO).is_noop());
+        let mut e = Effect::new(Vignette);
+        e.params[0].value = -0.4; // white vignette is still an effect
+        assert!(!e.resolve(Time::ZERO).is_noop());
+        assert_eq!(EffectKind::ALL.len(), 20);
+        let mut seen = std::collections::HashSet::new();
+        assert!(EffectKind::ALL.iter().all(|k| seen.insert(k.label())), "labels are unique");
     }
 
     #[test]

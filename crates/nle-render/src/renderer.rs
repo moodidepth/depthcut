@@ -347,6 +347,16 @@ pub fn fbm1(x: f32, seed: f32, octaves: u32) -> f32 {
 }
 
 /// Camera-shake transform at time `t`: (dx, dy) in uv, rotation (radians), zoom.
+/// Pyramid depth for a Gaussian of `sigma` output pixels: halve until σ ≤ 6
+/// (where 25 taps over ±3σ sample every ~1.5 px), at most 4 times.
+pub fn gaussian_levels(sigma: f32) -> u32 {
+    let mut n = 0;
+    while n < 4 && sigma / (1u32 << n) as f32 > 6.0 {
+        n += 1;
+    }
+    n
+}
+
 pub fn shake_transform(e: &ResolvedEffect, t: f32) -> [f32; 4] {
     let v = &e.values;
     let (scale, speed, rot, bias, impact, seed) = (v[0], v[1], v[2], v[3], v[4] > 0.5, v[5]);
@@ -862,7 +872,18 @@ impl Renderer {
             "impact_flash" => &self.p.fx_impact_flash,
             "neon_outline" => &self.p.fx_neon_outline,
             "reframe_916" => &self.p.fx_gaming_reframe_916,
-            _ => &self.p.fx_chroma_key,
+            "chroma" => &self.p.fx_chroma_key,
+            "downsample" => &self.p.fx_downsample,
+            "gblur_h" => &self.p.fx_gblur_h,
+            "gblur_v" => &self.p.fx_gblur_v,
+            "radial_blur" => &self.p.fx_radial_blur,
+            "vignette" => &self.p.fx_vignette,
+            "sharpen" => &self.p.fx_sharpen,
+            "pixelate" => &self.p.fx_pixelate,
+            "lens_distortion" => &self.p.fx_lens_distortion,
+            "hue_sat_lightness" => &self.p.fx_hue_sat_lightness,
+            "levels" => &self.p.fx_levels,
+            other => unreachable!("unknown effect pipeline {other}"),
         };
         self.dispatch(
             enc,
@@ -964,6 +985,34 @@ impl Renderer {
         out
     }
 
+    /// Gaussian blur with per-axis σ (output pixels). Radii past ~6 px run on
+    /// a 2×2-box pyramid (up to 1/16 size) so the 25-tap kernel stays dense;
+    /// the vertical pass upsamples straight into a full-size target.
+    fn gaussian_blur(&mut self, enc: &mut wgpu::CommandEncoder, src: &wgpu::TextureView, size: (u32, u32), base: FxU, sx: f32, sy: f32) -> Target {
+        let dev = self.gpu.device.clone();
+        let levels = gaussian_levels(sx.max(sy));
+        let mut chain: Vec<Target> = Vec::new();
+        for i in 1..=levels {
+            let (w, h) = ((size.0 >> i).max(1), (size.1 >> i).max(1));
+            let t = self.pool.get(&dev, w, h);
+            let from = chain.last().map_or(src, |p| &p.view);
+            self.fx(enc, "downsample", from, from, base, &t);
+            chain.push(t);
+        }
+        let scale = (1u32 << levels) as f32;
+        let small = chain.last().map_or(size, |t| (t.width, t.height));
+        let tmp = self.pool.get(&dev, small.0, small.1);
+        let from = chain.last().map_or(src, |p| &p.view);
+        self.fx(enc, "gblur_h", from, from, FxU { x: [sx / scale, 0.0, 0.0, 0.0], ..base }, &tmp);
+        let out = self.pool.get(&dev, size.0, size.1);
+        self.fx(enc, "gblur_v", &tmp.view, &tmp.view, FxU { x: [sy / scale, 0.0, 0.0, 0.0], ..base }, &out);
+        self.pool.put(tmp);
+        for t in chain {
+            self.pool.put(t);
+        }
+        out
+    }
+
     /// One effect from `src` into a new pooled target (`None` = skipped).
     #[allow(clippy::too_many_arguments)]
     fn apply_effect(
@@ -1006,6 +1055,14 @@ impl Renderer {
             EffectKind::ImpactFlash => simple(self, enc, "impact_flash", base),
             EffectKind::NeonOutline => simple(self, enc, "neon_outline", base),
             EffectKind::GamingReframe916 => self.reframe_916(enc, src, size, base, resize),
+            EffectKind::GaussianBlur => self.gaussian_blur(enc, src, size, base, v[0] * v[1] * k, v[0] * v[2] * k),
+            EffectKind::RadialBlur => simple(self, enc, "radial_blur", base),
+            EffectKind::Vignette => simple(self, enc, "vignette", base),
+            EffectKind::Sharpen => simple(self, enc, "sharpen", base),
+            EffectKind::Pixelate => simple(self, enc, "pixelate", base),
+            EffectKind::LensDistortion => simple(self, enc, "lens_distortion", base),
+            EffectKind::HueSatLightness => simple(self, enc, "hue_sat_lightness", base),
+            EffectKind::Levels => simple(self, enc, "levels", base),
         })
     }
 
@@ -1458,6 +1515,15 @@ impl Renderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gaussian_pyramid_depth() {
+        assert_eq!(gaussian_levels(0.0), 0);
+        assert_eq!(gaussian_levels(6.0), 0);
+        assert_eq!(gaussian_levels(6.5), 1);
+        assert_eq!(gaussian_levels(24.0), 2);
+        assert_eq!(gaussian_levels(10_000.0), 4);
+    }
 
     #[test]
     fn flow_sizes_and_pyramid() {

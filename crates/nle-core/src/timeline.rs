@@ -29,6 +29,10 @@ pub enum EditError {
     NotOnSpine,
     #[error("clip is not a compound clip")]
     NotCompound,
+    #[error("operation requires a connected clip")]
+    NotConnected,
+    #[error("clips overlap")]
+    Overlap,
     #[error("nothing to do")]
     Nothing,
 }
@@ -335,12 +339,14 @@ impl Timeline {
             return Err(EditError::ZeroDuration);
         }
         let at = at.max(Time::ZERO);
+        // the parent is the storyline clip under the connection point
+        let point = at + clip.anchor_clamped();
         let dur = self.duration();
-        if at >= dur {
-            let pad = (at - dur) + clip.duration;
+        if point >= dur {
+            let pad = (at + clip.duration) - dur;
             self.append(Clip::gap(pad))?;
         }
-        let (i, start) = self.spine_index_at(at).ok_or(EditError::OutOfRange)?;
+        let (i, start) = self.spine_index_at(point).ok_or(EditError::OutOfRange)?;
         clip.lane = lane;
         clip.offset = at - start;
         let id = clip.id;
@@ -564,6 +570,8 @@ impl Timeline {
         }
         if connected {
             c.offset += d;
+            // the connection point stays on the same frame of the clip
+            c.anchor = (c.anchor - d).max(Time::ZERO);
         }
         Ok(d)
     }
@@ -742,6 +750,255 @@ impl Timeline {
         Ok(doomed.len())
     }
 
+    /// A bare timeline around a nested spine (compound / storyline editing).
+    pub fn nested(format: VideoFormat, spine: Vec<Clip>) -> Timeline {
+        Timeline { name: String::new(), format, spine, snapping: false, markers: Vec::new(), captions: CaptionTrack::default() }
+    }
+
+    /// Group connected clips into a secondary storyline (FCP "Create
+    /// Storyline", Ctrl+G). The clips keep their timeline positions; holes
+    /// between them become gaps inside the storyline, which from then on
+    /// ripples independently of the primary storyline and can hold
+    /// transitions. The storyline sits on the lane of its earliest clip.
+    pub fn make_storyline(&mut self, ids: &[ClipId]) -> EditResult<ClipId> {
+        let mut uniq = ids.to_vec();
+        uniq.sort_unstable();
+        uniq.dedup();
+        let mut placed: Vec<(Time, ClipId)> = Vec::with_capacity(uniq.len());
+        for id in uniq {
+            match self.locate(id).ok_or(EditError::NotFound(id))? {
+                ClipLoc::Connected { .. } => placed.push((self.clip_start(id).unwrap_or_default(), id)),
+                ClipLoc::Spine(_) => return Err(EditError::NotConnected),
+            }
+        }
+        placed.sort();
+        let Some(&(base, first)) = placed.first() else {
+            return Err(EditError::Nothing);
+        };
+        for w in placed.windows(2) {
+            let len = self.clip(w[0].1).map_or(Time::ZERO, |c| c.duration);
+            if w[0].0 + len > w[1].0 {
+                return Err(EditError::Overlap);
+            }
+        }
+        let lane = self.clip(first).map_or(1, |c| c.lane);
+        let mut spine = Vec::with_capacity(placed.len());
+        let mut acc = base;
+        for (start, id) in placed {
+            let mut c = self.remove_ripple(id)?;
+            if start > acc {
+                spine.push(Clip::gap(start - acc));
+            }
+            c.lane = 0;
+            c.offset = Time::ZERO;
+            c.anchor = Time::ZERO;
+            acc = start + c.duration;
+            spine.push(c);
+        }
+        let comp = CompoundClip::storyline(spine);
+        let dur = comp.duration();
+        let mut sl = Clip::new("Storyline", ClipKind::Compound(Box::new(comp)), dur);
+        sl.media_duration = Some(dur);
+        let id = sl.id;
+        self.connect(sl, base, lane)?;
+        Ok(id)
+    }
+
+    /// Run `f` on the spine inside compound clip / storyline `id` (step-in
+    /// editing). The container's length follows its contents: a storyline
+    /// always matches them, a compound used in full grows or shrinks with
+    /// them, and a trimmed compound keeps its window (clamped to what is
+    /// left). An edit that empties a top-level storyline removes it.
+    pub fn edit_inside(&mut self, id: ClipId, f: impl FnOnce(&mut Timeline) -> EditResult<()>) -> EditResult<()> {
+        let format = self.format;
+        let min = self.frame();
+        let c = self.clip_mut(id).ok_or(EditError::NotFound(id))?;
+        let ClipKind::Compound(comp) = &mut c.kind else {
+            return Err(EditError::NotCompound);
+        };
+        let mut inner = Timeline::nested(format, std::mem::take(&mut comp.spine));
+        let result = f(&mut inner);
+        comp.spine = inner.spine;
+        result?;
+        let new_len = comp.duration();
+        let storyline = comp.storyline;
+        let old_len = c.media_duration.unwrap_or(new_len);
+        if !new_len.is_positive() {
+            return if storyline { self.remove_ripple(id).map(drop) } else { Err(EditError::ZeroDuration) };
+        }
+        c.media_duration = Some(new_len);
+        if storyline {
+            c.source_in = Time::ZERO;
+            c.duration = new_len;
+        } else if c.retime.is_none() {
+            if c.source_in.is_zero() && c.duration == old_len {
+                c.duration = new_len;
+            } else {
+                c.source_in = c.source_in.min(new_len - min).max(Time::ZERO);
+                c.duration = c.duration.min(new_len - c.source_in).max(min);
+            }
+        }
+        Ok(())
+    }
+
+    /// Take the connected clips of the given spine clips off the timeline,
+    /// with their absolute starts (see [`Timeline::reattach`]).
+    pub fn detach_connected(&mut self, ids: &[ClipId]) -> Vec<(Time, Clip)> {
+        let starts = self.spine_starts();
+        let mut out = Vec::new();
+        for (c, s) in self.spine.iter_mut().zip(starts) {
+            if ids.contains(&c.id) {
+                out.extend(c.connected.drain(..).map(|cc| (s + cc.offset, cc)));
+            }
+        }
+        out
+    }
+
+    /// Re-attach detached connected clips at their absolute starts, to
+    /// whichever storyline clip is now under each connection point.
+    pub fn reattach(&mut self, held: Vec<(Time, Clip)>) -> EditResult<()> {
+        for (at, c) in held {
+            let lane = c.lane;
+            self.connect(c, at, lane)?;
+        }
+        Ok(())
+    }
+
+    /// Position tool (P): move a clip to `at` without rippling anything.
+    /// Onto the primary storyline (lane 0) the clip leaves a gap behind and
+    /// overwrites whatever is under its new range, with a gap filling any
+    /// space past the end; every other clip keeps its timeline position.
+    /// Its own connected clips travel with it. Other lanes move as usual.
+    pub fn position_move(&mut self, id: ClipId, at: Time, lane: i32) -> EditResult<ClipId> {
+        let loc = self.locate(id).ok_or(EditError::NotFound(id))?;
+        if lane != 0 {
+            return self.move_clip(id, at, lane);
+        }
+        let mut clip = match loc {
+            ClipLoc::Spine(i) => {
+                let gap = Clip::gap(self.spine[i].duration);
+                std::mem::replace(&mut self.spine[i], gap)
+            }
+            ClipLoc::Connected { parent, index } => self.spine[parent].connected.remove(index),
+        };
+        let own = std::mem::take(&mut clip.connected);
+        clip.lane = 0;
+        clip.offset = Time::ZERO;
+        clip.anchor = Time::ZERO;
+        // hold everything else in place while the storyline changes under it
+        let all: Vec<ClipId> = self.spine.iter().map(|c| c.id).collect();
+        let held = self.detach_connected(&all);
+        self.overwrite(at.max(Time::ZERO), clip)?;
+        self.reattach(held)?;
+        if let Some(ClipLoc::Spine(i)) = self.locate(id) {
+            self.spine[i].connected = own;
+        }
+        self.merge_gaps();
+        Ok(id)
+    }
+
+    /// Merge neighbouring gaps (keeping clips connected to them in place)
+    /// and drop empty gaps at the end of the storyline.
+    pub fn merge_gaps(&mut self) {
+        let mut out: Vec<Clip> = Vec::with_capacity(self.spine.len());
+        for c in std::mem::take(&mut self.spine) {
+            match out.last_mut() {
+                Some(prev) if prev.is_gap() && c.is_gap() && prev.transition_out.is_none() && c.transition_in.is_none() => {
+                    let shift = prev.duration;
+                    prev.duration += c.duration;
+                    prev.connected.extend(c.connected.into_iter().map(|mut cc| {
+                        cc.offset += shift;
+                        cc
+                    }));
+                    prev.connected.sort_by_key(|cc| (cc.offset, cc.lane));
+                }
+                _ => out.push(c),
+            }
+        }
+        while out.last().is_some_and(|c| c.is_gap() && c.connected.is_empty() && c.transition_in.is_none()) {
+            out.pop();
+        }
+        self.spine = out;
+    }
+
+    /// Move a connected clip's connection point to absolute time `at`
+    /// (Ctrl+Alt+Click). The clip keeps its position but re-attaches to the
+    /// storyline clip under `at`, so later edits move it with that clip.
+    pub fn set_connection_point(&mut self, id: ClipId, at: Time) -> EditResult<ClipId> {
+        let ClipLoc::Connected { parent, index } = self.locate(id).ok_or(EditError::NotFound(id))? else {
+            return Err(EditError::NotConnected);
+        };
+        let start = self.spine_start(parent) + self.spine[parent].connected[index].offset;
+        let mut c = self.spine[parent].connected.remove(index);
+        c.anchor = (at - start).clamp(Time::ZERO, (c.duration - Time(1)).max(Time::ZERO));
+        let lane = c.lane;
+        self.connect(c, start, lane)
+    }
+
+    /// Add an alternate take to a clip's audition.
+    pub fn add_audition_take(&mut self, id: ClipId, mut take: Clip) -> EditResult<()> {
+        if !take.duration.is_positive() {
+            return Err(EditError::ZeroDuration);
+        }
+        let c = self.clip_mut(id).ok_or(EditError::NotFound(id))?;
+        take.connected.clear();
+        take.audition.clear();
+        take.lane = 0;
+        take.offset = Time::ZERO;
+        take.anchor = Time::ZERO;
+        take.transition_in = None;
+        take.transition_out = None;
+        c.audition.push(take);
+        Ok(())
+    }
+
+    /// Make the take `step` places along the active pick of an audition
+    /// (wrapping). Position, lane, connection point, connected clips and
+    /// transitions belong to the slot and stay; the active pick always
+    /// carries the slot's id. A take of another length ripples the storyline.
+    pub fn cycle_audition(&mut self, id: ClipId, step: i32) -> EditResult<()> {
+        let c = self.clip_mut(id).ok_or(EditError::NotFound(id))?;
+        if c.audition.is_empty() {
+            return Err(EditError::Nothing);
+        }
+        let mut takes = std::mem::take(&mut c.audition);
+        let mut current = c.clone();
+        current.connected.clear();
+        current.transition_in = None;
+        current.transition_out = None;
+        current.lane = 0;
+        current.offset = Time::ZERO;
+        current.anchor = Time::ZERO;
+        takes.insert(0, current);
+        let ids: Vec<ClipId> = takes.iter().map(|t| t.id).collect();
+        let n = takes.len() as i32;
+        takes.rotate_left(step.rem_euclid(n) as usize);
+        for (t, id) in takes.iter_mut().zip(ids) {
+            t.id = id;
+        }
+        let mut pick = takes.remove(0);
+        pick.lane = c.lane;
+        pick.offset = c.offset;
+        pick.anchor = c.anchor;
+        pick.enabled = c.enabled;
+        pick.connected = std::mem::take(&mut c.connected);
+        pick.transition_in = c.transition_in.take();
+        pick.transition_out = c.transition_out.take();
+        pick.audition = takes;
+        *c = pick;
+        Ok(())
+    }
+
+    /// Keep the active pick and discard the other takes.
+    pub fn finalize_audition(&mut self, id: ClipId) -> EditResult<()> {
+        let c = self.clip_mut(id).ok_or(EditError::NotFound(id))?;
+        if c.audition.is_empty() {
+            return Err(EditError::Nothing);
+        }
+        c.audition.clear();
+        Ok(())
+    }
+
     /// Collapse contiguous spine clips into a nested compound clip (Alt+G).
     pub fn make_compound(&mut self, ids: &[ClipId], name: &str) -> EditResult<ClipId> {
         let mut idx: Vec<usize> = ids
@@ -762,7 +1019,7 @@ impl Timeline {
         }
         let first = idx[0];
         let inner: Vec<Clip> = self.spine.drain(first..=idx[idx.len() - 1]).collect();
-        let comp = CompoundClip { spine: inner };
+        let comp = CompoundClip::new(inner);
         let dur = comp.duration();
         let mut clip = Clip::new(name, ClipKind::Compound(Box::new(comp)), dur);
         clip.media_duration = Some(dur);
@@ -782,7 +1039,7 @@ impl Timeline {
             return Err(EditError::NotCompound);
         };
         // Extract the used range of the inner storyline.
-        let mut inner = Timeline { name: String::new(), format: self.format, spine: comp.spine.clone(), snapping: false, markers: Vec::new(), captions: CaptionTrack::default() };
+        let mut inner = Timeline::nested(self.format, comp.spine.clone());
         let (lo, hi) = (clip.source_in, clip.source_in + clip.duration);
         if lo > Time::ZERO {
             let _ = inner.blade(lo);

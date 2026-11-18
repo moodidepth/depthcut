@@ -473,6 +473,8 @@ pub fn poll(app: &mut App, ctx: &egui::Context) {
             Ok(Ok(resp)) => {
                 app.copilot.pending_prompt = None;
                 // Validate + apply against the *live* timeline as one atomic undo step.
+                // The copilot edits the whole project, never a stepped-into compound.
+                app.step_out(usize::MAX);
                 let mut outcomes = resp.rejected.clone();
                 outcomes.extend(nle_ai::apply_copilot_actions(&resp.tool_calls, &mut app.project.timeline, &mut app.history, &mut app.playhead, &app.selection));
                 let applied = outcomes.iter().filter(|o| o.applied).count();

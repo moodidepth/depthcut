@@ -340,17 +340,17 @@ pub fn evaluate_spine(spine: &[Clip], t: Time) -> Composition {
         starts.push(acc);
         acc += c.duration;
     }
-    let mut below: Vec<(i32, Time, Layer)> = Vec::new();
-    let mut above: Vec<(i32, Time, Layer)> = Vec::new();
+    let mut below: Vec<(i32, Time, RenderNode)> = Vec::new();
+    let mut above: Vec<(i32, Time, RenderNode)> = Vec::new();
     for (i, p) in spine.iter().enumerate() {
         for cc in &p.connected {
             let s = starts[i] + cc.offset;
             if t >= s && t < s + cc.duration {
-                if let Some(l) = clip_layer(cc, t - s, cc.lane) {
+                if let Some(n) = connected_node(cc, t - s) {
                     if cc.lane < 0 {
-                        below.push((cc.lane, s, l));
+                        below.push((cc.lane, s, n));
                     } else {
-                        above.push((cc.lane, s, l));
+                        above.push((cc.lane, s, n));
                     }
                 }
             }
@@ -360,12 +360,49 @@ pub fn evaluate_spine(spine: &[Clip], t: Time) -> Composition {
     above.sort_by_key(|(lane, s, _)| (*lane, *s));
 
     let mut nodes = Vec::new();
-    nodes.extend(below.into_iter().map(|(_, _, l)| RenderNode::Layer(l)));
+    nodes.extend(below.into_iter().map(|(_, _, n)| n));
     if let Some(n) = spine_node(spine, &starts, t) {
         nodes.push(n);
     }
-    nodes.extend(above.into_iter().map(|(_, _, l)| RenderNode::Layer(l)));
+    nodes.extend(above.into_iter().map(|(_, _, n)| n));
     Composition::new(t, nodes)
+}
+
+/// A connected clip at clip-local time `local`. A secondary storyline
+/// renders inline: its current clip (or transition) composites straight
+/// onto the layers below, so its gaps are transparent and its transitions
+/// mix with what is underneath instead of with black.
+fn connected_node(cc: &Clip, local: Time) -> Option<RenderNode> {
+    let ClipKind::Compound(comp) = &cc.kind else {
+        return clip_layer(cc, local, cc.lane).map(RenderNode::Layer);
+    };
+    if !comp.storyline || cc.retime.is_some() {
+        return clip_layer(cc, local, cc.lane).map(RenderNode::Layer);
+    }
+    if !cc.enabled {
+        return None;
+    }
+    let mut starts = Vec::with_capacity(comp.spine.len());
+    let mut acc = Time::ZERO;
+    for c in &comp.spine {
+        starts.push(acc);
+        acc += c.duration;
+    }
+    let lane = cc.lane;
+    let relane = |l: &mut Layer| l.lane = lane;
+    let clear = || Some(Box::new(Layer::new(cc.id, lane, LayerSource::Solid([0.0; 4]))));
+    Some(match spine_node(&comp.spine, &starts, cc.source_in + local)? {
+        RenderNode::Layer(mut l) => {
+            relane(&mut l);
+            RenderNode::Layer(l)
+        }
+        RenderNode::Transition { mut from, mut to, transition } => {
+            from.as_deref_mut().map(relane);
+            to.as_deref_mut().map(relane);
+            // the open side of a storyline transition is what lies beneath
+            RenderNode::Transition { from: from.or_else(clear), to: to.or_else(clear), transition }
+        }
+    })
 }
 
 /// The timeline at `t` with the active caption on top (no previous frame).

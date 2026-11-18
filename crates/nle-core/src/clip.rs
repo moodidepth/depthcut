@@ -21,10 +21,37 @@ pub enum BlendMode {
     Screen,
     Overlay,
     Add,
+    // New modes are appended: `shader_index` is the discriminant, and the
+    // order above is shared with `composite.wgsl`.
+    SoftLight,
+    HardLight,
+    ColorDodge,
+    ColorBurn,
+    Darken,
+    Lighten,
+    Difference,
+    Exclusion,
+    /// Non-separable: the base's hue and saturation with the layer's luminance.
+    Luminosity,
 }
 
 impl BlendMode {
-    pub const ALL: [BlendMode; 5] = [BlendMode::Normal, BlendMode::Multiply, BlendMode::Screen, BlendMode::Overlay, BlendMode::Add];
+    pub const ALL: [BlendMode; 14] = [
+        BlendMode::Normal,
+        BlendMode::Multiply,
+        BlendMode::Screen,
+        BlendMode::Overlay,
+        BlendMode::Add,
+        BlendMode::SoftLight,
+        BlendMode::HardLight,
+        BlendMode::ColorDodge,
+        BlendMode::ColorBurn,
+        BlendMode::Darken,
+        BlendMode::Lighten,
+        BlendMode::Difference,
+        BlendMode::Exclusion,
+        BlendMode::Luminosity,
+    ];
     pub fn label(self) -> &'static str {
         match self {
             BlendMode::Normal => "Normal",
@@ -32,7 +59,22 @@ impl BlendMode {
             BlendMode::Screen => "Screen",
             BlendMode::Overlay => "Overlay",
             BlendMode::Add => "Add",
+            BlendMode::SoftLight => "Soft Light",
+            BlendMode::HardLight => "Hard Light",
+            BlendMode::ColorDodge => "Color Dodge",
+            BlendMode::ColorBurn => "Color Burn",
+            BlendMode::Darken => "Darken",
+            BlendMode::Lighten => "Lighten",
+            BlendMode::Difference => "Difference",
+            BlendMode::Exclusion => "Exclusion",
+            BlendMode::Luminosity => "Luminosity",
         }
+    }
+    /// Parse an FCPXML `adjust-blend` mode ("Soft Light", "softlight", "soft-light").
+    pub fn from_name(s: &str) -> Option<BlendMode> {
+        let norm = |x: &str| x.chars().filter(|c| c.is_ascii_alphanumeric()).map(|c| c.to_ascii_lowercase()).collect::<String>();
+        let want = norm(s);
+        BlendMode::ALL.into_iter().find(|b| norm(b.label()) == want)
     }
     pub fn shader_index(self) -> u32 {
         self as u32
@@ -755,9 +797,30 @@ impl Transition {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CompoundClip {
     pub spine: Vec<Clip>,
+    /// A secondary storyline (FCP `<spine lane=…>`): a connected container
+    /// whose clips ripple among themselves and render inline (transparent
+    /// where it has gaps). Its length always equals its contents'.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub storyline: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+fn time_is_zero(t: &Time) -> bool {
+    t.is_zero()
 }
 
 impl CompoundClip {
+    pub fn new(spine: Vec<Clip>) -> Self {
+        CompoundClip { spine, storyline: false }
+    }
+
+    pub fn storyline(spine: Vec<Clip>) -> Self {
+        CompoundClip { spine, storyline: true }
+    }
+
     pub fn duration(&self) -> Time {
         self.spine.iter().map(|c| c.duration).sum()
     }
@@ -843,6 +906,14 @@ pub struct Clip {
     /// next preset replaces the previous one instead of stacking on it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset_base: Option<Box<crate::presets::PresetBase>>,
+    /// Connected clips: the connection point, measured from the clip's own
+    /// start (Ctrl+Alt+Click moves it). The parent is the primary storyline
+    /// clip under `offset + anchor`.
+    #[serde(default, skip_serializing_if = "time_is_zero")]
+    pub anchor: Time,
+    /// Audition: the alternate takes. This clip is the active pick.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audition: Vec<Clip>,
 }
 
 impl Clip {
@@ -868,7 +939,24 @@ impl Clip {
             effects: Vec::new(),
             rate_conform: FrameBlendMode::FloorFrame,
             preset_base: None,
+            anchor: Time::ZERO,
+            audition: Vec::new(),
         }
+    }
+
+    /// A secondary storyline (connected container clip).
+    pub fn is_storyline(&self) -> bool {
+        matches!(&self.kind, ClipKind::Compound(c) if c.storyline)
+    }
+
+    /// The connection point, clamped inside the clip.
+    pub fn anchor_clamped(&self) -> Time {
+        self.anchor.clamp(Time::ZERO, (self.duration - Time(1)).max(Time::ZERO))
+    }
+
+    /// Where a connected clip attaches, relative to its parent's start.
+    pub fn connection_offset(&self) -> Time {
+        self.offset + self.anchor_clamped()
     }
 
     /// A clip covering the whole of `asset`.
@@ -1025,11 +1113,13 @@ impl Clip {
         left.for_each_param_mut(|p| p.keep_left(at));
         right.for_each_param_mut(|p| p.keep_right(at));
 
-        left.connected = self.connected.iter().filter(|c| c.offset < at).cloned().collect();
+        left.anchor = if self.anchor < at { self.anchor } else { Time::ZERO };
+        right.anchor = if self.anchor >= at { self.anchor - at } else { Time::ZERO };
+        left.connected = self.connected.iter().filter(|c| c.connection_offset() < at).cloned().collect();
         right.connected = self
             .connected
             .iter()
-            .filter(|c| c.offset >= at)
+            .filter(|c| c.connection_offset() >= at)
             .cloned()
             .map(|mut c| {
                 c.offset -= at;
@@ -1057,9 +1147,16 @@ impl Clip {
         }
     }
 
+    /// Highest id in this clip, its nested clips and their audition takes
+    /// (so freshly generated ids never collide after a load).
     pub fn max_id(&self) -> u64 {
-        let mut ids = Vec::new();
-        self.collect_ids(&mut ids);
-        ids.into_iter().map(|i| i.0).max().unwrap_or(0)
+        let own = self.id.0;
+        let connected = self.connected.iter().map(Clip::max_id).max().unwrap_or(0);
+        let takes = self.audition.iter().map(Clip::max_id).max().unwrap_or(0);
+        let inner = match &self.kind {
+            ClipKind::Compound(comp) => comp.spine.iter().map(Clip::max_id).max().unwrap_or(0),
+            _ => 0,
+        };
+        own.max(connected).max(takes).max(inner)
     }
 }

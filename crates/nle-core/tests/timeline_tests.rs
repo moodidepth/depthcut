@@ -697,6 +697,37 @@ fn fcpxml_round_trip() {
 }
 
 #[test]
+fn blend_modes_keep_shader_indices_and_round_trip_fcpxml() {
+    // the first five indices predate the new modes and are baked into old projects
+    let old = [BlendMode::Normal, BlendMode::Multiply, BlendMode::Screen, BlendMode::Overlay, BlendMode::Add];
+    for (i, b) in old.into_iter().enumerate() {
+        assert_eq!(b.shader_index(), i as u32);
+    }
+    assert_eq!(BlendMode::ALL.len(), 14);
+    for (i, b) in BlendMode::ALL.into_iter().enumerate() {
+        assert_eq!(b.shader_index(), i as u32, "{b:?} index matches composite.wgsl");
+        assert_eq!(BlendMode::from_name(b.label()), Some(b));
+        let json = serde_json::to_string(&b).unwrap();
+        assert_eq!(serde_json::from_str::<BlendMode>(&json).unwrap(), b);
+    }
+    assert_eq!(BlendMode::from_name("softlight"), Some(BlendMode::SoftLight));
+    assert_eq!(BlendMode::from_name("color-dodge"), Some(BlendMode::ColorDodge));
+    assert_eq!(BlendMode::from_name("Vivid Light"), None);
+
+    let mut p = Project::new("Blend");
+    let a = asset("Shot", 60);
+    p.add_asset(a.clone());
+    for b in BlendMode::ALL {
+        let mut c = Clip::from_asset_range(&a, Time::ZERO, secs(1));
+        c.video.blend_mode = b;
+        p.timeline.append(c).unwrap();
+    }
+    let q = fcpxml::import(&fcpxml::export(&p)).expect("re-import");
+    let modes: Vec<BlendMode> = q.timeline.spine.iter().map(|c| c.video.blend_mode).collect();
+    assert_eq!(modes, BlendMode::ALL.to_vec());
+}
+
+#[test]
 fn fcpxml_import_rejects_garbage() {
     assert!(fcpxml::import("<notfcp/>").is_err());
     assert!(fcpxml::import("<fcpxml><resources/></fcpxml>").is_err());

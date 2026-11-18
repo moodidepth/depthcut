@@ -52,6 +52,7 @@ actions! {
     TrimTool => "Trim Tool", "Tools";
     BladeTool => "Blade Tool", "Tools";
     RangeTool => "Range Tool", "Tools";
+    PositionTool => "Position Tool (no ripple)", "Tools";
     BladeSplit => "Split Clip at Playhead", "Edit";
     BladeAll => "Blade All at Playhead", "Edit";
     RippleTrimStart => "Ripple Trim Start to Playhead (Q)", "Edit";
@@ -68,6 +69,12 @@ actions! {
     AddAdjustmentClip => "Add Adjustment Clip", "Edit";
     NewCompound => "New Compound Clip", "Edit";
     BreakApart => "Break Apart Clip Items", "Edit";
+    NewStoryline => "Create Storyline", "Edit";
+    StepOut => "Back Out of Compound / Storyline", "Edit";
+    DuplicateAsAudition => "Duplicate as Audition", "Edit";
+    AuditionNext => "Audition: Next Pick", "Edit";
+    AuditionPrev => "Audition: Previous Pick", "Edit";
+    FinalizeAudition => "Finalize Audition", "Edit";
     HoldFrame => "Hold Frame", "Edit";
     AppendClip => "Append Browser Clip", "Edit";
     InsertClip => "Insert Browser Clip", "Edit";
@@ -90,6 +97,7 @@ actions! {
     ZoomIn => "Zoom In", "View";
     ZoomOut => "Zoom Out", "View";
     ZoomToFit => "Zoom to Fit", "View";
+    ToggleAudioLanes => "Show Audio Lanes by Role", "View";
     AutoCaptions => "Auto Captions", "Captions";
     Import => "Import Media", "File";
     ImportFcpxml => "Import FCPXML", "File";
@@ -399,6 +407,14 @@ impl ActionMap {
                 (SaveAs, &[B::ctrl_shift(K::S)]),
                 (Export, &[B::ctrl(K::E)]),
                 (ShowShortcuts, &[B::ctrl(K::Comma), B::key(K::F1)]),
+                (PositionTool, &[B::key(K::P)]),
+                (NewStoryline, &[B::ctrl(K::G)]),
+                (StepOut, &[B::ctrl(K::OpenBracket)]),
+                (DuplicateAsAudition, &[B::ctrl_shift(K::Y)]),
+                (AuditionNext, &[B::ctrl(K::ArrowRight)]),
+                (AuditionPrev, &[B::ctrl(K::ArrowLeft)]),
+                (FinalizeAudition, &[B::shift_alt(K::Y)]),
+                (ToggleAudioLanes, &[B::ctrl_shift(K::L)]),
             ],
         )
     }
@@ -473,6 +489,14 @@ impl ActionMap {
                 (SaveAs, &[B::ctrl_shift(K::S)]),
                 (Export, &[B::ctrl(K::E)]),
                 (ShowShortcuts, &[B::ctrl(K::Comma), B::key(K::F1)]),
+                (PositionTool, &[B::key(K::P)]),
+                (NewStoryline, &[B::ctrl(K::G)]),
+                (StepOut, &[B::ctrl(K::OpenBracket)]),
+                (DuplicateAsAudition, &[B::ctrl_shift(K::Y)]),
+                (AuditionNext, &[B::ctrl(K::ArrowRight)]),
+                (AuditionPrev, &[B::ctrl(K::ArrowLeft)]),
+                (FinalizeAudition, &[B::shift_alt(K::Y)]),
+                (ToggleAudioLanes, &[B::ctrl_shift(K::L)]),
             ],
         )
     }
@@ -547,6 +571,14 @@ impl ActionMap {
                 (SaveAs, &[B::ctrl_shift(K::S)]),
                 (Export, &[B::ctrl(K::E)]),
                 (ShowShortcuts, &[B::ctrl(K::Comma), B::key(K::F1)]),
+                (PositionTool, &[B::key(K::P)]),
+                (NewStoryline, &[B::ctrl(K::G)]),
+                (StepOut, &[B::ctrl(K::OpenBracket)]),
+                (DuplicateAsAudition, &[B::ctrl_shift(K::Y)]),
+                (AuditionNext, &[B::ctrl(K::ArrowRight)]),
+                (AuditionPrev, &[B::ctrl(K::ArrowLeft)]),
+                (FinalizeAudition, &[B::shift_alt(K::Y)]),
+                (ToggleAudioLanes, &[B::ctrl_shift(K::L)]),
             ],
         )
     }

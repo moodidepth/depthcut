@@ -75,7 +75,20 @@ and tells you where the log is. Please attach it to bug reports.
 
 - **Magnetic timeline.** Ripple editing, connected clips, compound clips, gaps,
   adjustment clips, blade/trim/slip/slide, markers, snapping, skimming, and
-  unlimited undo with 30-second crash-safe autosave.
+  unlimited undo with 30-second crash-safe autosave. Also:
+  - **Secondary storylines** (`Ctrl+G`): connected clips grouped into a
+    storyline that ripples on its own and can hold transitions.
+  - **Open in Timeline**: double-click a compound clip or storyline to edit
+    inside it. A breadcrumb (or `Ctrl+[`) steps back out, and every inner edit
+    is one normal undo step that resizes the container.
+  - **Position tool** (`P`): moves clips without rippling and leaves gaps.
+  - Hold **`` ` ``** (backtick) while moving, trimming or deleting a storyline
+    clip to leave its connected clips where they are.
+  - **`Ctrl+Alt`+click** a connected clip to move its connection point.
+  - **Auditions**: several takes in one slot, cycled with `Ctrl+←/→` and
+    finalized with `Shift+Alt+Y`.
+  - **Audio lanes by role** (`Ctrl+Shift+L`): audio clips below the storyline
+    are grouped into collapsible Dialogue / Music / Effects bands.
 - **Montage tools.**
   - **Zoom Punch** (`Z`) and **Hard Zoom Punch** (`Shift+Z`) at the playhead.
   - **16 built-in CS2 / Valorant presets**: RSMB-style motion blur, AWP/Operator
@@ -87,9 +100,10 @@ and tells you where the log is. Please attach it to bug reports.
   the inspector. Bézier easing; an animation lane (`Ctrl+V`) and a retime editor
   (`Ctrl+R`) with speed ramps, reverse, hold frames, frame blending and optical
   flow.
-- **GPU effects and colour.** 16 effects (blurs, glow, grain, chromatic
-  aberration, chroma key…), colour wheels, `.cube` LUTs, 7 transitions, titles.
-  Everything is rendered in WGSL compute shaders.
+- **GPU effects and colour.** 20 effects (five blurs, glow, vignette, sharpen,
+  grain, lens distortion, chroma key, hue/sat/lightness, levels…), 14 blend
+  modes, colour wheels, `.cube` LUTs, 7 transitions, titles. Everything is
+  rendered in WGSL compute shaders.
 - **Audio.** EQ, Vocal Clarity, −14 LUFS normalize, and **look-ahead
   auto-ducking**: music ducks *before* the voice starts. Preview and export
   sound identical.
@@ -136,6 +150,7 @@ presets: **Argon Montage** (the default, below), **Final Cut Pro** and
 | **T** | Trim Tool | Tools |
 | **Ctrl+Shift+B** | Blade Tool | Tools |
 | **R** | Range Tool | Tools |
+| **P** | Position Tool (no ripple) | Tools |
 | **C / Ctrl+B / B** | Split Clip at Playhead | Edit |
 | **Shift+B** | Blade All at Playhead | Edit |
 | **Q** | Ripple Trim Start to Playhead (Q) | Edit |
@@ -152,6 +167,12 @@ presets: **Argon Montage** (the default, below), **Final Cut Pro** and
 | **Alt+A** | Add Adjustment Clip | Edit |
 | **Alt+C** | New Compound Clip | Edit |
 | **Shift+Alt+C** | Break Apart Clip Items | Edit |
+| **Ctrl+G** | Create Storyline from selected connected clips | Edit |
+| **Ctrl+[** | Back Out of Compound / Storyline | Edit |
+| **Ctrl+Shift+Y** | Duplicate as Audition | Edit |
+| **Ctrl+→** | Next Audition Pick | Edit |
+| **Ctrl+←** | Previous Audition Pick | Edit |
+| **Shift+Alt+Y** | Finalize Audition | Edit |
 | **Shift+H** | Hold Frame | Edit |
 | **E** | Append Browser Clip | Edit |
 | **Alt+W** | Insert Browser Clip | Edit |
@@ -174,6 +195,7 @@ presets: **Argon Montage** (the default, below), **Final Cut Pro** and
 | **Ctrl+= / Ctrl++** | Zoom In | View |
 | **Ctrl+-** | Zoom Out | View |
 | **Ctrl+0** | Zoom to Fit | View |
+| **Ctrl+Shift+L** | Show Audio Lanes by Role | View |
 | **Ctrl+Shift+C** | Auto Captions | Captions |
 | **Ctrl+I** | Import Media | File |
 | **Ctrl+Shift+I** | Import FCPXML | File |
@@ -188,7 +210,11 @@ Mouse:
 - Click the ruler to move the playhead; drag it to scrub.
 - Double-click a browser clip to append it.
 - Drag browser clips onto the storyline to insert them, or above/below it to connect them.
-- Right-click a clip for the clip menu (transitions, retime, compound, lift…).
+- Right-click a clip for the clip menu (transitions, retime, compound, storyline, audition, lift…).
+- Double-click a compound clip or storyline to open it in the timeline. Use the breadcrumb above the timeline to step back out.
+- Hold `` ` `` (backtick) while dragging or deleting to keep connected clips in place.
+- `Ctrl+Alt`+click a connected clip to move its connection point to the click.
+- Click a role band header (audio lanes mode) to collapse or expand it.
 - Drag keyframe diamonds in the animation lane to retime them.
 - Double-click a colour wheel to reset it.
 
@@ -218,13 +244,14 @@ There are no circular dependencies: `nle-core` ← `nle-media` ← `nle-render` 
 
 | Module | What it does |
 |---|---|
-| `timeline` | Magnetic Timeline: the primary storyline is an ordered `Vec<Clip>` with no stored positions, so every edit ripples automatically. Connected clips live inside their parent clip (offset + lane), and compound clips, gap clips and adjustment layers are supported. Operations: insert/append/overwrite/connect, ripple delete, replace with gap, blade/blade all, trim, slip, slide, move/lift, range delete and snapping. |
+| `timeline` | Magnetic Timeline: the primary storyline is an ordered `Vec<Clip>` with no stored positions, so every edit ripples automatically. Connected clips live inside their parent clip (offset + lane + connection point), and compound clips, secondary storylines (compound clips flagged `storyline`), auditions, gap clips and adjustment layers are supported. Operations: insert/append/overwrite/connect, ripple delete, replace with gap, blade/blade all, trim, slip, slide, move/lift, position (no ripple), range delete, hold-connections and snapping. Every operation also runs inside a nested container via `Command::in_path`. |
+| `focus` | Step-in editing ("Open in Timeline"): keeps the real timeline while a compound clip / storyline is shown, routes edits, undo and redo into it, and backs out when an undo removes the opened container. |
 | `keyframe` | Keyframe curves with cubic Bézier eases, solved by Newton iteration with a bisection fallback. Interpolations: linear, ease in/out, hold and custom Bézier. |
 | `speed` | Retiming built from segments, with smoothstep speed ramps integrated analytically. Covers 25/50/200/400 % presets, reverse, hold (freeze) frames, and frame blending / optical-flow modes. |
 | `command` | Undoable `Command`s and the `History` (`Vec<AppliedCommand>` undo and redo stacks). Before/after snapshots make redo exact, and continuous drags coalesce into a single undo step. |
 | `autosave` | Atomic 30-second autosave: write to a temp file, fsync, rename, and keep a `.prev` rotation. Crash recovery is offered at the next launch. |
 | `fcpxml` | FCPXML 1.10 import and export (assets, spine, connected clips, gaps, titles, compound clips, transitions, retiming, keyframes). |
-| `effects` | Modular, reorderable clip effect stack (16 GPU effects across Blur, Stylize, Distort, Keying and Color), plus Adjustment clips and Rate Conform quality modes. |
+| `effects` | Modular, reorderable clip effect stack (20 GPU effects across Blur, Sharpen, Light, Stylize, Distort, Color, Film Look, Motion, Keying, Glitch & Impact and Reframe), plus Adjustment clips and Rate Conform quality modes. |
 | `captions` | Word-timed subtitle/caption track, active-word highlighting (`CapCut` yellow/green/custom, pill, outline) and `.srt` import / export. |
 | `keymap` | Customizable keyboard & mouse (`Middle` / `Back` / `Forward`) bindings with `Final Cut Pro` and `DaVinci Resolve` presets and TOML persistence. |
 | `eval` | Resolves the timeline at a given instant into a render graph (layers, adjustment passes, effects, captions and transitions) plus audio spans. |
@@ -254,10 +281,10 @@ There are no circular dependencies: `nle-core` ← `nle-media` ← `nle-render` 
 
 All pixel work runs in WGSL compute shaders on the GPU:
 
-- NV12 / P010 → linear RGBA (BT.709, limited range).
+- NV12 / P010 → working RGBA16F (display-encoded BT.709 values, limited-range expanded). Exposure and white balance convert to linear light internally.
 - Exposure, white balance, lift/gamma/gain wheels, contrast, saturation and **trilinear `.cube` 3D LUTs**. A before/after split wipe is available for comparison.
-- Modular **effect stack** compute shaders (Gaussian/Radial/Directional/Zoom/Motion Blur, Glow, Vignette, Film Grain, Sharpen, Chromatic Aberration, Halation, Pixelate, Lens Distortion, Chroma Key, Hue/Sat/Lightness, Levels), including **Adjustment clip** passes over layers below.
-- Transform, crop, Ken Burns, opacity and blend modes (normal, multiply, screen, overlay, add).
+- Modular **effect stack** compute shaders for 20 effects: Gaussian/Radial/Directional/Zoom/Motion Blur, Glow, Vignette, Sharpen, Film Grain, Halation, Camera Shake, RGB Split Glitch, Impact Flash, Neon Outline, Pixelate, Lens Distortion (with chromatic aberration), Chroma Key, Hue/Sat/Lightness, Levels and 9:16 Gaming Reframe, including **Adjustment clip** passes over layers below.
+- Transform, crop, Ken Burns, opacity and 14 blend modes: Normal, Multiply, Screen, Overlay, Add, Soft Light, Hard Light, Color Dodge, Color Burn, Darken, Lighten, Difference, Exclusion and Luminosity. They round-trip through FCPXML `adjust-blend`.
 - **Transitions:** Cross Dissolve, Dip to Black, Dip to White, Whip Pan (directional blur), Slide, Push and Luma Wipe.
 - Slow-motion and retimed footage **Frame Blending** and **block-matching motion-compensated interpolation** (`Optical Flow`).
 - Titles, lower thirds, animated text presets, active-word highlighted captions, outline and pill backgrounds.
@@ -290,6 +317,7 @@ device, so the viewer displays the rendered frame without any copies.
   - Clips show filmstrips and RMS waveforms, with volume lines and fade ramps.
   - Transitions appear on edit points; retime and animation lanes render both clip and effect keyframes.
   - Skimming, snapping, `CC Captions` toggle, and right-click context menus (`Add Adjustment Clip`, `Insert Gap`, `Add Marker`, `Generate Captions…`, `Analyze Beats`).
+  - Secondary storylines (grey top bar), compound / audition badges, a breadcrumb while stepped into a compound clip, the Position tool, and an **Audio Lanes** toggle that groups audio below the storyline into collapsible role bands.
 - **Auto Captions & Whisper (`Ctrl+Shift+C`)** & **Keyboard/Mouse Shortcuts (`Ctrl+,` / `F1`):**
   - Download/delete Whisper GGML models, pick language or auto-detect, toggle Vulkan GPU acceleration, import/export `.srt`, edit segments (with automatic word retiming) and style captions live.
   - Customize all key and mouse (`Middle`, `Back`, `Forward`) bindings, switch between `Final Cut Pro` and `DaVinci Resolve` presets, view live conflict warnings, and autosave to `config/keybindings.toml`.
@@ -392,6 +420,7 @@ regenerate the license file with `python scripts/gen_third_party_notices.py`.
 `cargo test --workspace` runs these suites:
 
 - **`nle-core/tests/timeline_tests.rs`:** ripple insert (including in the middle of a clip), blade, gap behaviour, compound make/break, Bézier evaluation, speed-ramp mapping and its inverse, retime splits, undo/redo (exact restore and coalescing), autosave atomicity and recovery, and an FCPXML byte-stable round trip.
+- **`nle-core/tests/storyline_tests.rs`:** secondary storylines (create, independent ripple, transitions inside), nested `in_path` edits resizing their container, Position moves leaving gaps, hold-connections, connection points, auditions (add/cycle/finalize) and their `.rcp` / FCPXML round trips. The `focus` module's unit tests cover step-in editing, nested levels and undo across levels.
 - **`nle-media`:** thread budget, decode planning, ffprobe parsing, the frame queue, resampling, EQ response, ducking and the mixer.
 - **`nle-render`:**
   - every WGSL shader validated with naga;

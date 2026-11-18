@@ -4,7 +4,7 @@
 use nle_core::eval::{Composition, Layer, LayerSource, RenderNode, ResolvedColor, ResolvedTransition};
 use nle_core::{AssetId, ClipId, Direction, Effect, EffectKind, FrameBlendMode, FrameRate, Time, TitleAnim, TitleParams, TransitionKind};
 use nle_media::{PixelFormat, VideoFrame};
-use nle_render::pipelines::ALL_SHADERS;
+use nle_render::pipelines::{ALL_SHADERS, EFFECT_ENTRY_POINTS, SHADER_EFFECTS};
 use nle_render::{FrameSource, GpuContext, RenderOptions, Renderer};
 use std::collections::HashMap;
 
@@ -17,6 +17,14 @@ fn all_wgsl_shaders_validate() {
             .unwrap_or_else(|e| panic!("{name}.wgsl validation error: {e:?}"));
         assert!(module.entry_points.iter().any(|ep| ep.name == *entry), "{name}: missing entry point {entry}");
     }
+    // every effect pipeline the renderer builds must exist as a compute entry point
+    let fx = naga::front::wgsl::parse_str(SHADER_EFFECTS).unwrap();
+    for entry in EFFECT_ENTRY_POINTS {
+        let ep = fx.entry_points.iter().find(|ep| ep.name == *entry).unwrap_or_else(|| panic!("effects.wgsl: missing entry point {entry}"));
+        assert_eq!(ep.stage, naga::ShaderStage::Compute, "{entry}");
+        assert_eq!(ep.workgroup_size, [8, 8, 1], "{entry}: the renderer dispatches 8×8 groups");
+    }
+    assert_eq!(fx.entry_points.len(), EFFECT_ENTRY_POINTS.len(), "every effects.wgsl entry point is listed");
 }
 
 // ---------------------------------------------------------------------------
@@ -263,8 +271,24 @@ fn gpu_effects_and_animated_titles() {
         match kind {
             // 9:16 reframe: geometry covered by tests/reframe.rs (pillarboxed here)
             EffectKind::GamingReframe916 => {}
-            EffectKind::CameraShake | EffectKind::DirectionalBlur | EffectKind::ZoomBlur | EffectKind::MotionBlur | EffectKind::RgbSplitGlitch => {
+            EffectKind::CameraShake
+            | EffectKind::DirectionalBlur
+            | EffectKind::ZoomBlur
+            | EffectKind::MotionBlur
+            | EffectKind::RgbSplitGlitch
+            | EffectKind::GaussianBlur
+            | EffectKind::RadialBlur
+            | EffectKind::Sharpen
+            | EffectKind::Pixelate
+            | EffectKind::LensDistortion => {
                 assert!((y - base_y).abs() < 4.0, "{kind:?} keeps a flat frame nearly flat: {y}")
+            }
+            // neutral defaults
+            EffectKind::HueSatLightness | EffectKind::Levels => assert!((y - base_y).abs() < 2.0, "{kind:?} defaults are neutral: {y}"),
+            EffectKind::Vignette => {
+                let centre = mean_y(&out, W / 2 - 4, W / 2 + 4);
+                let edge = mean_y(&out, 0, 4);
+                assert!(edge < centre - 10.0 && (centre - base_y).abs() < 6.0, "vignette darkens the edges only: edge {edge}, centre {centre}");
             }
             EffectKind::Glow | EffectKind::Halation | EffectKind::ImpactFlash => assert!(y >= base_y - 2.0, "{kind:?} only adds light: {y}"),
             EffectKind::FilmGrain => assert!((y - base_y).abs() < 8.0, "grain is zero-mean: {y}"),
@@ -272,6 +296,37 @@ fn gpu_effects_and_animated_titles() {
             EffectKind::ChromaKey => {}
         }
     }
+
+    // colour tools move the flat frame the expected way
+    let with = |r: &mut Renderer, src: &mut Solid, kind: EffectKind, set: &[(usize, f64)]| {
+        let mut e = Effect::new(kind);
+        for (i, v) in set {
+            e.params[*i].value = *v;
+        }
+        let mut l = media_layer(a);
+        l.effects = vec![e.resolve(Time::ZERO)];
+        r.render_nv12(&Composition::new(Time::ZERO, vec![RenderNode::Layer(l)]), src, RenderOptions::default())
+    };
+    let y = mean_y(&with(&mut r, &mut src, EffectKind::HueSatLightness, &[(2, 50.0)]), 0, W);
+    assert!(y > base_y + 10.0, "lightness +50 % brightens: {y} vs {base_y}");
+    let y = mean_y(&with(&mut r, &mut src, EffectKind::HueSatLightness, &[(2, -50.0)]), 0, W);
+    assert!(y < base_y - 10.0, "lightness -50 % darkens: {y} vs {base_y}");
+    let out = with(&mut r, &mut src, EffectKind::HueSatLightness, &[(0, 120.0)]);
+    let cb = out[(W * H) as usize] as i32;
+    assert!((mean_y(&out, 0, W) - base_y).abs() < 3.0 && (cb - 128).abs() <= 3, "hue rotation keeps greys grey (y {}, cb {cb})", mean_y(&out, 0, W));
+    let y = mean_y(&with(&mut r, &mut src, EffectKind::Levels, &[(1, 0.8)]), 0, W);
+    assert!(y > base_y + 20.0, "input white 0.8 brightens: {y}");
+    let y = mean_y(&with(&mut r, &mut src, EffectKind::Levels, &[(4, 0.5)]), 0, W);
+    assert!(y < base_y - 20.0, "output white 0.5 darkens: {y}");
+    let y = mean_y(&with(&mut r, &mut src, EffectKind::Levels, &[(2, 2.0)]), 0, W);
+    assert!(y > base_y + 3.0, "gamma 2 lifts the mid-tones: {y}");
+    // a wide Gaussian (σ ≈ 12 px here → pyramid path) and a lens fit still cover the whole frame
+    let out = with(&mut r, &mut src, EffectKind::GaussianBlur, &[(0, 200.0), (1, 2.0)]);
+    assert!((mean_y(&out, 0, 2) - base_y).abs() < 4.0, "pyramid blur keeps edges opaque: {}", mean_y(&out, 0, 2));
+    let out = with(&mut r, &mut src, EffectKind::LensDistortion, &[(0, 1.0), (3, 1.0)]);
+    assert!(out[0] > 100, "lens 'Fit' keeps the corners filled: {}", out[0]);
+    let out = with(&mut r, &mut src, EffectKind::LensDistortion, &[(0, 1.0), (6, 1.0)]);
+    assert!(out[0] <= 20, "'Transparent' edges show black behind a barrel distortion: {}", out[0]);
 
     // chroma key: a green layer over the grey one disappears
     let g = AssetId(9102);
@@ -301,4 +356,128 @@ fn gpu_effects_and_animated_titles() {
         assert!(mean_y(&out, 0, W) > 20.0, "glitching title still renders");
     }
     assert!(r.stats().working_bytes > 0);
+}
+
+/// Grey frame halves: left = `.0`, right = `.1` (limited-range luma).
+struct Halves(u8, u8);
+
+impl FrameSource for Halves {
+    fn frame_rate(&self, _: AssetId) -> FrameRate {
+        FrameRate::FPS_30
+    }
+    fn frame(&mut self, _: AssetId, index: i64) -> Option<VideoFrame> {
+        let mut data: Vec<u8> = (0..H).flat_map(|_| (0..W).map(|x| if x < W / 2 { self.0 } else { self.1 })).collect();
+        data.extend(std::iter::repeat_n(128u8, (W * H / 2) as usize));
+        Some(VideoFrame::new(W, H, PixelFormat::Nv12, data, Time::from_frames(index, FrameRate::FPS_30)))
+    }
+}
+
+#[test]
+fn gpu_sharpen_blur_and_pixelate_on_an_edge() {
+    let Some(gpu) = gpu() else { return };
+    let mut r = Renderer::new(gpu, W, H);
+    let mut src = Halves(60, 180);
+    let run = |r: &mut Renderer, src: &mut Halves, kind: EffectKind, set: &[(usize, f64)]| {
+        let mut e = Effect::new(kind);
+        for (i, v) in set {
+            e.params[*i].value = *v;
+        }
+        let mut l = media_layer(AssetId(1));
+        l.effects = vec![e.resolve(Time::ZERO)];
+        r.render_nv12(&Composition::new(Time::ZERO, vec![RenderNode::Layer(l)]), src, RenderOptions::default())
+    };
+    let row = |o: &[u8]| o[(H / 2 * W) as usize..(H / 2 * W + W) as usize].to_vec();
+    let (l, rr) = ((W / 2 - 1) as usize, (W / 2) as usize);
+    // Levels at its defaults is skipped as a no-op: the untouched frame
+    let p = row(&run(&mut r, &mut src, EffectKind::Levels, &[]));
+    let (dl, dr) = (p[l], p[rr]);
+    assert!(dl < 70 && dr > 170, "hard edge {dl} → {dr}");
+    // unsharp mask overshoots on both sides of the edge
+    let s = row(&run(&mut r, &mut src, EffectKind::Sharpen, &[(0, 2.0), (1, 2.0)]));
+    eprintln!("sharpen {:?}", &s[28..36]);
+    assert!(s[l] < dl && s[rr] > dr, "sharpen overshoot {} / {}", s[l], s[rr]);
+    assert!((s[2] as i32 - p[2] as i32).abs() <= 2, "flat areas untouched");
+    // Gaussian softens the edge; horizontal 0 leaves a vertical edge hard
+    let g = row(&run(&mut r, &mut src, EffectKind::GaussianBlur, &[(0, 60.0)]));
+    eprintln!("blur {:?}", &g[28..36]);
+    assert!(g[l] > dl + 10 && g[rr] < dr - 10, "blurred edge {} / {}", g[l], g[rr]);
+    let g = row(&run(&mut r, &mut src, EffectKind::GaussianBlur, &[(0, 60.0), (1, 0.0)]));
+    assert!(g[l] < dl + 8 && g[rr] > dr - 8, "vertical-only blur keeps a vertical edge: {} / {}", g[l], g[rr]);
+    // the 200 px @1080p maximum is ~5.9 px blocks here: runs of equal pixels,
+    // and the block straddling the edge averages both sides
+    let px = row(&run(&mut r, &mut src, EffectKind::Pixelate, &[(0, 200.0)]));
+    eprintln!("pixelate {px:?}");
+    let changes = px.windows(2).filter(|w| w[0].abs_diff(w[1]) > 1).count();
+    assert!(changes <= 6, "pixelate makes runs of equal pixels ({changes} changes)");
+    assert!(px[30] > dl + 10 && px[30] < dr - 10, "the block over the edge mixes both sides: {}", px[30]);
+}
+
+/// Normalised working value of a neutral limited-range luma code, and back.
+fn norm(y: u8) -> f32 {
+    (y as f32 - 16.0) / 219.0
+}
+
+fn code(v: f32) -> f32 {
+    16.0 + 219.0 * v.clamp(0.0, 1.0)
+}
+
+/// CPU reference of each blend mode on a grey value (W3C separable formulas).
+fn blend_ref(mode: nle_core::BlendMode, b: f32, l: f32) -> f32 {
+    use nle_core::BlendMode::*;
+    let hard = |b: f32, l: f32| if l < 0.5 { 2.0 * b * l } else { 1.0 - 2.0 * (1.0 - b) * (1.0 - l) };
+    match mode {
+        Normal | Luminosity => l,
+        Multiply => b * l,
+        Screen => 1.0 - (1.0 - b) * (1.0 - l),
+        Overlay => hard(l, b),
+        Add => b + l,
+        SoftLight => {
+            if l <= 0.5 {
+                b - (1.0 - 2.0 * l) * b * (1.0 - b)
+            } else {
+                let d = if b <= 0.25 { ((16.0 * b - 12.0) * b + 4.0) * b } else { b.sqrt() };
+                b + (2.0 * l - 1.0) * (d - b)
+            }
+        }
+        HardLight => hard(b, l),
+        ColorDodge => {
+            if l >= 1.0 {
+                1.0
+            } else {
+                (b / (1.0 - l)).min(1.0)
+            }
+        }
+        ColorBurn => {
+            if l <= 0.0 {
+                0.0
+            } else {
+                1.0 - ((1.0 - b) / l).min(1.0)
+            }
+        }
+        Darken => b.min(l),
+        Lighten => b.max(l),
+        Difference => (b - l).abs(),
+        Exclusion => b + l - 2.0 * b * l,
+    }
+}
+
+#[test]
+fn gpu_every_blend_mode_matches_the_reference() {
+    let Some(gpu) = gpu() else { return };
+    let mut r = Renderer::new(gpu, W, H);
+    // two base / layer pairs so the dark and light branches are both exercised
+    // (fresh asset ids per pair: the renderer caches decoded frames by asset)
+    for (i, (yb, yl)) in [(120u8, 180u8), (180, 60)].into_iter().enumerate() {
+        let (bg, fg) = (AssetId(9201 + 2 * i as u64), AssetId(9202 + 2 * i as u64));
+        let mut src = Solid(HashMap::from([(bg, (yb, 128, 128)), (fg, (yl, 128, 128))]));
+        for mode in nle_core::BlendMode::ALL {
+            let mut top = Layer::new(ClipId(2), 1, LayerSource::Media { asset: fg, source_time: Time::ZERO, speed: 1.0, blend: FrameBlendMode::FloorFrame });
+            top.video.blend = mode;
+            let comp = Composition::new(Time::ZERO, vec![RenderNode::Layer(media_layer(bg)), RenderNode::Layer(top)]);
+            let y = mean_y(&r.render_nv12(&comp, &mut src, RenderOptions::default()), 0, W);
+            let want = code(blend_ref(mode, norm(yb), norm(yl)));
+            eprintln!("{mode:?} ({yb},{yl}): {y:.1} want {want:.1}");
+            assert!((y - want).abs() <= 2.0, "{mode:?} base {yb} layer {yl}: got {y}, want {want}");
+        }
+    }
 }

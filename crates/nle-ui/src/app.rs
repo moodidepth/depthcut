@@ -10,6 +10,7 @@ use eframe::egui;
 use eframe::egui_wgpu;
 use nle_core::autosave::Autosaver;
 use nle_core::eval::{self, Composition, Layer, LayerSource, RenderNode};
+use nle_core::focus::Focus;
 use nle_core::keymap::{Action, ActionMap, KeyBinding, KeyCode};
 use nle_core::{
     AssetId, Clip, ClipId, ClipKind, Command, Effect, EffectKind, FrameBlendMode, History, Marker, MarkerKind, Project, Retime, RetimeSegment, Time, TitleParams, Transition,
@@ -30,16 +31,19 @@ use std::time::{Duration, Instant};
 pub enum Tool {
     Select,
     Trim,
+    /// Non-magnetic placement: moving leaves a gap and overwrites at the target.
+    Position,
     Blade,
     Range,
 }
 
 impl Tool {
-    pub const ALL: [Tool; 4] = [Tool::Select, Tool::Trim, Tool::Blade, Tool::Range];
+    pub const ALL: [Tool; 5] = [Tool::Select, Tool::Trim, Tool::Position, Tool::Blade, Tool::Range];
     pub fn label(self) -> &'static str {
         match self {
             Tool::Select => "Select (A)",
             Tool::Trim => "Trim (T)",
+            Tool::Position => "Position (P): move without ripple, leaving gaps",
             Tool::Blade => "Blade (B)",
             Tool::Range => "Range (R)",
         }
@@ -48,6 +52,7 @@ impl Tool {
         match self {
             Tool::Select => "⬉",
             Tool::Trim => "⇹",
+            Tool::Position => "⇄",
             Tool::Blade => "✂",
             Tool::Range => "⬚",
         }
@@ -153,6 +158,12 @@ pub struct App {
     pub previous_crash: Option<PreviousCrash>,
     pub selection: Vec<ClipId>,
     pub playhead: Time,
+    /// Compound clips / storylines stepped into (double-click). While any
+    /// are open, `project.timeline` shows the innermost one's contents and
+    /// [`App::exec`] routes every edit into it on the real timeline.
+    pub focus: Focus,
+    /// ` (grave) is held: edits leave connected clips where they are.
+    pub hold_connections: bool,
     pub skimmer: Option<Time>,
     pub skimming: bool,
     pub playback: Playback,
@@ -263,6 +274,8 @@ impl App {
             previous_crash: diagnostics::take_previous_crash(),
             selection: Vec::new(),
             playhead: Time::ZERO,
+            focus: Focus::default(),
+            hold_connections: false,
             skimmer: None,
             skimming: true,
             playback: Playback { playing: false, speed: 0.0 },
@@ -316,6 +329,7 @@ impl App {
     // ----- project lifecycle -------------------------------------------------
 
     pub fn after_project_loaded(&mut self) {
+        self.focus.reset();
         self.library.reset();
         self.audio_sources.clear();
         self.audio_revision = u64::MAX;
@@ -447,7 +461,13 @@ impl App {
     /// (continuous drags become one undo step).
     pub fn exec_key(&mut self, cmd: Command, key: Option<u64>) -> bool {
         let label = cmd.label();
-        match self.history.execute_coalesced(&mut self.project.timeline, cmd, key) {
+        if !self.focus.is_empty() && matches!(cmd, Command::SetMarkers { .. } | Command::SetCaptions { .. } | Command::SyncClipsToBeats { .. }) {
+            self.status(format!("{label}: markers and captions belong to the project timeline \u{2014} step out of the compound first"));
+            return false;
+        }
+        let result = self.focus.execute(&mut self.project.timeline, &mut self.history, cmd, key);
+        self.after_focus_edit();
+        match result {
             Ok(()) => {
                 self.prune_selection();
                 true
@@ -461,7 +481,8 @@ impl App {
 
     pub fn undo(&mut self) {
         let label = self.history.undo_label();
-        if self.history.undo(&mut self.project.timeline) {
+        if self.focus.undo(&mut self.project.timeline, &mut self.history) {
+            self.after_focus_edit();
             self.status(format!("Undo {}", label.unwrap_or("")));
             self.prune_selection();
         }
@@ -469,9 +490,69 @@ impl App {
 
     pub fn redo(&mut self) {
         let label = self.history.redo_label();
-        if self.history.redo(&mut self.project.timeline) {
+        if self.focus.redo(&mut self.project.timeline, &mut self.history) {
+            self.after_focus_edit();
             self.status(format!("Redo {}", label.unwrap_or("")));
             self.prune_selection();
+        }
+    }
+
+    // ----- step-in editing (compound clips and secondary storylines) ---------
+
+    /// The project as saved and exported: with the real timeline even while
+    /// stepped into a container.
+    pub fn full_project(&self) -> std::borrow::Cow<'_, Project> {
+        if self.focus.is_empty() {
+            return std::borrow::Cow::Borrowed(&self.project);
+        }
+        let mut p = self.project.clone();
+        p.timeline = self.focus.root(&self.project.timeline).clone();
+        std::borrow::Cow::Owned(p)
+    }
+
+    /// Name of the project's real timeline (the breadcrumb root).
+    pub fn root_timeline_name(&self) -> &str {
+        &self.focus.root(&self.project.timeline).name
+    }
+
+    /// Open a compound clip or storyline in the timeline (double-click).
+    pub fn step_into(&mut self, id: ClipId) {
+        match self.focus.step_into(&mut self.project.timeline, id, self.playhead) {
+            Ok(inner) => {
+                self.after_focus_change();
+                self.playhead = inner;
+            }
+            Err(_) => self.status("Only compound clips and storylines open in the timeline"),
+        }
+    }
+
+    /// Step back out `levels` containers (breadcrumb, Ctrl+[).
+    pub fn step_out(&mut self, levels: usize) {
+        if let Some(playhead) = self.focus.step_out(&mut self.project.timeline, levels) {
+            self.after_focus_change();
+            self.playhead = playhead;
+        }
+    }
+
+    /// An edit or undo removed a container that was open: back out of it.
+    fn after_focus_edit(&mut self) {
+        if let Some(playhead) = self.focus.take_restored_playhead() {
+            self.after_focus_change();
+            self.playhead = playhead;
+            self.status("The opened compound clip no longer exists \u{2014} stepped out");
+        }
+    }
+
+    fn after_focus_change(&mut self) {
+        self.stop();
+        self.selection.clear();
+        self.tl.range = None;
+        self.tl.selected_key = None;
+        self.tl.fit_pending = true;
+        // the shown timeline changed without a history revision
+        self.audio_revision = u64::MAX;
+        if let Some(p) = &mut self.preview {
+            p.last = None;
         }
     }
 
@@ -958,7 +1039,15 @@ impl App {
         let ids = std::mem::take(&mut self.selection);
         let key = coalesce_key();
         for id in ids {
-            let cmd = if leave_gap && nle_core::command::is_spine(&self.project.timeline, id) { Command::DeleteWithGap { id } } else { Command::DeleteRipple { id } };
+            let spine = nle_core::command::is_spine(&self.project.timeline, id);
+            let cmd = if leave_gap && spine {
+                Command::DeleteWithGap { id }
+            } else if self.hold_connections && spine {
+                // ` held: the deleted clip's connected clips stay on the timeline
+                Command::HoldConnections { ids: vec![id], cmd: Box::new(Command::DeleteRipple { id }) }
+            } else {
+                Command::DeleteRipple { id }
+            };
             self.exec_key(cmd, Some(key));
         }
         self.history.seal();
@@ -1055,6 +1144,71 @@ impl App {
         if let Some(id) = self.selection.first().copied() {
             self.exec(Command::BreakApart { id });
             self.selection.clear();
+        }
+    }
+
+    /// Group the selected connected clips into a secondary storyline.
+    pub fn make_storyline(&mut self) {
+        let tl = &self.project.timeline;
+        let ids: Vec<ClipId> = self.selection.iter().copied().filter(|id| tl.clip(*id).is_some() && !nle_core::command::is_spine(tl, *id)).collect();
+        if ids.is_empty() {
+            self.status("Select connected clips to create a storyline");
+            return;
+        }
+        if self.exec(Command::MakeStoryline { ids }) {
+            self.selection.clear();
+        }
+    }
+
+    /// Add a copy of the selected clip as an alternate audition take
+    /// (e.g. to try different effects), keeping the current pick.
+    pub fn duplicate_as_audition(&mut self) {
+        let Some(id) = self.target_clip() else {
+            self.status("Select a clip to duplicate as an audition");
+            return;
+        };
+        let Some(c) = self.project.timeline.clip(id) else { return };
+        if c.is_gap() || c.is_storyline() {
+            self.status("Gaps and storylines cannot be auditioned");
+            return;
+        }
+        let mut take = c.clone();
+        take.id = ClipId::new();
+        if self.exec(Command::AddAuditionTake { id, take: Box::new(take) }) {
+            self.status("Added to audition \u{2014} Ctrl+\u{2192} / Ctrl+\u{2190} cycles the takes");
+        }
+    }
+
+    /// Add the browser's selected clip as an alternate take of `id`.
+    pub fn add_browser_clip_to_audition(&mut self, id: ClipId) {
+        let Some(a) = self.browser.selected.and_then(|a| self.project.asset(a)).cloned() else {
+            self.status("Select a clip in the browser first");
+            return;
+        };
+        if self.exec(Command::AddAuditionTake { id, take: Box::new(Clip::from_asset(&a)) }) {
+            self.status(format!("Added {} to the audition", a.name));
+        }
+    }
+
+    pub fn cycle_audition(&mut self, step: i32) {
+        let tl = &self.project.timeline;
+        let target = self.selection.iter().copied().find(|id| tl.clip(*id).is_some_and(|c| !c.audition.is_empty())).or_else(|| self.target_clip());
+        match target {
+            Some(id) if tl.clip(id).is_some_and(|c| !c.audition.is_empty()) => {
+                if self.exec(Command::CycleAudition { id, step }) {
+                    if let Some(c) = self.project.timeline.clip(id) {
+                        let n = c.audition.len() + 1;
+                        self.status(format!("Audition pick: {} ({n} takes)", c.name));
+                    }
+                }
+            }
+            _ => self.status("No audition selected (Ctrl+Shift+Y duplicates a clip as one)"),
+        }
+    }
+
+    pub fn finalize_audition(&mut self) {
+        if let Some(id) = self.target_clip() {
+            self.exec(Command::FinalizeAudition { id });
         }
     }
 
@@ -1399,7 +1553,8 @@ impl App {
             _ => rfd::FileDialog::new().add_filter("Rust Cut Pro project", &["rcp"]).set_file_name(format!("{}.rcp", self.project.name)).save_file(),
         };
         let Some(path) = path else { return };
-        match self.project.save(&path) {
+        let result = self.full_project().save(&path);
+        match result {
             Ok(()) => {
                 self.project_path = Some(path.clone());
                 self.mark_saved();
@@ -1432,7 +1587,7 @@ impl App {
         let Some(path) = rfd::FileDialog::new().add_filter("Final Cut Pro XML", &["fcpxml"]).set_file_name(format!("{}.fcpxml", self.project.name)).save_file() else {
             return;
         };
-        let xml = nle_core::fcpxml::export(&self.project);
+        let xml = nle_core::fcpxml::export(&self.full_project());
         match nle_core::autosave::write_atomic(&path, xml.as_bytes()) {
             Ok(()) => self.status(format!("Exported {}", path.display())),
             Err(e) => self.status(format!("FCPXML export failed: {e}")),
@@ -1498,6 +1653,7 @@ impl App {
             Action::TrimTool => self.tool = Tool::Trim,
             Action::BladeTool => self.tool = Tool::Blade,
             Action::RangeTool => self.tool = Tool::Range,
+            Action::PositionTool => self.tool = Tool::Position,
             Action::BladeSplit => self.blade_at_playhead(false),
             Action::BladeAll => self.blade_at_playhead(true),
             Action::RippleTrimStart => self.ripple_trim_playhead(true),
@@ -1523,6 +1679,13 @@ impl App {
             Action::AddAdjustmentClip => self.add_adjustment_clip(),
             Action::NewCompound => self.make_compound(),
             Action::BreakApart => self.break_apart(),
+            Action::NewStoryline => self.make_storyline(),
+            Action::StepOut => self.step_out(1),
+            Action::DuplicateAsAudition => self.duplicate_as_audition(),
+            Action::AuditionNext => self.cycle_audition(1),
+            Action::AuditionPrev => self.cycle_audition(-1),
+            Action::FinalizeAudition => self.finalize_audition(),
+            Action::ToggleAudioLanes => self.tl.audio_lanes = !self.tl.audio_lanes,
             Action::HoldFrame => self.freeze_frame(),
             Action::AppendClip => {
                 if let Some(asset) = self.browser.selected {
@@ -1579,6 +1742,7 @@ impl App {
     }
 
     fn handle_keys(&mut self, ctx: &egui::Context) {
+        self.hold_connections = !ctx.wants_keyboard_input() && ctx.input(|i| i.key_down(egui::Key::Backtick));
         let ctrl_v = self.ctrl_v_pressed(ctx);
         if self.shortcuts_ui.recording.is_some() || ctx.wants_keyboard_input() {
             return;
@@ -1772,6 +1936,32 @@ impl App {
                     self.break_apart();
                     ui.close_menu();
                 }
+                if ui.button(self.menu_label("Create Storyline", Action::NewStoryline)).clicked() {
+                    self.make_storyline();
+                    ui.close_menu();
+                }
+                if ui.add_enabled(!self.focus.is_empty(), egui::Button::new(self.menu_label("Back Out of Compound", Action::StepOut))).clicked() {
+                    self.step_out(1);
+                    ui.close_menu();
+                }
+                ui.menu_button("Audition", |ui| {
+                    if ui.button(self.menu_label("Duplicate as Audition", Action::DuplicateAsAudition)).clicked() {
+                        self.duplicate_as_audition();
+                        ui.close_menu();
+                    }
+                    if ui.button(self.menu_label("Next Pick", Action::AuditionNext)).clicked() {
+                        self.cycle_audition(1);
+                        ui.close_menu();
+                    }
+                    if ui.button(self.menu_label("Previous Pick", Action::AuditionPrev)).clicked() {
+                        self.cycle_audition(-1);
+                        ui.close_menu();
+                    }
+                    if ui.button(self.menu_label("Finalize Audition", Action::FinalizeAudition)).clicked() {
+                        self.finalize_audition();
+                        ui.close_menu();
+                    }
+                });
                 if ui.button("Lift from Storyline").clicked() {
                     if let Some(id) = self.selection.first().copied() {
                         self.exec(Command::LiftToLane { id, lane: 1 });
@@ -2229,7 +2419,9 @@ impl eframe::App for App {
             .show(ctx, |ui| inspector::show(self, ui));
         egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::BG).inner_margin(egui::Margin::same(6))).show(ctx, |ui| viewer::show(self, ui));
 
-        self.export.show(ctx, &self.project, self.gpu.as_ref(), &self.library.audio);
+        // the movie export always renders the whole project, also while stepped into a compound
+        let full = (!self.focus.is_empty() && (self.export.open || self.export.running())).then(|| self.full_project().into_owned());
+        self.export.show(ctx, full.as_ref().unwrap_or(&self.project), self.gpu.as_ref(), &self.library.audio);
         captions_ui::show(self, ctx);
         self.discord.show_dialog(ctx);
         shortcuts_ui::show(self, ctx);
@@ -2251,8 +2443,9 @@ impl eframe::App for App {
         }
         self.sync_discord();
 
-        if self.recovery.is_none() && self.is_edited() {
-            if let Err(e) = self.autosaver.tick(&self.project) {
+        if self.recovery.is_none() && self.is_edited() && self.autosaver.is_due() {
+            let full = self.full_project().into_owned();
+            if let Err(e) = self.autosaver.tick(&full) {
                 self.status(format!("Autosave failed: {e}"));
             }
         }
@@ -2288,7 +2481,8 @@ impl Drop for App {
             return;
         }
         if self.is_edited() {
-            let _ = self.autosaver.save_if_changed(&self.project, Instant::now());
+            let full = self.full_project().into_owned();
+            let _ = self.autosaver.save_if_changed(&full, Instant::now());
         } else {
             self.autosaver.discard();
         }

@@ -71,6 +71,12 @@ impl Autosaver {
 
     /// Call frequently (e.g. once per UI frame). Saves when the interval
     /// has elapsed *and* the project changed. Returns `true` if it saved.
+    /// True when the next [`Autosaver::tick`] would save (the interval has
+    /// passed), so callers can skip building the project snapshot.
+    pub fn is_due(&self) -> bool {
+        self.last_save.is_none_or(|last| last.elapsed() >= self.interval)
+    }
+
     pub fn tick(&mut self, project: &Project) -> io::Result<bool> {
         self.tick_at(project, Instant::now())
     }

@@ -367,7 +367,44 @@ fn transition_el(tr: &Transition, offset: Time) -> Element {
 }
 
 /// Returns (element, start attribute used for child offsets).
+/// `<md>` key carrying a connected clip's connection point (FCPXML has no
+/// attribute for it; FCP ignores unknown metadata keys).
+const CONNECTION_POINT_MD: &str = "com.rustcut.connectionPoint";
+
+/// An audition: the active pick first, then the alternates.
+fn audition_el(c: &Clip, offset: Time, fmt: &VideoFormat, ctx: &mut ExportCtx) -> Element {
+    let mut au = Element::new("audition");
+    if c.lane != 0 {
+        au = au.set("lane", c.lane.to_string());
+    }
+    au = au.set("offset", ts(offset));
+    let mut active = c.clone();
+    active.audition.clear();
+    active.lane = 0;
+    au.push(clip_el(&active, offset, fmt, ctx));
+    for alt in &c.audition {
+        let mut a = alt.clone();
+        a.lane = 0;
+        a.anchor = Time::ZERO;
+        a.connected.clear();
+        a.audition.clear();
+        au.push(clip_el(&a, offset, fmt, ctx));
+    }
+    au
+}
+
+/// A secondary storyline: `<spine lane=… offset=…>` whose clips continue
+/// in the parent clip's time from `offset`.
+fn storyline_el(c: &Clip, comp: &CompoundClip, offset: Time, fmt: &VideoFormat, ctx: &mut ExportCtx) -> Element {
+    let mut sp = spine_el_at(&comp.spine, offset, fmt, ctx);
+    sp.attrs = vec![("lane".into(), c.lane.to_string()), ("offset".into(), ts(offset)), ("name".into(), c.name.clone())];
+    sp
+}
+
 fn clip_el(c: &Clip, offset: Time, fmt: &VideoFormat, ctx: &mut ExportCtx) -> Element {
+    if !c.audition.is_empty() {
+        return audition_el(c, offset, fmt, ctx);
+    }
     let (mut el, start) = match &c.kind {
         ClipKind::Asset { asset } => {
             let r = ctx.asset_ref(*asset);
@@ -478,15 +515,25 @@ fn clip_el(c: &Clip, offset: Time, fmt: &VideoFormat, ctx: &mut ExportCtx) -> El
         el.push(b);
     }
     for cc in &c.connected {
-        let child = clip_el(cc, start + cc.offset, fmt, ctx);
+        let child = match &cc.kind {
+            ClipKind::Compound(comp) if comp.storyline && cc.audition.is_empty() => storyline_el(cc, comp, start + cc.offset, fmt, ctx),
+            _ => clip_el(cc, start + cc.offset, fmt, ctx),
+        };
         el.push(child);
+    }
+    if c.lane != 0 && !c.anchor.is_zero() {
+        el.push(Element::new("metadata").with_child(Element::new("md").set("key", CONNECTION_POINT_MD).set("value", ts(c.anchor))));
     }
     el
 }
 
 fn spine_el(spine: &[Clip], fmt: &VideoFormat, ctx: &mut ExportCtx) -> Element {
+    spine_el_at(spine, Time::ZERO, fmt, ctx)
+}
+
+fn spine_el_at(spine: &[Clip], base: Time, fmt: &VideoFormat, ctx: &mut ExportCtx) -> Element {
     let mut sp = Element::new("spine");
-    let mut acc = Time::ZERO;
+    let mut acc = base;
     for (i, c) in spine.iter().enumerate() {
         let prev_real = i > 0 && !spine[i - 1].is_gap();
         if let Some(tr) = &c.transition_in {
@@ -649,7 +696,7 @@ fn apply_adjustments(el: &Element, c: &mut Clip, origin: Time, fmt: &VideoFormat
                     c.video.opacity.value = a;
                 }
                 if let Some(m) = adj.attr("mode") {
-                    c.video.blend_mode = BlendMode::ALL.into_iter().find(|b| b.label().eq_ignore_ascii_case(m)).unwrap_or_default();
+                    c.video.blend_mode = BlendMode::from_name(m).unwrap_or_default();
                 }
                 if let Some(p) = adj.children_named("param").find(|p| p.attr("name") == Some("amount")) {
                     c.video.opacity.curve = parse_anim(p, origin, first_f);
@@ -849,7 +896,7 @@ fn parse_title(el: &Element, ctx: &ImportCtx, effect: &str) -> TitleParams {
 }
 
 fn is_clip_element(name: &str) -> bool {
-    matches!(name, "asset-clip" | "gap" | "title" | "ref-clip" | "clip" | "video" | "audio")
+    matches!(name, "asset-clip" | "gap" | "title" | "ref-clip" | "clip" | "video" | "audio" | "audition")
 }
 
 /// Parse a clip element. Returns `(clip, offset attr, start attr)`.
@@ -866,6 +913,26 @@ fn parse_clip(el: &Element, ctx: &ImportCtx, fmt: &VideoFormat, depth: usize) ->
         c.source_in = start;
         Ok(c)
     };
+
+    if el.name == "audition" {
+        // the first take is the active pick; the rest are alternates
+        let mut takes = el.elements().filter(|e| is_clip_element(&e.name) && e.name != "audition");
+        let Some(first) = takes.next() else {
+            return Ok(None);
+        };
+        let Some((mut active, _, start)) = parse_clip(first, ctx, fmt, depth + 1)? else {
+            return Ok(None);
+        };
+        for t in takes {
+            if let Some((mut alt, _, _)) = parse_clip(t, ctx, fmt, depth + 1)? {
+                alt.lane = 0;
+                alt.offset = Time::ZERO;
+                active.audition.push(alt);
+            }
+        }
+        active.lane = lane;
+        return Ok(Some((active, offset, start)));
+    }
 
     let mut clip = match el.name.as_str() {
         "asset-clip" | "video" | "audio" => {
@@ -912,7 +979,7 @@ fn parse_clip(el: &Element, ctx: &ImportCtx, fmt: &VideoFormat, depth: usize) ->
                 Some(s) if depth < 32 => parse_spine(s, ctx, fmt, depth + 1)?,
                 _ => Vec::new(),
             };
-            let comp = CompoundClip { spine };
+            let comp = CompoundClip::new(spine);
             let md = comp.duration();
             let mut c = Clip::new(name.clone(), ClipKind::Compound(Box::new(comp)), duration);
             c.source_in = start;
@@ -928,10 +995,30 @@ fn parse_clip(el: &Element, ctx: &ImportCtx, fmt: &VideoFormat, depth: usize) ->
         clip.media_duration = None; // filled from asset by caller
     }
     apply_adjustments(el, &mut clip, start, fmt);
-    for child in el.elements().filter(|e| is_clip_element(&e.name) && e.attr("lane").is_some()) {
-        if let Some((mut cc, coff, _)) = parse_clip(child, ctx, fmt, depth + 1)? {
-            cc.offset = coff - start;
-            clip.connected.push(cc);
+    for child in el.elements().filter(|e| e.attr("lane").is_some()) {
+        if child.name == "spine" {
+            // secondary storyline
+            let spine = if depth < 32 { parse_spine(child, ctx, fmt, depth + 1)? } else { Vec::new() };
+            let comp = CompoundClip::storyline(spine);
+            let len = comp.duration();
+            if !len.is_positive() {
+                continue;
+            }
+            let mut sl = Clip::new(child.attr("name").filter(|n| !n.is_empty()).unwrap_or("Storyline"), ClipKind::Compound(Box::new(comp)), len);
+            sl.media_duration = Some(len);
+            sl.lane = child.attr("lane").and_then(|l| l.parse().ok()).unwrap_or(1);
+            sl.offset = attr_time(child, "offset").unwrap_or_default() - start;
+            clip.connected.push(sl);
+        } else if is_clip_element(&child.name) {
+            if let Some((mut cc, coff, _)) = parse_clip(child, ctx, fmt, depth + 1)? {
+                cc.offset = coff - start;
+                clip.connected.push(cc);
+            }
+        }
+    }
+    if let Some(md) = el.child("metadata") {
+        for m in md.elements().filter(|m| m.name == "md" && m.attr("key") == Some(CONNECTION_POINT_MD)) {
+            clip.anchor = attr_time(m, "value").unwrap_or_default().max(Time::ZERO);
         }
     }
     Ok(Some((clip, offset, start)))
@@ -985,6 +1072,7 @@ fn fill_media_durations(clips: &mut [Clip], assets: &[MediaAsset]) {
             fill_media_durations(&mut comp.spine, assets);
         }
         fill_media_durations(&mut c.connected, assets);
+        fill_media_durations(&mut c.audition, assets);
     }
 }
 

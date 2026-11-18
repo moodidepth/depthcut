@@ -1,6 +1,7 @@
 //! The Magnetic Timeline: primary storyline, connected lanes, filmstrips,
 //! min/max peak waveforms, transitions, retime editor, keyframe animation lane,
-//! skimming, snapping and the A / T / B / R tools.
+//! skimming, snapping, the A / T / P / B / R tools, step-in editing of
+//! compound clips and storylines, auditions and the role-grouped audio lanes.
 
 use crate::app::{drag_key, App, EditMode, Tool};
 use crate::inspector::clip_accent;
@@ -9,7 +10,7 @@ use eframe::egui::{self, Color32, CornerRadius, Pos2, Rect, Sense, Stroke, Strok
 use nle_core::captions::CaptionTrack;
 use nle_core::clip::db_to_gain;
 use nle_core::speed::{MAX_VELOCITY, MIN_VELOCITY};
-use nle_core::{Action, AssetId, Clip, ClipId, ClipKind, Command, FrameBlendMode, Interpolation, Marker, MarkerKind, Param, Retime, Time, Timeline};
+use nle_core::{Action, AssetId, AudioRole, Clip, ClipId, ClipKind, Command, FrameBlendMode, Interpolation, Marker, MarkerKind, Param, Retime, Time, Timeline};
 use std::borrow::Cow;
 
 const RULER_H: f32 = 26.0;
@@ -19,6 +20,10 @@ const LANE_H: f32 = 50.0;
 const ANIM_H: f32 = 30.0;
 const RETIME_H: f32 = 34.0;
 const LANE_GAP: f32 = 4.0;
+/// Header strip of a role band in the audio-lanes view.
+const ROLE_HEADER_H: f32 = 16.0;
+/// Height of a collapsed role band's clip strip.
+const ROLE_COLLAPSED_H: f32 = 14.0;
 const EDGE_PX: f32 = 7.0;
 /// Hit width of a caption block's trim handles.
 const CAP_EDGE_PX: f32 = 8.0;
@@ -29,6 +34,11 @@ const CAPTION_BAR_KEY: u64 = 0xCC00_0002;
 pub enum Drag {
     Scrub,
     Move {
+        id: ClipId,
+        grab: Time,
+    },
+    /// Position tool move: no ripple, gap left behind, overwrite at the target.
+    Position {
         id: ClipId,
         grab: Time,
     },
@@ -113,6 +123,20 @@ pub struct TimelineState {
     pub selected_key: Option<(ClipId, Time)>,
     /// Diamond the right-click (ease) menu is open for.
     key_menu: Option<(ClipId, Time)>,
+    /// Audio-lanes view: connected clips below the storyline grouped by role.
+    pub audio_lanes: bool,
+    /// Role bands folded to a thin strip in the audio-lanes view.
+    pub collapsed_roles: Vec<AudioRole>,
+}
+
+/// One role band of the audio-lanes view.
+struct RoleGroup {
+    role: AudioRole,
+    rows: usize,
+    /// (index into the placed clips, sub-row inside the band)
+    slots: Vec<(usize, usize)>,
+    collapsed: bool,
+    top: f32,
 }
 
 impl TimelineState {
@@ -138,7 +162,7 @@ fn audio_peak_snaps(app: &App, placed: &[(Clip, Time, i32, Option<ClipId>)], vis
     }
     // A clip being moved carries its audio with it: its old peaks are stale.
     let moving = match &app.tl.drag {
-        Some(Drag::Move { id, .. }) | Some(Drag::Slip { id, .. }) | Some(Drag::Slide { id, .. }) => Some(*id),
+        Some(Drag::Move { id, .. }) | Some(Drag::Position { id, .. }) | Some(Drag::Slip { id, .. }) | Some(Drag::Slide { id, .. }) => Some(*id),
         Some(_) => None,
         None => return out,
     };
@@ -184,6 +208,8 @@ impl Default for TimelineState {
             context_clip: None,
             selected_key: None,
             key_menu: None,
+            audio_lanes: false,
+            collapsed_roles: Vec::new(),
         }
     }
 }
@@ -319,8 +345,42 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let retime_extra = if app.tl.show_retime { RETIME_H + 2.0 } else { 0.0 };
     let has_captions = !app.project.timeline.captions.is_empty();
     let header_h = RULER_H + if has_captions { CAPTIONS_H } else { 0.0 };
+    // Audio-lanes view: connected clips below the storyline grouped into
+    // collapsible bands by role, packed into as few sub-rows as they fit.
+    let role_mode = app.tl.audio_lanes;
+    let mut role_groups: Vec<RoleGroup> = Vec::new();
+    if role_mode {
+        for role in AudioRole::ALL {
+            let mut members: Vec<usize> = (0..placed.len()).filter(|&i| placed[i].2 < 0 && placed[i].0.audio.role == role).collect();
+            if members.is_empty() {
+                continue;
+            }
+            members.sort_by_key(|&i| placed[i].1);
+            let mut ends: Vec<Time> = Vec::new();
+            let mut slots = Vec::with_capacity(members.len());
+            for i in members {
+                let (c, start, ..) = &placed[i];
+                let row = match ends.iter().position(|e| *e <= *start) {
+                    Some(r) => r,
+                    None => {
+                        ends.push(Time::ZERO);
+                        ends.len() - 1
+                    }
+                };
+                ends[row] = *start + c.duration;
+                slots.push((i, row));
+            }
+            let collapsed = app.tl.collapsed_roles.contains(&role);
+            role_groups.push(RoleGroup { role, rows: ends.len(), slots, collapsed, top: 0.0 });
+        }
+    }
+    let lane_step = LANE_H + anim + retime_extra + LANE_GAP;
+    let group_h = |g: &RoleGroup| ROLE_HEADER_H + if g.collapsed { ROLE_COLLAPSED_H + LANE_GAP } else { g.rows as f32 * lane_step };
+    let roles_h: f32 = role_groups.iter().map(group_h).sum();
+    // in the role view the lanes below the storyline become the bands, plus one free lane to drop onto
+    let lanes: Vec<i32> = (min_lane..=max_lane).rev().filter(|l| !role_mode || *l >= 0 || *l == min_lane).collect();
     let mut rows = Vec::new();
-    let content_h: f32 = (min_lane..=max_lane).map(|l| if l == 0 { SPINE_H } else { LANE_H } + anim + retime_extra + LANE_GAP).sum();
+    let content_h: f32 = lanes.iter().map(|&l| if l == 0 { SPINE_H } else { LANE_H } + anim + retime_extra + LANE_GAP).sum::<f32>() + roles_h;
     let visible_h = area.height() - header_h;
     // centre the storyline when everything fits, otherwise allow scrolling
     let max_v = (content_h - visible_h).max(0.0);
@@ -328,13 +388,37 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let above_h: f32 = (1..=max_lane).map(|_| LANE_H + anim + retime_extra + LANE_GAP).sum();
     let spine_target = area.top() + header_h + (visible_h * 0.42 - SPINE_H * 0.5).max(above_h.min(visible_h * 0.5));
     let mut y = if content_h <= visible_h { spine_target - above_h } else { area.top() + header_h + 6.0 - app.tl.vscroll };
-    for lane in (min_lane..=max_lane).rev() {
+    for &lane in &lanes {
+        if role_mode && lane == min_lane {
+            for g in &mut role_groups {
+                g.top = y;
+                y += group_h(&*g);
+            }
+        }
         let h = if lane == 0 { SPINE_H } else { LANE_H } + anim + retime_extra;
         rows.push(Row { lane, top: y, height: h });
         y += h + LANE_GAP;
     }
     let row_of = |lane: i32| rows.iter().find(|r| r.lane == lane);
+    // (top, height, collapsed) of a below-storyline clip in the role view
+    let role_slot = |i: usize| -> Option<(f32, f32, bool)> {
+        role_groups.iter().find_map(|g| {
+            g.slots.iter().find(|s| s.0 == i).map(|&(_, r)| {
+                let top = g.top + ROLE_HEADER_H;
+                if g.collapsed {
+                    (top, ROLE_COLLAPSED_H, true)
+                } else {
+                    (top + r as f32 * lane_step, LANE_H + anim + retime_extra, false)
+                }
+            })
+        })
+    };
     let lane_at = |py: f32| -> i32 {
+        if let (Some(first), Some(last)) = (role_groups.first(), role_groups.last()) {
+            if py >= first.top && py < last.top + group_h(last) {
+                return min_lane;
+            }
+        }
         for r in &rows {
             if py >= r.top - LANE_GAP * 0.5 && py < r.top + r.height + LANE_GAP * 0.5 {
                 return r.lane;
@@ -352,6 +436,24 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         let band = Rect::from_min_max(Pos2::new(area.left(), r.top + retime_extra - 2.0), Pos2::new(area.right(), r.top + r.height + 2.0));
         painter.rect_filled(band, CornerRadius::ZERO, Color32::from_rgb(0x1D, 0x1D, 0x20));
     }
+    // role bands (click a header to fold it)
+    let mut role_headers: Vec<(Rect, AudioRole)> = Vec::new();
+    for g in &role_groups {
+        let band = Rect::from_min_max(Pos2::new(area.left(), g.top), Pos2::new(area.right(), g.top + group_h(g) - LANE_GAP));
+        painter.rect_filled(band, CornerRadius::ZERO, Color32::from_rgb(0x19, 0x1B, 0x1F));
+        let head = Rect::from_min_size(band.min, Vec2::new(area.width(), ROLE_HEADER_H));
+        painter.rect_filled(head, CornerRadius::ZERO, theme::AUDIO.gamma_multiply(0.18));
+        let arrow = if g.collapsed { "▸" } else { "▾" };
+        let n = g.slots.len();
+        painter.text(
+            head.left_center() + Vec2::new(6.0, 0.0),
+            egui::Align2::LEFT_CENTER,
+            format!("{arrow} {}  ({n})", g.role.label()),
+            egui::FontId::proportional(11.0),
+            theme::TEXT,
+        );
+        role_headers.push((head, g.role));
+    }
 
     // ----- clips
     let mut hits: Vec<Hit> = Vec::new();
@@ -362,17 +464,22 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     order.sort_by_key(|&i| (placed[i].2 != 0, placed[i].2.abs()));
     for &i in &order {
         let (clip, start, lane, parent) = &placed[i];
-        let Some(row) = row_of(*lane) else { continue };
+        let slot = if role_mode && *lane < 0 { role_slot(i) } else { row_of(*lane).map(|r| (r.top, r.height, false)) };
+        let Some((row_top, row_h, collapsed)) = slot else { continue };
         let x0 = geo.x(*start);
         let x1 = geo.x(*start + clip.duration);
         if x1 < area.left() - 2.0 || x0 > area.right() + 2.0 {
             // still record for hit testing consistency (off-screen)
             continue;
         }
-        let rect = Rect::from_min_max(Pos2::new(x0, row.top + retime_extra), Pos2::new(x1.max(x0 + 2.0), row.top + row.height - anim));
-        // connection line to the storyline
+        let rect = if collapsed {
+            Rect::from_min_max(Pos2::new(x0, row_top), Pos2::new(x1.max(x0 + 2.0), row_top + row_h))
+        } else {
+            Rect::from_min_max(Pos2::new(x0, row_top + retime_extra), Pos2::new(x1.max(x0 + 2.0), row_top + row_h - anim))
+        };
+        // connection line to the storyline, at the connection point (Ctrl+Alt+click moves it)
         if parent.is_some() {
-            let cx = x0 + 1.0;
+            let cx = geo.x(*start + clip.anchor_clamped()).clamp(x0 + 1.0, (x1 - 1.0).max(x0 + 1.0));
             let (sy0, sh) = spine_row;
             let (a, b) = if *lane > 0 { (rect.bottom(), sy0) } else { (sy0 + sh, rect.top()) };
             painter.line_segment([Pos2::new(cx, a), Pos2::new(cx, b)], Stroke::new(1.0_f32, theme::TEXT_DIM));
@@ -386,7 +493,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             let bar = split_bar_rect(rect, geo.x(*start - lead), geo.x(*start + clip.duration + tail));
             painter.rect_filled(bar, CornerRadius::same(2), theme::AUDIO.gamma_multiply(0.55));
         }
-        if app.tl.show_animation {
+        if app.tl.show_animation && !collapsed {
             let arect = Rect::from_min_max(Pos2::new(rect.left(), rect.bottom() + 1.0), Pos2::new(rect.right(), rect.bottom() + anim - 1.0));
             let sel = app.tl.selected_key.filter(|(id, _)| *id == clip.id).map(|(_, t)| t);
             draw_anim_lane(&painter, arect, clip, &geo, *start, sel);
@@ -474,7 +581,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     if app.tl.show_retime {
         for h in &hits {
             let Some(c) = app.project.timeline.clip(h.id) else { continue };
-            if c.retime.is_none() && !sel.contains(&h.id) {
+            // folded role bands have no room for a retime lane
+            if h.rect.height() < ROLE_COLLAPSED_H + 1.0 || (c.retime.is_none() && !sel.contains(&h.id)) {
                 continue;
             }
             if !matches!(c.kind, ClipKind::Asset { .. } | ClipKind::Compound(_)) {
@@ -548,6 +656,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     }
                     Some(Drag::Move { id: h.id, grab: t - h.start })
                 }
+                Tool::Position => {
+                    if !app.selection.contains(&h.id) {
+                        app.selection = vec![h.id];
+                    }
+                    Some(Drag::Position { id: h.id, grab: t - h.start })
+                }
                 Tool::Trim if mods.alt => Some(Drag::Slide { id: h.id, origin: t }),
                 Tool::Trim => Some(Drag::Slip { id: h.id, origin: t }),
                 Tool::Range => Some(Drag::Range { anchor: t }),
@@ -574,7 +688,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     snap_line = Some(t);
                 }
             }
-            Drag::Move { id, grab } => {
+            Drag::Move { id, grab } | Drag::Position { id, grab } => {
                 if let Some(h) = hits.iter().find(|h| h.id == id) {
                     let mut start = raw_t - grab;
                     let dur = tl.clip(id).map(|c| c.duration).unwrap_or_default();
@@ -589,13 +703,17 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                             snap_line = Some(e1);
                         }
                     }
-                    let lane = lane_at(p.y);
+                    let mut lane = lane_at(p.y);
+                    if role_mode && lane < 0 && h.lane < 0 {
+                        // inside the role bands a clip keeps its own lane
+                        lane = h.lane;
+                    }
                     let ghost_row = row_of(lane).map(|r| (r.top, r.height - anim)).unwrap_or((h.rect.top(), h.rect.height()));
                     let gx = geo.x(start.max(Time::ZERO));
                     let ghost = Rect::from_min_size(Pos2::new(gx, ghost_row.0), Vec2::new(h.rect.width(), ghost_row.1));
                     painter.rect_filled(ghost, CornerRadius::same(4), Color32::from_rgba_unmultiplied(255, 255, 255, 30));
                     painter.rect_stroke(ghost, CornerRadius::same(4), Stroke::new(1.5_f32, Color32::WHITE), StrokeKind::Inside);
-                    if lane == 0 && h.lane == 0 {
+                    if lane == 0 && h.lane == 0 && matches!(d, Drag::Move { .. }) {
                         // magnetic reorder: show the insertion point
                         let idx = tl.drop_index(raw_t);
                         let ix = geo.x(tl.spine_start(idx));
@@ -738,6 +856,16 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         }
     }
 
+    if app.hold_connections && matches!(app.tl.drag, Some(Drag::Move { .. } | Drag::Position { .. } | Drag::Trim { .. })) {
+        painter.text(
+            Pos2::new(area.left() + 8.0, area.top() + header_h + 4.0),
+            egui::Align2::LEFT_TOP,
+            "` held: connected clips stay where they are",
+            egui::FontId::proportional(11.0),
+            theme::SNAP,
+        );
+    }
+
     if resp.drag_stopped() {
         if let (Some(d), Some(p)) = (app.tl.drag.take(), pointer) {
             finish_drag(app, d, p, &geo, &hits, &lane_at, snap_threshold);
@@ -772,13 +900,27 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     app.selection.clear();
                 }
                 app.seek(target);
+            } else if let Some(&(_, role)) = role_headers.iter().find(|(r, _)| r.contains(p)) {
+                let folded = &mut app.tl.collapsed_roles;
+                match folded.iter().position(|r| *r == role) {
+                    Some(i) => {
+                        folded.remove(i);
+                    }
+                    None => folded.push(role),
+                }
             } else if let Some((_, id)) = tr_hits.iter().find(|(r, _)| r.contains(p)) {
                 app.selection = vec![*id];
                 app.inspector_tab = crate::app::InspectorTab::TitlesTransitions;
             } else if let Some(h) = hit_at(p) {
                 let id = h.id;
+                let connected = h.lane != 0;
                 app.captions.selected_seg = None;
                 match app.tool {
+                    // Ctrl+Alt+click: move the connection point under the pointer
+                    _ if mods.command && mods.alt && connected => {
+                        app.selection = vec![id];
+                        app.exec(Command::SetConnectionPoint { id, at: t });
+                    }
                     Tool::Blade => {
                         if mods.shift {
                             app.exec(Command::BladeAll { at: t });
@@ -819,8 +961,14 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             } else if let Some(h) = hit_at(p) {
                 let t = geo.t(p.x).snap_to_frame(rate);
                 let id = h.id;
-                app.selection = vec![id];
-                app.seek(t);
+                if app.project.timeline.clip(id).is_some_and(|c| matches!(c.kind, ClipKind::Compound(_))) {
+                    // open the compound clip / storyline (breadcrumb or Ctrl+[ steps back out)
+                    app.seek(t);
+                    app.step_into(id);
+                } else {
+                    app.selection = vec![id];
+                    app.seek(t);
+                }
             }
         }
     }
@@ -925,6 +1073,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             let near_edge = (p.x - h.rect.left()).abs() < EDGE_PX || (p.x - h.rect.right()).abs() < EDGE_PX;
             let icon = match app.tool {
                 Tool::Blade => egui::CursorIcon::Crosshair,
+                Tool::Position => egui::CursorIcon::Move,
                 _ if near_edge => egui::CursorIcon::ResizeColumn,
                 Tool::Trim => egui::CursorIcon::ResizeHorizontal,
                 Tool::Range => egui::CursorIcon::Text,
@@ -969,7 +1118,11 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
                 app.redo();
             }
             ui.separator();
-            ui.label(egui::RichText::new(&app.project.timeline.name).strong());
+            if app.focus.is_empty() {
+                ui.label(egui::RichText::new(&app.project.timeline.name).strong());
+            } else {
+                breadcrumb(app, ui);
+            }
             let rate = app.project.timeline.format.rate;
             ui.label(egui::RichText::new(nle_core::format_timecode(app.project.timeline.extent(), rate)).monospace().color(theme::TEXT_DIM));
             if !app.selection.is_empty() {
@@ -1001,11 +1154,38 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
                     app.skimming = !app.skimming;
                 }
                 ui.toggle_value(&mut app.show_captions, "CC Captions").on_hover_text("Auto captions & Whisper transcription");
+                let lanes_tip = format!("Group the audio below the storyline into Dialogue / Music / SFX / General lanes ({})", app.keymap.hint(Action::ToggleAudioLanes));
+                ui.toggle_value(&mut app.tl.audio_lanes, "Audio Lanes").on_hover_text(lanes_tip);
                 ui.toggle_value(&mut app.tl.show_retime, "Retime").on_hover_text("Retime editor (Ctrl+R)");
                 ui.toggle_value(&mut app.tl.show_animation, "Animation").on_hover_text("Video animation lane (Ctrl+V)");
             });
         });
     });
+}
+
+/// "Project ▸ Compound ▸ Storyline" while stepped into containers; each
+/// crumb steps back out to that level.
+fn breadcrumb(app: &mut App, ui: &mut egui::Ui) {
+    let names: Vec<String> = app.focus.levels().iter().map(|f| f.name.clone()).collect();
+    let mut out: Option<usize> = None;
+    let back_tip = format!("Back out one level ({})", app.keymap.hint(Action::StepOut));
+    if ui.button("⬅").on_hover_text(back_tip).clicked() {
+        out = Some(1);
+    }
+    if ui.link(app.root_timeline_name().to_owned()).clicked() {
+        out = Some(names.len());
+    }
+    for (i, n) in names.iter().enumerate() {
+        ui.label(egui::RichText::new("▸").color(theme::TEXT_DIM));
+        if i + 1 == names.len() {
+            ui.label(egui::RichText::new(n).strong().color(theme::SELECTION));
+        } else if ui.link(n).clicked() {
+            out = Some(names.len() - 1 - i);
+        }
+    }
+    if let Some(levels) = out {
+        app.step_out(levels);
+    }
 }
 
 fn retime_style(speed: f64) -> (Color32, String) {
@@ -1327,11 +1507,31 @@ fn draw_clip(app: &App, p: &egui::Painter, rect: Rect, c: &Clip, selected: bool)
             }
         }
     }
+    if let ClipKind::Compound(comp) = &c.kind {
+        if comp.storyline {
+            // secondary storyline: grey bar along the top and the cuts between its clips
+            p.rect_filled(Rect::from_min_size(rect.min, Vec2::new(rect.width(), 3.0)), CornerRadius::ZERO, Color32::from_gray(170));
+            let pps = pps_of(rect, c);
+            let mut acc = Time::ZERO;
+            for inner in &comp.spine {
+                acc += inner.duration;
+                let x = rect.left() + (acc - c.source_in).as_secs_f64() as f32 * pps;
+                if x > rect.left() + 1.0 && x < rect.right() - 1.0 {
+                    p.line_segment([Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())], Stroke::new(1.5_f32, Color32::from_black_alpha(200)));
+                }
+            }
+        }
+    }
     // name label
     if rect.width() > 24.0 && !c.is_gap() && !matches!(c.kind, ClipKind::Title(_) | ClipKind::Adjustment) {
         let mut name = c.name.clone();
-        if matches!(c.kind, ClipKind::Compound(_)) {
+        if c.is_storyline() {
+            name = format!("☰ {name}");
+        } else if matches!(c.kind, ClipKind::Compound(_)) {
             name = format!("⧉ {name}");
+        }
+        if !c.audition.is_empty() {
+            name = format!("{name}  [audition: {} takes]", c.audition.len() + 1);
         }
         if let Some(r) = &c.retime {
             let s = r.speed_at(Time::ZERO);
@@ -1583,9 +1783,12 @@ fn finish_drag(app: &mut App, d: Drag, p: Pos2, geo: &Geo, hits: &[Hit], lane_at
                 }
             }
         }
-        Drag::Move { id, grab } => {
+        Drag::Move { id, grab } | Drag::Position { id, grab } => {
             let Some(h) = hits.iter().find(|h| h.id == id) else { return };
-            let lane = lane_at(p.y);
+            let mut lane = lane_at(p.y);
+            if app.tl.audio_lanes && lane < 0 && h.lane < 0 {
+                lane = h.lane;
+            }
             let dur = tl.clip(id).map(|c| c.duration).unwrap_or_default();
             let mut start = (raw_t - grab).max(Time::ZERO);
             let (s1, ok) = tl.snap(start, snap, &app.tl.snap_targets(app.playhead), Some(id));
@@ -1602,8 +1805,14 @@ fn finish_drag(app: &mut App, d: Drag, p: Pos2, geo: &Geo, hits: &[Hit], lane_at
             if moved_px < 3.0 && lane == h.lane {
                 return;
             }
-            let cmd = if h.lane == 0 && lane == 0 { Command::MoveClip { id, at: raw_t, lane: 0 } } else { Command::MoveClip { id, at: start, lane } };
-            app.exec(cmd);
+            let cmd = if matches!(d, Drag::Position { .. }) {
+                Command::PositionMove { id, at: start, lane }
+            } else if h.lane == 0 && lane == 0 {
+                Command::MoveClip { id, at: raw_t, lane: 0 }
+            } else {
+                Command::MoveClip { id, at: start, lane }
+            };
+            app.exec(hold_if_grave(app, h, cmd));
         }
         Drag::Trim { id, start_edge, origin } => {
             let Some(h) = hits.iter().find(|h| h.id == id) else { return };
@@ -1615,7 +1824,7 @@ fn finish_drag(app: &mut App, d: Drag, p: Pos2, geo: &Geo, hits: &[Hit], lane_at
                 return;
             }
             let cmd = if start_edge { Command::TrimStart { id, delta } } else { Command::TrimEnd { id, delta } };
-            app.exec(cmd);
+            app.exec(hold_if_grave(app, h, cmd));
         }
         Drag::Roll { left, edit, origin } => {
             let delta = roll_drag_target(app, edit, origin, raw_t, snap) - edit;
@@ -1723,6 +1932,16 @@ fn drop_asset(app: &mut App, asset: AssetId, lane: i32, at: Time) {
     app.exec(cmd);
 }
 
+/// While ` is held, an edit of a storyline clip leaves its connected clips
+/// where they are on the timeline instead of carrying them along.
+fn hold_if_grave(app: &App, h: &Hit, cmd: Command) -> Command {
+    if app.hold_connections && h.lane == 0 {
+        Command::HoldConnections { ids: vec![h.id], cmd: Box::new(cmd) }
+    } else {
+        cmd
+    }
+}
+
 fn context_menu(app: &mut App, ui: &mut egui::Ui, clip: Option<ClipId>) {
     let Some(id) = clip else {
         if ui.button("Add Basic Title").clicked() {
@@ -1783,6 +2002,46 @@ fn context_menu(app: &mut App, ui: &mut egui::Ui, clip: Option<ClipId>) {
         app.break_apart();
         ui.close_menu();
     }
+    if ui.add_enabled(compound, egui::Button::new("Open in Timeline")).on_hover_text("Edit its contents (double-click; Ctrl+[ backs out)").clicked() {
+        app.step_into(id);
+        ui.close_menu();
+    }
+    if ui.add_enabled(!spine, egui::Button::new("Create Storyline")).on_hover_text("Group the selected connected clips into a storyline").clicked() {
+        if !app.selection.contains(&id) {
+            app.selection = vec![id];
+        }
+        app.make_storyline();
+        ui.close_menu();
+    }
+    if ui.add_enabled(!spine, egui::Button::new("Move Connection Point to Playhead")).on_hover_text("Or Ctrl+Alt+click the connected clip where it should attach").clicked() {
+        let at = app.playhead;
+        app.exec(Command::SetConnectionPoint { id, at });
+        ui.close_menu();
+    }
+    let takes = app.project.timeline.clip(id).map_or(0, |c| c.audition.len());
+    ui.menu_button("Audition", |ui| {
+        if ui.button("Duplicate as Audition").clicked() {
+            app.selection = vec![id];
+            app.duplicate_as_audition();
+            ui.close_menu();
+        }
+        if ui.add_enabled(app.browser.selected.is_some(), egui::Button::new("Add Browser Clip as Take")).clicked() {
+            app.add_browser_clip_to_audition(id);
+            ui.close_menu();
+        }
+        for (label, step) in [("Next Pick", 1), ("Previous Pick", -1)] {
+            if ui.add_enabled(takes > 0, egui::Button::new(label)).clicked() {
+                app.selection = vec![id];
+                app.cycle_audition(step);
+                ui.close_menu();
+            }
+        }
+        if ui.add_enabled(takes > 0, egui::Button::new("Finalize Audition")).clicked() {
+            app.selection = vec![id];
+            app.finalize_audition();
+            ui.close_menu();
+        }
+    });
     if ui.add_enabled(spine, egui::Button::new("Lift from Storyline")).clicked() {
         app.exec(Command::LiftToLane { id, lane: 1 });
         ui.close_menu();

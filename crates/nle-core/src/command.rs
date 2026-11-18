@@ -155,6 +155,45 @@ pub enum Command {
         label: &'static str,
         commands: Vec<Command>,
     },
+    /// Apply `cmd` inside compound clip / secondary storyline `container`
+    /// (step-in editing; build nested paths with [`Command::in_path`]).
+    InContainer {
+        container: ClipId,
+        cmd: Box<Command>,
+    },
+    /// Group connected clips into a secondary storyline.
+    MakeStoryline {
+        ids: Vec<ClipId>,
+    },
+    /// Position tool: move without rippling (gap behind, overwrite at target).
+    PositionMove {
+        id: ClipId,
+        at: Time,
+        lane: i32,
+    },
+    /// Edit spine clips `ids` while the clips connected to them stay at
+    /// their timeline positions (hold ` to override connections).
+    HoldConnections {
+        ids: Vec<ClipId>,
+        cmd: Box<Command>,
+    },
+    /// Move a connected clip's connection point (Ctrl+Alt+Click).
+    SetConnectionPoint {
+        id: ClipId,
+        at: Time,
+    },
+    AddAuditionTake {
+        id: ClipId,
+        take: Box<Clip>,
+    },
+    /// Make the take `step` places along the active audition pick.
+    CycleAudition {
+        id: ClipId,
+        step: i32,
+    },
+    FinalizeAudition {
+        id: ClipId,
+    },
 }
 
 impl Command {
@@ -191,7 +230,21 @@ impl Command {
             Command::SetCaptions { .. } => "Captions",
             Command::InsertGap { .. } => "Insert Gap",
             Command::Batch { label, .. } => label,
+            Command::InContainer { cmd, .. } | Command::HoldConnections { cmd, .. } => cmd.label(),
+            Command::MakeStoryline { .. } => "Create Storyline",
+            Command::PositionMove { .. } => "Position",
+            Command::SetConnectionPoint { .. } => "Change Connection Point",
+            Command::AddAuditionTake { .. } => "Add to Audition",
+            Command::CycleAudition { .. } => "Audition Pick",
+            Command::FinalizeAudition { .. } => "Finalize Audition",
         }
+    }
+
+    /// Wrap `cmd` so it applies inside the nested containers of `path`
+    /// (outermost first: the step-in breadcrumb). Each level resizes its
+    /// container to its new contents.
+    pub fn in_path(path: &[ClipId], cmd: Command) -> Command {
+        path.iter().rev().fold(cmd, |cmd, &container| Command::InContainer { container, cmd: Box::new(cmd) })
     }
 
     /// Whether this command can move clips (and so the speech under captions).
@@ -275,6 +328,10 @@ impl Command {
                 Ok(())
             }
             Command::SetTransition { id, at_end, transition } => {
+                // a transition on a connected clip needs a storyline to live in
+                if transition.is_some() && matches!(tl.locate(*id), Some(ClipLoc::Connected { .. })) && !tl.clip(*id).is_some_and(Clip::is_storyline) {
+                    tl.make_storyline(&[*id])?;
+                }
                 let c = tl.clip_mut(*id).ok_or(EditError::NotFound(*id))?;
                 if *at_end {
                     c.transition_out = transition.clone();
@@ -346,6 +403,18 @@ impl Command {
                 // History snapshots `tl` first, so a failure here rolls back the whole batch
                 commands.iter().try_for_each(|c| c.apply(tl))
             }
+            Command::InContainer { container, cmd } => tl.edit_inside(*container, |inner| cmd.apply_inner(inner)),
+            Command::MakeStoryline { ids } => tl.make_storyline(ids).map(drop),
+            Command::PositionMove { id, at, lane } => tl.position_move(*id, *at, *lane).map(drop),
+            Command::HoldConnections { ids, cmd } => {
+                let held = tl.detach_connected(ids);
+                cmd.apply_inner(tl)?;
+                tl.reattach(held)
+            }
+            Command::SetConnectionPoint { id, at } => tl.set_connection_point(*id, *at).map(drop),
+            Command::AddAuditionTake { id, take } => tl.add_audition_take(*id, (**take).clone()),
+            Command::CycleAudition { id, step } => tl.cycle_audition(*id, *step),
+            Command::FinalizeAudition { id } => tl.finalize_audition(*id),
         }
     }
 }

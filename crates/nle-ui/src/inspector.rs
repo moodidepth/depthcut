@@ -857,35 +857,47 @@ fn project_settings(app: &mut App, ui: &mut egui::Ui) {
     ui.label(egui::RichText::new("Project").strong().size(14.0));
     ui.label(egui::RichText::new("Select a clip in the timeline to inspect it.").color(theme::TEXT_DIM));
     ui.add_space(6.0);
-    ui.horizontal(|ui| {
-        ui.label("Name");
-        if ui.text_edit_singleline(&mut app.project.name).changed() {
-            app.project.timeline.name = app.project.name.clone();
-        }
-    });
     let f = app.project.timeline.format;
     let mut changed = false;
     let mut nf: VideoFormat = f;
-    ui.horizontal(|ui| {
-        ui.label("Format");
-        egui::ComboBox::from_id_salt("fmt").selected_text(format!("{}×{}", f.width, f.height)).show_ui(ui, |ui| {
-            for (w, h, l) in
-                [(1280, 720, "720p HD"), (1920, 1080, "1080p HD"), (2560, 1440, "1440p"), (3840, 2160, "4K UHD"), (1080, 1920, "Vertical 1080×1920"), (1080, 1080, "Square 1080")]
-            {
-                if ui.selectable_label(f.width == w && f.height == h, l).clicked() {
-                    nf.width = w;
-                    nf.height = h;
-                    changed = true;
-                }
+    // name and format live on the project's real timeline, not on an opened compound
+    let stepped_in = !app.focus.is_empty();
+    if stepped_in {
+        ui.label(egui::RichText::new("Editing inside a compound clip: step out (Ctrl+[) to change the project's name or format.").color(theme::TEXT_DIM));
+    }
+    ui.add_enabled_ui(!stepped_in, |ui| {
+        ui.horizontal(|ui| {
+            ui.label("Name");
+            if ui.text_edit_singleline(&mut app.project.name).changed() {
+                app.project.timeline.name = app.project.name.clone();
             }
         });
-        egui::ComboBox::from_id_salt("rate").selected_text(f.rate.label()).show_ui(ui, |ui| {
-            for r in FrameRate::PRESETS {
-                if ui.selectable_label(f.rate == r, r.label()).clicked() {
-                    nf.rate = r;
-                    changed = true;
+        ui.horizontal(|ui| {
+            ui.label("Format");
+            egui::ComboBox::from_id_salt("fmt").selected_text(format!("{}×{}", f.width, f.height)).show_ui(ui, |ui| {
+                for (w, h, l) in [
+                    (1280, 720, "720p HD"),
+                    (1920, 1080, "1080p HD"),
+                    (2560, 1440, "1440p"),
+                    (3840, 2160, "4K UHD"),
+                    (1080, 1920, "Vertical 1080×1920"),
+                    (1080, 1080, "Square 1080"),
+                ] {
+                    if ui.selectable_label(f.width == w && f.height == h, l).clicked() {
+                        nf.width = w;
+                        nf.height = h;
+                        changed = true;
+                    }
                 }
-            }
+            });
+            egui::ComboBox::from_id_salt("rate").selected_text(f.rate.label()).show_ui(ui, |ui| {
+                for r in FrameRate::PRESETS {
+                    if ui.selectable_label(f.rate == r, r.label()).clicked() {
+                        nf.rate = r;
+                        changed = true;
+                    }
+                }
+            });
         });
     });
     if changed {
