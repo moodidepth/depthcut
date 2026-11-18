@@ -33,6 +33,20 @@ pub enum FcpxmlError {
 
 const GAP_START: Time = Time::from_secs(3600);
 const COLOR_EFFECT: &str = "Color Adjustments";
+/// Colour management + correction nodes travel as JSON inside the colour filter.
+const COLOR_PIPELINE_PARAM: &str = "rcp.colorPipeline";
+/// RustCut Pro effects: one `filter-video` each, the effect as JSON.
+const RCP_EFFECT: &str = "RustCut Pro Effect";
+const RCP_EFFECT_PARAM: &str = "rcp.effect";
+
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+#[serde(default)]
+struct ColorPipelineMd {
+    input_space: crate::color::ColorSpace,
+    working: crate::color::WorkingSpace,
+    input_lut: Option<LutRef>,
+    corrections: Vec<crate::color::ColorCorrection>,
+}
 const ADJUSTMENT_EFFECT: &str = "Adjustment Layer";
 
 fn ts(t: Time) -> String {
@@ -301,6 +315,23 @@ fn adjustments(c: &Clip, origin: Time, fmt: &VideoFormat, ctx: &mut ExportCtx) -
             if let Some(l) = &col.lut {
                 f.push(Element::new("param").set("name", "LUT").set("value", l.path.clone()));
                 f.push(Element::new("param").set("name", "LUT Intensity").set("value", num(l.intensity as f64)));
+            }
+            let md = ColorPipelineMd { input_space: col.input_space, working: col.working, input_lut: col.input_lut.clone(), corrections: col.corrections.clone() };
+            if md.input_space != Default::default() || md.working != Default::default() || md.input_lut.is_some() || !md.corrections.is_empty() {
+                if let Ok(json) = serde_json::to_string(&md) {
+                    f.push(Element::new("param").set("name", COLOR_PIPELINE_PARAM).set("value", json));
+                }
+            }
+            out.push(f);
+        }
+        for e in &c.effects {
+            let fx = ctx.effect_ref(RCP_EFFECT, "com.rustcutpro.effect");
+            let mut f = Element::new("filter-video").set("ref", fx).set("name", e.kind.label());
+            if !e.enabled {
+                f = f.set("enabled", "0");
+            }
+            if let Ok(json) = serde_json::to_string(e) {
+                f.push(Element::new("param").set("name", RCP_EFFECT_PARAM).set("value", json));
             }
             out.push(f);
         }
@@ -774,6 +805,15 @@ fn apply_adjustments(el: &Element, c: &mut Clip, origin: Time, fmt: &VideoFormat
                             lut_int = first_f(v).unwrap_or(1.0) as f32;
                             None
                         }
+                        Some(COLOR_PIPELINE_PARAM) => {
+                            if let Ok(md) = serde_json::from_str::<ColorPipelineMd>(v) {
+                                c.color.input_space = md.input_space;
+                                c.color.working = md.working;
+                                c.color.input_lut = md.input_lut;
+                                c.color.corrections = md.corrections;
+                            }
+                            None
+                        }
                         _ => None,
                     };
                     if let Some(param) = scalar {
@@ -782,6 +822,14 @@ fn apply_adjustments(el: &Element, c: &mut Clip, origin: Time, fmt: &VideoFormat
                     }
                 }
                 c.color.lut = lut_path.map(|path| LutRef { path, intensity: lut_int });
+            }
+            "filter-video" => {
+                let json = adj.children_named("param").find(|p| p.attr("name") == Some(RCP_EFFECT_PARAM)).and_then(|p| p.attr("value"));
+                if let Some(mut e) = json.and_then(|j| serde_json::from_str::<crate::effects::Effect>(j).ok()) {
+                    e.enabled = adj.attr("enabled") != Some("0");
+                    e.normalize();
+                    c.effects.push(e);
+                }
             }
             "timeMap" => {
                 let pts: Vec<(Time, Time, bool)> =

@@ -204,6 +204,19 @@ pub struct ColorParams {
     /// Gain (highlights).
     pub highlights: ColorWheel,
     pub lut: Option<LutRef>,
+    /// How the source is encoded (converted to Rec.709 before grading).
+    #[serde(default)]
+    pub input_space: crate::color::ColorSpace,
+    /// Encoding the primary and the correction nodes grade in.
+    #[serde(default)]
+    pub working: crate::color::WorkingSpace,
+    /// Input LUT (e.g. a camera's log → Rec.709 LUT). Replaces the
+    /// `input_space` conversion when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_lut: Option<LutRef>,
+    /// Stacked corrections applied after the primary, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub corrections: Vec<crate::color::ColorCorrection>,
 }
 
 impl Default for ColorParams {
@@ -219,6 +232,10 @@ impl Default for ColorParams {
             midtones: ColorWheel::default(),
             highlights: ColorWheel::default(),
             lut: None,
+            input_space: Default::default(),
+            working: Default::default(),
+            input_lut: None,
+            corrections: Vec::new(),
         }
     }
 }
@@ -243,7 +260,10 @@ impl ColorParams {
                 && self.shadows.is_neutral()
                 && self.midtones.is_neutral()
                 && self.highlights.is_neutral()
-                && self.lut.is_none())
+                && self.lut.is_none()
+                && self.input_space == crate::color::ColorSpace::Rec709
+                && self.input_lut.is_none()
+                && self.corrections.iter().all(|n| n.is_identity()))
     }
 }
 

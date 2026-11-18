@@ -1,6 +1,13 @@
-// Primary colour correction: exposure, white balance, 3-way wheels
-// (lift / gamma / gain), contrast, saturation and a .cube 3D LUT sampled
-// with hardware trilinear filtering. Optional before/after split wipe.
+// Primary colour correction with colour management (colorspace.wgsl is
+// prepended):
+//   input transform (camera log / HDR / sRGB → linear Rec.709, or an input LUT)
+//   → exposure + white balance in linear light
+//   → working space (Rec.709 gamma 2.4, or ACEScct over AP1)
+//   → lift / gamma / gain wheels, contrast about 18 % grey, saturation
+//   → back to Rec.709 display (highlight roll-off for scene / HDR sources)
+//   → creative .cube 3D LUT.
+// Rec.709 input with the gamma working space is exactly the original
+// (pre colour management) math. Optional before/after split wipe.
 
 struct Grade {
     exposure: f32,
@@ -14,6 +21,10 @@ struct Grade {
     lift: vec4<f32>,
     gamma: vec4<f32>,
     gain: vec4<f32>,
+    input_space: u32,
+    working: u32,
+    in_lut_size: f32, // 0: no input LUT
+    tonemap: u32,
 };
 
 @group(0) @binding(0) var src: texture_2d<f32>;
@@ -21,35 +32,44 @@ struct Grade {
 @group(0) @binding(2) var lut_sampler: sampler;
 @group(0) @binding(3) var<uniform> g: Grade;
 @group(0) @binding(4) var dst: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(5) var in_lut: texture_3d<f32>;
 
-const LUMA = vec3<f32>(0.2126, 0.7152, 0.0722);
+fn sample_lut(t: texture_3d<f32>, c: vec3<f32>, n: f32) -> vec3<f32> {
+    // sample texel centres
+    let coord = clamp(c, vec3<f32>(0.0), vec3<f32>(1.0)) * ((n - 1.0) / n) + vec3<f32>(0.5 / n);
+    return textureSampleLevel(t, lut_sampler, coord, 0.0).rgb;
+}
 
 fn grade(c_in: vec3<f32>) -> vec3<f32> {
+    // input transform → linear Rec.709
+    var lin: vec3<f32>;
+    if (g.in_lut_size > 0.0) {
+        lin = display_decode(sample_lut(in_lut, c_in, g.in_lut_size));
+    } else {
+        lin = to_linear709(c_in, g.input_space);
+    }
     // exposure + white balance in linear light
-    var lin = pow(max(c_in, vec3<f32>(0.0)), vec3<f32>(2.4));
-    lin = lin * exp2(g.exposure);
-    lin = lin * vec3<f32>(1.0 + 0.2 * g.temperature, 1.0 - 0.2 * g.tint, 1.0 - 0.2 * g.temperature);
-    var c = pow(max(lin, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.4));
+    lin = white_balance(lin * exp2(g.exposure), g.temperature, g.tint);
 
-    // three-way wheels
-    let lift = (g.lift.rgb + vec3<f32>(g.lift.a)) * 0.25;
-    let gam = (g.gamma.rgb + vec3<f32>(g.gamma.a)) * 0.5;
-    let gain = (g.gain.rgb + vec3<f32>(g.gain.a)) * 0.5;
-    c = c * (vec3<f32>(1.0) + gain);
-    c = c + lift * (vec3<f32>(1.0) - c);
-    c = pow(max(c, vec3<f32>(0.0)), vec3<f32>(1.0) / max(vec3<f32>(1.0) + gam, vec3<f32>(0.05)));
+    var c = to_working(lin, g.working);
+    c = wheels(c, g.lift, g.gamma, g.gain);
 
-    // contrast (pivot 0.5) and saturation
-    c = (c - vec3<f32>(0.5)) * (1.0 + g.contrast) + vec3<f32>(0.5);
+    // contrast about 18 % grey and saturation
+    let pivot = working_pivot(g.working);
+    c = (c - vec3<f32>(pivot)) * (1.0 + g.contrast) + vec3<f32>(pivot);
     let l = dot(c, LUMA);
     c = mix(vec3<f32>(l), c, g.saturation);
 
-    // 3D LUT, sampling texel centres
+    if (g.working != WS_GAMMA || g.tonemap != 0u) {
+        var out_lin = from_working(c, g.working);
+        if (g.tonemap != 0u) {
+            out_lin = tonemap(out_lin);
+        }
+        c = display_encode(out_lin);
+    }
+
     if (g.lut_mix > 0.0) {
-        let n = g.lut_size;
-        let coord = clamp(c, vec3<f32>(0.0), vec3<f32>(1.0)) * ((n - 1.0) / n) + vec3<f32>(0.5 / n);
-        let lc = textureSampleLevel(lut, lut_sampler, coord, 0.0).rgb;
-        c = mix(c, lc, g.lut_mix);
+        c = mix(c, sample_lut(lut, c, g.lut_size), g.lut_mix);
     }
     return c;
 }

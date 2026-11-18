@@ -4,7 +4,11 @@ pub const WORKING_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float
 pub const DISPLAY_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 pub const SHADER_YUV: &str = include_str!("shaders/yuv.wgsl");
-pub const SHADER_GRADE: &str = include_str!("shaders/grade.wgsl");
+/// Shared colour-space helpers, prepended to the grade and correction shaders.
+pub const SHADER_COLORSPACE: &str = include_str!("shaders/colorspace.wgsl");
+pub const SHADER_GRADE: &str = concat!(include_str!("shaders/colorspace.wgsl"), include_str!("shaders/grade.wgsl"));
+pub const SHADER_CORRECT: &str = concat!(include_str!("shaders/colorspace.wgsl"), include_str!("shaders/mask_common.wgsl"), include_str!("shaders/correct.wgsl"));
+pub const SHADER_MASK: &str = concat!(include_str!("shaders/mask_common.wgsl"), include_str!("shaders/mask.wgsl"));
 pub const SHADER_COMPOSITE: &str = include_str!("shaders/composite.wgsl");
 pub const SHADER_TRANSITION: &str = include_str!("shaders/transition.wgsl");
 pub const SHADER_OPTICAL_FLOW: &str = include_str!("shaders/optical_flow.wgsl");
@@ -34,6 +38,8 @@ pub const ALL_SHADERS: &[(&str, &str, &str)] = &[
     ("nv12", SHADER_NV12, "main"),
     ("fill", SHADER_FILL, "main"),
     ("scopes", SHADER_SCOPES, "accumulate"),
+    ("correct", SHADER_CORRECT, "main"),
+    ("mask", SHADER_MASK, "mask_mix"),
 ];
 
 /// Every compute entry point of `scopes.wgsl`.
@@ -138,6 +144,10 @@ fn pipe_m(device: &wgpu::Device, cache: Option<&wgpu::PipelineCache>, label: &st
 pub struct Pipelines {
     pub yuv: Pipe,
     pub grade: Pipe,
+    /// One stacked colour correction node.
+    pub correct: Pipe,
+    /// Shape-masked mix of a processed image over the original (and the wipe after nodes).
+    pub mask_mix: Pipe,
     pub composite: Pipe,
     pub transition: Pipe,
     /// Optical flow passes: luma pyramid, block matching, upsampling, Lucas-Kanade.
@@ -232,7 +242,9 @@ impl Pipelines {
             fx_levels: pipe_m(device, cache, "fx_levels", &fx, "levels", &xspec),
             flow_format,
             yuv: pipe(device, cache, "yuv", SHADER_YUV, "main", &[B::StorageRo, B::Uniform, w]),
-            grade: pipe(device, cache, "grade", SHADER_GRADE, "main", &[B::Tex, B::Tex3d, B::Samp, B::Uniform, w]),
+            grade: pipe(device, cache, "grade", SHADER_GRADE, "main", &[B::Tex, B::Tex3d, B::Samp, B::Uniform, w, B::Tex3d]),
+            correct: pipe(device, cache, "correct", SHADER_CORRECT, "main", &[B::Tex, B::Uniform, B::StorageRo, w]),
+            mask_mix: pipe(device, cache, "mask_mix", SHADER_MASK, "mask_mix", &[B::Tex, B::Tex, B::Uniform, w]),
             composite: pipe(device, cache, "composite", SHADER_COMPOSITE, "main", &[B::Tex, B::Tex, B::Samp, B::Uniform, w]),
             transition: pipe(device, cache, "transition", SHADER_TRANSITION, "main", &[B::Tex, B::Tex, B::Samp, B::Uniform, w]),
             frameblend: pipe(device, cache, "frameblend", SHADER_FRAMEBLEND, "main", &[B::Tex, B::Tex, B::Tex, B::Samp, B::Uniform, w]),

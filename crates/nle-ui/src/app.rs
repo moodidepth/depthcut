@@ -122,7 +122,7 @@ pub struct BrowserState {
 
 /// What the last preview frame was rendered from:
 /// (history revision, playhead, wipe, proxy, skim position).
-type PreviewKey = (u64, Time, Option<f32>, bool, Option<(AssetId, Time)>);
+type PreviewKey = (u64, Time, Option<f32>, bool, Option<(AssetId, Time)>, Option<nle_render::Highlight>);
 
 /// GPU preview: the renderer shares eframe's wgpu device and its display
 /// texture is registered with egui, so the viewer shows it without copies.
@@ -183,6 +183,8 @@ pub struct App {
     pub use_proxy: bool,
     pub viewer: ViewerState,
     pub punch: PunchState,
+    /// Colour-page viewer state: qualifier highlight, mask being edited.
+    pub color_view: crate::color_ui::ColorView,
     pub inspector_tab: InspectorTab,
     pub browser: BrowserState,
     pub export: ExportDialog,
@@ -306,6 +308,7 @@ impl App {
                 scope_kinds: [true, false, true, false],
             },
             punch: PunchState::default(),
+            color_view: Default::default(),
             inspector_tab: InspectorTab::Video,
             browser: BrowserState { search: String::new(), tag: None, selected: None, favorites_only: false, thumb_size: 132.0, new_tag: String::new(), skim: None },
             export: ExportDialog::default(),
@@ -1484,9 +1487,13 @@ impl App {
                 self.frames.request(a, next_st, proxy && a.proxy_path.is_some(), playing);
             }
         }
-        let key = (self.history.revision(), t, self.viewer.wipe, proxy, self.browser.skim);
+        let highlight = match (self.selection.first(), self.color_view.highlight) {
+            (Some(&clip), Some((node, matte))) if self.inspector_tab == InspectorTab::Color => Some(nle_render::Highlight { clip, node, matte }),
+            _ => None,
+        };
+        let key = (self.history.revision(), t, self.viewer.wipe, proxy, self.browser.skim, highlight);
         if p.last != Some(key) || p.pending_uploads {
-            let opts = RenderOptions { wipe: self.viewer.wipe, color: true };
+            let opts = RenderOptions { wipe: self.viewer.wipe, color: true, highlight };
             p.renderer.render(&comp, &mut NoBlock(&self.project), opts);
             p.last = Some(key);
             p.pending_uploads = false;

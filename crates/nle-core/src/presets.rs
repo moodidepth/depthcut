@@ -609,7 +609,8 @@ impl MontagePreset {
                 shadows: cp.shadows,
                 midtones: cp.midtones,
                 highlights: cp.highlights,
-                lut: clip.color.lut.clone(),
+                // keep the clip's LUT, colour management and correction nodes
+                ..clip.color.clone()
             };
         }
         for template in &preset.effects {

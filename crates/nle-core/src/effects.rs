@@ -335,11 +335,14 @@ pub struct Effect {
     /// instead of stacking duplicates on top.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub from_preset: bool,
+    /// Limits the effect to a shape (outside it the clip stays unaffected).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask: Option<crate::color::ShapeMask>,
 }
 
 impl Effect {
     pub fn new(kind: EffectKind) -> Self {
-        Effect { id: new_effect_id(), kind, enabled: true, params: kind.params().iter().map(|d| Param::new(d.default)).collect(), from_preset: false }
+        Effect { id: new_effect_id(), kind, enabled: true, params: kind.params().iter().map(|d| Param::new(d.default)).collect(), from_preset: false, mask: None }
     }
 
     /// Repair the parameter list after loading an older project (missing
@@ -367,7 +370,7 @@ impl Effect {
                 _ => v as f32,
             };
         }
-        ResolvedEffect { kind: self.kind, values }
+        ResolvedEffect { kind: self.kind, values, mask: self.mask.as_ref().map(|m| m.resolve()) }
     }
 }
 
@@ -376,6 +379,7 @@ impl Effect {
 pub struct ResolvedEffect {
     pub kind: EffectKind,
     pub values: [f32; MAX_EFFECT_PARAMS],
+    pub mask: Option<crate::color::ResolvedMask>,
 }
 
 impl ResolvedEffect {

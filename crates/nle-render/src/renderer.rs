@@ -16,7 +16,9 @@ use crate::scopes::{self, ScopeKind, ScopeParams, ScopeSettings, ScopeTargets};
 use crate::text::{self, FontBook};
 use crate::transform::{layer_to_output, Affine};
 use bytemuck::{Pod, Zeroable};
+use nle_core::color::{ColorCorrection, MaskShape, ResolvedMask, WorkingSpace};
 use nle_core::eval::{Layer, LayerSource, RenderNode, ResolvedColor, ResolvedTransition};
+use nle_core::ClipId;
 use nle_core::{AssetId, Composition, EffectKind, FrameBlendMode, FrameRate, ResolvedEffect, TitleAnim, TitleParams};
 use nle_media::{PixelFormat, VideoFrame};
 use std::collections::HashMap;
@@ -37,11 +39,23 @@ pub struct RenderOptions {
     pub wipe: Option<f32>,
     /// Apply colour grades (false = bypass for performance or comparison).
     pub color: bool,
+    /// Preview the qualifier / mask key of one correction node instead of
+    /// its result.
+    pub highlight: Option<Highlight>,
+}
+
+/// Which correction node's key to show, and how.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Highlight {
+    pub clip: ClipId,
+    pub node: u64,
+    /// Black / white matte instead of colour over grey.
+    pub matte: bool,
 }
 
 impl Default for RenderOptions {
     fn default() -> Self {
-        RenderOptions { wipe: None, color: true }
+        RenderOptions { wipe: None, color: true, highlight: None }
     }
 }
 
@@ -211,6 +225,91 @@ struct GradeU {
     lift: [f32; 4],
     gamma: [f32; 4],
     gain: [f32; 4],
+    input_space: u32,
+    working: u32,
+    in_lut_size: f32,
+    tonemap: u32,
+}
+
+/// `Mask` in mask_common.wgsl.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub(crate) struct MaskU {
+    kind: u32,
+    count: u32,
+    invert: u32,
+    feather: f32,
+    center: [f32; 2],
+    size: [f32; 2],
+    rot_cs: [f32; 2],
+    aspect: f32,
+    _pad: f32,
+    points: [[f32; 4]; 32],
+}
+
+impl MaskU {
+    pub(crate) fn new(m: Option<&ResolvedMask>, size: (u32, u32)) -> Self {
+        let mut u = MaskU::zeroed();
+        u.aspect = size.0 as f32 / size.1.max(1) as f32;
+        let Some(m) = m else { return u };
+        u.kind = match m.shape {
+            MaskShape::Ellipse => 1,
+            MaskShape::Rectangle => 2,
+            MaskShape::Polygon => 3,
+        };
+        u.count = m.count;
+        u.invert = m.invert as u32;
+        u.feather = m.feather;
+        u.center = m.center;
+        u.size = m.size;
+        let (s, c) = (-m.rotation.to_radians()).sin_cos();
+        u.rot_cs = [c, s];
+        for (i, p) in m.points.iter().take(m.count as usize).enumerate() {
+            u.points[i / 2][(i % 2) * 2] = p[0];
+            u.points[i / 2][(i % 2) * 2 + 1] = p[1];
+        }
+        u
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct MaskMixU {
+    mask: MaskU,
+    wipe: f32,
+    _pad: [f32; 3],
+}
+
+/// `Node` in correct.wgsl.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct NodeU {
+    lift: [f32; 4],
+    gamma: [f32; 4],
+    gain: [f32; 4],
+    offset: [f32; 4],
+    log_sh: [f32; 4],
+    log_mid: [f32; 4],
+    log_hi: [f32; 4],
+    exposure: f32,
+    temperature: f32,
+    tint: f32,
+    contrast: f32,
+    pivot: f32,
+    saturation: f32,
+    low_range: f32,
+    high_range: f32,
+    mix: f32,
+    working: u32,
+    curves: u32,
+    highlight: u32,
+    q_flags: u32,
+    q_denoise: f32,
+    _p: [f32; 2],
+    q_hue: [f32; 4],
+    q_sat: [f32; 4],
+    q_lum: [f32; 4],
+    mask: MaskU,
 }
 
 #[repr(C)]
@@ -610,6 +709,45 @@ impl Renderer {
         Some(data)
     }
 
+    /// RGBA8 pixels of the last [`Renderer::render`]ed frame (row-major,
+    /// `width × height`). Blocks: for tests and diagnostics.
+    pub fn read_display(&self) -> Vec<u8> {
+        let (w, h) = (self.width.max(1), self.height.max(1));
+        let row = (w * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        let device = &self.gpu.device;
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("rcp-display-readback"),
+            size: (row * h) as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("rcp-display-read") });
+        enc.copy_texture_to_buffer(
+            self.display.as_image_copy(),
+            wgpu::TexelCopyBufferInfo { buffer: &readback, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(h) } },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        self.gpu.queue.submit(Some(enc.finish()));
+        let slice = readback.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        let _ = device.poll(wgpu::Maintain::Wait);
+        if !matches!(rx.recv(), Ok(Ok(()))) {
+            return vec![0; (w * h * 4) as usize];
+        }
+        let data = slice.get_mapped_range();
+        let mut out = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            let s = (y * row) as usize;
+            out.extend_from_slice(&data[s..s + (w * 4) as usize]);
+        }
+        drop(data);
+        readback.unmap();
+        out
+    }
+
     /// RGBA8 pixels of a drawn scope (display-encoded, row-major, `kind.size()`).
     /// Blocks: for tests and diagnostics.
     pub fn read_scope_image(&self, kind: ScopeKind) -> Option<Vec<u8>> {
@@ -784,11 +922,114 @@ impl Renderer {
         self.luts.get(path).cloned().flatten().unwrap_or_else(|| self.identity_lut.clone())
     }
 
+    /// The full colour pipeline of a layer: the primary grade (with colour
+    /// management), then each correction node. The wipe compares against the
+    /// ungraded source.
+    fn color_pipeline(&mut self, enc: &mut wgpu::CommandEncoder, src: &wgpu::TextureView, size: (u32, u32), c: &ResolvedColor, clip: ClipId, opts: RenderOptions) -> Target {
+        let hl = opts.highlight.filter(|h| h.clip == clip);
+        let run: Vec<&ColorCorrection> = c.nodes.iter().filter(|n| !n.is_identity() || hl.is_some_and(|h| h.node == n.id)).collect();
+        if run.is_empty() {
+            return self.grade(enc, src, size, c, opts.wipe);
+        }
+        let mut cur = self.grade(enc, src, size, c, None);
+        for n in run {
+            let mode = match hl {
+                Some(h) if h.node == n.id => 1 + h.matte as u32,
+                _ => 0,
+            };
+            let next = self.correct(enc, &cur.view, size, n, c.working, mode);
+            self.pool.put(std::mem::replace(&mut cur, next));
+        }
+        if let Some(w) = opts.wipe {
+            let next = self.mask_mix(enc, src, &cur.view, size, None, Some(w));
+            self.pool.put(std::mem::replace(&mut cur, next));
+        }
+        cur
+    }
+
+    fn correct(&mut self, enc: &mut wgpu::CommandEncoder, src: &wgpu::TextureView, size: (u32, u32), n: &ColorCorrection, working: WorkingSpace, highlight: u32) -> Target {
+        let out = self.pool.get(&self.gpu.device, size.0, size.1);
+        let curves_on = !n.curves_identity();
+        let tone_on = ![&n.curve_master, &n.curve_r, &n.curve_g, &n.curve_b].iter().all(|c| c.is_identity());
+        let hue_on = curves_on && ![&n.hue_vs_hue, &n.hue_vs_sat, &n.hue_vs_lum].iter().all(|c| c.is_identity());
+        let q = n.qualifier;
+        let mask = n.mask.as_ref().map(|m| m.resolve());
+        let u = self.uniform(&NodeU {
+            lift: n.lift.as_array(),
+            gamma: n.gamma.as_array(),
+            gain: n.gain.as_array(),
+            offset: n.offset.as_array(),
+            log_sh: n.log_shadows.as_array(),
+            log_mid: n.log_midtones.as_array(),
+            log_hi: n.log_highlights.as_array(),
+            exposure: n.exposure,
+            temperature: n.temperature,
+            tint: n.tint,
+            contrast: n.contrast,
+            pivot: n.pivot,
+            saturation: n.saturation,
+            low_range: n.low_range,
+            high_range: n.high_range,
+            mix: n.mix.clamp(0.0, 1.0),
+            working: working.shader_index(),
+            curves: tone_on as u32 | (hue_on as u32) << 1,
+            highlight,
+            q_flags: q.map_or(0, |q| q.use_hue as u32 | (q.use_sat as u32) << 1 | (q.use_lum as u32) << 2 | (q.invert as u32) << 3 | 1 << 4),
+            // denoise 0..1 → up to 6 px at 1080p
+            q_denoise: q.map_or(0.0, |q| q.denoise.clamp(0.0, 1.0) * 6.0 * size.1 as f32 / 1080.0),
+            _p: [0.0; 2],
+            q_hue: q.map_or([0.0; 4], |q| [q.hue_center, q.hue_width, q.hue_soft, 0.0]),
+            q_sat: q.map_or([0.0; 4], |q| [q.sat_low, q.sat_high, q.sat_soft, 0.0]),
+            q_lum: q.map_or([0.0; 4], |q| [q.lum_low, q.lum_high, q.lum_soft, 0.0]),
+            mask: MaskU::new(mask.as_ref(), size),
+        });
+        let tables = if curves_on { n.bake_curves() } else { vec![0.0f32; 4] };
+        let curves = self.gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("rcp-curves"),
+            contents: bytemuck::cast_slice(&tables),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        self.dispatch(
+            enc,
+            &self.p.correct,
+            &[entry(0, tv(src)), entry(1, u.as_entire_binding()), entry(2, curves.as_entire_binding()), entry(3, tv(&out.view))],
+            ceil8(size.0),
+            ceil8(size.1),
+        );
+        out
+    }
+
+    /// `processed` over `orig` through a shape mask, or the before/after wipe.
+    fn mask_mix(
+        &mut self,
+        enc: &mut wgpu::CommandEncoder,
+        orig: &wgpu::TextureView,
+        processed: &wgpu::TextureView,
+        size: (u32, u32),
+        mask: Option<&ResolvedMask>,
+        wipe: Option<f32>,
+    ) -> Target {
+        let out = self.pool.get(&self.gpu.device, size.0, size.1);
+        let u = self.uniform(&MaskMixU { mask: MaskU::new(mask, size), wipe: wipe.unwrap_or(-1.0), _pad: [0.0; 3] });
+        self.dispatch(
+            enc,
+            &self.p.mask_mix,
+            &[entry(0, tv(orig)), entry(1, tv(processed)), entry(2, u.as_entire_binding()), entry(3, tv(&out.view))],
+            ceil8(size.0),
+            ceil8(size.1),
+        );
+        out
+    }
+
     fn grade(&mut self, enc: &mut wgpu::CommandEncoder, src: &wgpu::TextureView, size: (u32, u32), c: &ResolvedColor, wipe: Option<f32>) -> Target {
         let out = self.pool.get(&self.gpu.device, size.0, size.1);
         let (lut, mix) = match &c.lut {
             Some(l) if l.intensity > 0.0 => (self.lut(&l.path), l.intensity),
             _ => (self.identity_lut.clone(), 0.0),
+        };
+        let in_lut = match &c.input_lut {
+            Some(l) => Some(self.lut(&l.path)).filter(|l| l.size > 2),
+            None => None,
         };
         let u = self.uniform(&GradeU {
             exposure: c.exposure,
@@ -802,11 +1043,23 @@ impl Renderer {
             lift: c.lift,
             gamma: c.gamma,
             gain: c.gain,
+            input_space: c.input_space.shader_index(),
+            working: c.working.shader_index(),
+            in_lut_size: in_lut.as_ref().map_or(0.0, |l| l.size as f32),
+            tonemap: (in_lut.is_none() && c.input_space.is_scene_or_hdr()) as u32,
         });
+        let in_view = &in_lut.as_ref().unwrap_or(&self.identity_lut).view;
         self.dispatch(
             enc,
             &self.p.grade,
-            &[entry(0, tv(src)), entry(1, tv(&lut.view)), entry(2, wgpu::BindingResource::Sampler(&self.sampler)), entry(3, u.as_entire_binding()), entry(4, tv(&out.view))],
+            &[
+                entry(0, tv(src)),
+                entry(1, tv(&lut.view)),
+                entry(2, wgpu::BindingResource::Sampler(&self.sampler)),
+                entry(3, u.as_entire_binding()),
+                entry(4, tv(&out.view)),
+                entry(5, tv(in_view)),
+            ],
             ceil8(size.0),
             ceil8(size.1),
         );
@@ -1203,7 +1456,16 @@ impl Renderer {
         for e in effects {
             let out = {
                 let (view, size) = cur.as_ref().map_or((src, size), |t| (&t.view, (t.width, t.height)));
-                self.apply_effect(enc, view, size, e, flow, vel_scale, time, resize)
+                let out = self.apply_effect(enc, view, size, e, flow, vel_scale, time, resize);
+                // a masked effect only shows inside its shape
+                match (out, &e.mask) {
+                    (Some(o), Some(m)) if (o.width, o.height) == size => {
+                        let mixed = self.mask_mix(enc, view, &o.view, size, Some(m), None);
+                        self.pool.put(o);
+                        Some(mixed)
+                    }
+                    (o, _) => o,
+                }
             };
             if let Some(o) = out {
                 if let Some(old) = cur.replace(o) {
@@ -1402,9 +1664,9 @@ impl Renderer {
     }
 
     fn maybe_grade(&mut self, enc: &mut wgpu::CommandEncoder, img: Img, layer: &Layer, opts: RenderOptions) -> Img {
-        if opts.color && layer.color.enabled {
+        if opts.color && (layer.color.enabled || opts.highlight.is_some_and(|h| h.clip == layer.clip)) {
             let size = img.size();
-            let graded = self.grade(enc, img.view(), size, &layer.color, opts.wipe);
+            let graded = self.color_pipeline(enc, img.view(), size, &layer.color, layer.clip, opts);
             let Img::Pooled(t) = img;
             {
                 self.pool.put(t);
@@ -1432,12 +1694,12 @@ impl Renderer {
     /// An adjustment layer: grade + effects applied to everything beneath.
     #[allow(clippy::too_many_arguments)] // one GPU pass: encoder, targets and per-pass state
     fn draw_adjustment(&mut self, enc: &mut wgpu::CommandEncoder, bg: Target, layer: &Layer, src: &mut dyn FrameSource, opts: RenderOptions, depth: u32, ctx: Ctx) -> Target {
-        let grade = opts.color && layer.color.enabled;
+        let grade = opts.color && (layer.color.enabled || opts.highlight.is_some_and(|h| h.clip == layer.clip));
         if !grade && layer.effects.is_empty() {
             return bg;
         }
         let size = (bg.width, bg.height);
-        let graded = if grade { Some(self.grade(enc, &bg.view, size, &layer.color, opts.wipe)) } else { None };
+        let graded = if grade { Some(self.color_pipeline(enc, &bg.view, size, &layer.color, layer.clip, opts)) } else { None };
         // motion vectors of the composite: previous frame → this one
         let flow = match ctx.prev {
             Some(prev) if layer.has_effect(EffectKind::MotionBlur) && depth < 16 => {

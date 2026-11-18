@@ -50,11 +50,32 @@ pub struct ResolvedColor {
     pub gamma: [f32; 4],
     pub gain: [f32; 4],
     pub lut: Option<LutRef>,
+    pub input_space: crate::color::ColorSpace,
+    pub working: crate::color::WorkingSpace,
+    pub input_lut: Option<LutRef>,
+    /// Enabled correction nodes in order (identity ones included, so a
+    /// node's qualifier can still be previewed).
+    pub nodes: Vec<crate::color::ColorCorrection>,
 }
 
 impl Default for ResolvedColor {
     fn default() -> Self {
-        ResolvedColor { enabled: false, exposure: 0.0, contrast: 0.0, saturation: 1.0, temperature: 0.0, tint: 0.0, lift: [0.0; 4], gamma: [0.0; 4], gain: [0.0; 4], lut: None }
+        ResolvedColor {
+            enabled: false,
+            exposure: 0.0,
+            contrast: 0.0,
+            saturation: 1.0,
+            temperature: 0.0,
+            tint: 0.0,
+            lift: [0.0; 4],
+            gamma: [0.0; 4],
+            gain: [0.0; 4],
+            lut: None,
+            input_space: Default::default(),
+            working: Default::default(),
+            input_lut: None,
+            nodes: Vec::new(),
+        }
     }
 }
 
@@ -248,6 +269,10 @@ fn resolve_color(c: &Clip, t: Time) -> ResolvedColor {
         gamma: k.midtones.as_array(),
         gain: k.highlights.as_array(),
         lut: k.lut.clone(),
+        input_space: k.input_space,
+        working: k.working,
+        input_lut: k.input_lut.clone(),
+        nodes: if k.enabled { k.corrections.iter().filter(|n| n.enabled && n.mix > 0.0).cloned().collect() } else { Vec::new() },
     }
 }
 

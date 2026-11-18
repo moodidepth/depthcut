@@ -10,6 +10,7 @@ mod about_ui;
 mod app;
 mod browser;
 mod captions_ui;
+mod color_ui;
 mod copilot_ui;
 mod demo;
 mod diagnostics;

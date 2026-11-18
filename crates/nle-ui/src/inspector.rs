@@ -4,6 +4,7 @@
 //! undo step.
 
 use crate::app::{drag_key, App, InspectorTab, PunchState};
+use crate::color_ui::{color_management, corrections, mask_editor, ColorView, MaskFocus};
 use crate::theme;
 use crate::widgets::{color_wheel, param_row, slider_f32, ParamSpec};
 use eframe::egui::{self, Color32, Stroke};
@@ -59,9 +60,14 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let beat_busy = app.beat_job.is_some();
     let kill_busy = app.kill_job.is_some();
     let mb_busy = app.multiband_job.is_some();
+    let detected_space = match &c.kind {
+        ClipKind::Asset { asset } => app.project.asset(*asset).and_then(|a| a.video.as_ref()).and_then(|v| nle_core::color::ColorSpace::from_ffmpeg_transfer(&v.color_transfer)),
+        _ => None,
+    };
+    let color_view = &mut app.color_view;
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match app.inspector_tab {
-        InspectorTab::Video => video_tab(ui, &mut c, local, frame, &mut retime_action, &mut toggle_reframe_916, &mut app.punch, &mut punch_request),
-        InspectorTab::Color => color_tab(ui, &mut c, local, frame),
+        InspectorTab::Video => video_tab(ui, &mut c, local, frame, &mut retime_action, &mut toggle_reframe_916, &mut app.punch, &mut punch_request, color_view),
+        InspectorTab::Color => color_tab(ui, &mut c, local, frame, detected_space, color_view),
         InspectorTab::Audio => {
             audio_tab(ui, &mut c, local, frame, asset_lufs, beat_busy, kill_busy, mb_busy, &mut analyze_beats, &mut multiband_beats, &mut scan_kills, &mut sync_beats)
         }
@@ -169,6 +175,7 @@ fn video_tab(
     toggle_reframe_916: &mut bool,
     punch: &mut PunchState,
     punch_request: &mut Option<bool>,
+    view: &mut ColorView,
 ) {
     if matches!(c.kind, ClipKind::Gap) || (!c.has_video() && !matches!(c.kind, ClipKind::Title(_))) {
         ui.label(egui::RichText::new("No video in this clip.").color(theme::TEXT_DIM));
@@ -241,7 +248,7 @@ fn video_tab(
             }
         });
     }
-    effects_section(ui, &mut c.effects, t, f);
+    effects_section(ui, &mut c.effects, t, f, view);
     if matches!(c.kind, ClipKind::Asset { .. } | ClipKind::Compound(_)) {
         section(ui, "Speed (Retime)", |ui| {
             let cur = c.retime.as_ref().map(|r| r.speed_at(t)).unwrap_or(1.0);
@@ -340,7 +347,7 @@ fn zoom_punch_section(ui: &mut egui::Ui, punch: &mut PunchState, request: &mut O
     });
 }
 
-fn effects_section(ui: &mut egui::Ui, effects: &mut Vec<Effect>, t: Time, f: Time) {
+fn effects_section(ui: &mut egui::Ui, effects: &mut Vec<Effect>, t: Time, f: Time, view: &mut ColorView) {
     section(ui, &format!("Effects ({})", effects.len()), |ui| {
         ui.horizontal(|ui| {
             ui.menu_button("＋ Add Effect", |ui| {
@@ -469,6 +476,9 @@ fn effects_section(ui: &mut egui::Ui, effects: &mut Vec<Effect>, t: Time, f: Tim
                             }
                             i += 1;
                         }
+                        egui::CollapsingHeader::new("Mask").id_salt(("fx-mask", id)).default_open(e.mask.is_some()).show(ui, |ui| {
+                            mask_editor(ui, &mut e.mask, MaskFocus::Effect(id), &mut view.mask_focus);
+                        });
                     }
                 });
             });
@@ -483,7 +493,7 @@ fn effects_section(ui: &mut egui::Ui, effects: &mut Vec<Effect>, t: Time, f: Tim
 
 // ---------------------------------------------------------------------------
 
-fn color_tab(ui: &mut egui::Ui, c: &mut Clip, t: Time, f: Time) {
+fn color_tab(ui: &mut egui::Ui, c: &mut Clip, t: Time, f: Time, detected: Option<nle_core::color::ColorSpace>, view: &mut ColorView) {
     if matches!(c.kind, ClipKind::Gap) || !c.has_video() && !matches!(c.kind, ClipKind::Adjustment | ClipKind::Title(_)) {
         ui.label(egui::RichText::new("No video in this clip.").color(theme::TEXT_DIM));
         return;
@@ -496,6 +506,7 @@ fn color_tab(ui: &mut egui::Ui, c: &mut Clip, t: Time, f: Time) {
         }
     });
     ui.add_enabled_ui(col.enabled, |ui| {
+        color_management(ui, col, detected);
         section(ui, "Color Wheels", |ui| {
             ui.horizontal(|ui| {
                 let size = ((ui.available_width() - 24.0) / 3.0).clamp(70.0, 110.0);
@@ -512,7 +523,7 @@ fn color_tab(ui: &mut egui::Ui, c: &mut Clip, t: Time, f: Time) {
             param_row(ui, &ParamSpec::new("Temperature", -1.0, 1.0, 0.0).scaled(100.0, "").decimals(0), &mut col.temperature, t, f);
             param_row(ui, &ParamSpec::new("Tint", -1.0, 1.0, 0.0).scaled(100.0, "").decimals(0), &mut col.tint, t, f);
         });
-        section(ui, "LUT", |ui| {
+        section(ui, "Look LUT", |ui| {
             ui.horizontal(|ui| {
                 let label = col.lut.as_ref().map(|l| std::path::Path::new(&l.path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default());
                 ui.label(label.unwrap_or_else(|| "None".into()));
@@ -529,6 +540,7 @@ fn color_tab(ui: &mut egui::Ui, c: &mut Clip, t: Time, f: Time) {
                 slider_f32(ui, "Mix", &mut l.intensity, 0.0..=1.0, "");
             }
         });
+        corrections(ui, col, view);
     });
 }
 

@@ -12,6 +12,8 @@
 //! * [`eval`] — resolves the timeline at an instant into render/audio graphs.
 //! * [`autosave`] — atomic 30-second crash-recovery snapshots.
 //! * [`fcpxml`] — Final Cut Pro XML 1.10 import/export.
+//! * [`color`] — colour management (input spaces, ACEScct working space) and stacked
+//!   correction nodes with curves, HSL qualifier and shape masks.
 //! * [`effects`] — stackable GPU effects (motion blur, halation, shake, grain, glow, blurs, chroma key).
 //! * [`text_anim`] — animated Text+ presets (pop, typewriter, slide-up, tracking, glitch, word highlight).
 //! * [`captions`] — word-timed captions track with SRT import/export.
@@ -23,6 +25,7 @@ pub mod autosave;
 pub mod caption_follow;
 pub mod captions;
 pub mod clip;
+pub mod color;
 pub mod command;
 pub mod effects;
 pub mod eval;

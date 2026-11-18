@@ -728,6 +728,42 @@ fn blend_modes_keep_shader_indices_and_round_trip_fcpxml() {
 }
 
 #[test]
+fn fcpxml_round_trips_colour_pipeline_nodes_and_masked_effects() {
+    use nle_core::color::{ColorCorrection, ColorSpace, MaskShape, Qualifier, ShapeMask, WorkingSpace};
+    let mut p = Project::new("Grade");
+    let a = asset("Log Shot", 60);
+    p.add_asset(a.clone());
+    let mut c = Clip::from_asset_range(&a, Time::ZERO, secs(2));
+    c.color.input_space = ColorSpace::SonySLog3;
+    c.color.working = WorkingSpace::AcesCct;
+    let mut n = ColorCorrection::named("Skin");
+    n.qualifier = Some(Qualifier { denoise: 0.4, ..Default::default() });
+    n.mask = Some(ShapeMask { rotation: 12.0, ..ShapeMask::new(MaskShape::Polygon) });
+    n.curve_master.set_point(0.5, 0.6, 0.0);
+    n.hue_vs_sat.points = vec![[0.3, -0.5]];
+    c.color.corrections = vec![n, ColorCorrection { enabled: false, ..ColorCorrection::named("Off") }];
+    let mut e = Effect::new(EffectKind::GaussianBlur);
+    e.mask = Some(ShapeMask { invert: true, ..ShapeMask::new(MaskShape::Ellipse) });
+    let mut off = Effect::new(EffectKind::Glow);
+    off.enabled = false;
+    c.effects = vec![e, off];
+    p.timeline.append(c.clone()).unwrap();
+
+    let xml = fcpxml::export(&p);
+    assert!(xml.contains("rcp.colorPipeline") && xml.contains("rcp.effect"));
+    let q = fcpxml::import(&xml).expect("re-import");
+    let r = &q.timeline.spine[0];
+    assert_eq!(r.color.input_space, ColorSpace::SonySLog3);
+    assert_eq!(r.color.working, WorkingSpace::AcesCct);
+    assert_eq!(r.color.corrections, c.color.corrections);
+    assert_eq!(r.effects.len(), 2);
+    assert_eq!(r.effects[0].kind, EffectKind::GaussianBlur);
+    assert_eq!(r.effects[0].mask, c.effects[0].mask);
+    assert!(!r.effects[1].enabled);
+    assert_eq!(fcpxml::export(&q), xml, "stable round trip");
+}
+
+#[test]
 fn fcpxml_import_rejects_garbage() {
     assert!(fcpxml::import("<notfcp/>").is_err());
     assert!(fcpxml::import("<fcpxml><resources/></fcpxml>").is_err());
