@@ -2311,7 +2311,15 @@ impl App {
                     }
                 }
                 if let Some(s) = self.status_text() {
-                    ui.label(egui::RichText::new(s).color(theme::SNAP));
+                    // fit the space left of the stats; long messages (file paths) are
+                    // cut with "…" instead of drawing over the menus
+                    let w = ui.available_width() - 8.0;
+                    if w > 40.0 {
+                        ui.scope(|ui| {
+                            ui.set_max_width(w);
+                            ui.add(egui::Label::new(egui::RichText::new(s).color(theme::SNAP)).truncate()).on_hover_text(s);
+                        });
+                    }
                 }
             });
         });

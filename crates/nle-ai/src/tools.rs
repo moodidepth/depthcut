@@ -34,7 +34,7 @@ pub enum CopilotToolCall {
     StyleCaptions(CaptionStyleArgs),
     PolishAudio,
     AdjustAudio(AudioArgs),
-    SetExportPreset { delivery: String },
+    SetExportPreset { delivery: String, codec: Option<String> },
 }
 
 /// What the app knows that the timeline doesn't, for tools that need it.
@@ -130,7 +130,7 @@ impl CopilotToolCall {
             "style_captions" => Ok(Self::StyleCaptions(post::parse_caption_style(&a)?)),
             "polish_audio" => Ok(Self::PolishAudio),
             "adjust_audio" => Ok(Self::AdjustAudio(post::parse_audio(&a)?)),
-            "set_export_preset" => Ok(Self::SetExportPreset { delivery: post::parse_delivery(&a)? }),
+            "set_export_preset" => Ok(Self::SetExportPreset { delivery: post::parse_delivery(&a)?, codec: post::parse_codec(&a)? }),
             other => Err(format!("unknown tool '{}'", other.chars().take(64).collect::<String>())),
         }
     }
@@ -608,8 +608,8 @@ fn plan_tool_call(call: &CopilotToolCall, tl: &Timeline, playhead: Time, selecti
             let (r, s) = post::plan_generate_captions(tl, language)?;
             ask(r, s)
         }
-        CopilotToolCall::SetExportPreset { delivery } => {
-            let (r, s) = post::plan_export(delivery);
+        CopilotToolCall::SetExportPreset { delivery, codec } => {
+            let (r, s) = post::plan_export(delivery, codec.as_deref());
             ask(r, s)
         }
     }
@@ -833,7 +833,20 @@ pub fn offline_copilot_plan(prompt: &str, tl: &Timeline, playhead: Time, selecti
         } else {
             "match_project"
         };
-        calls.push(CopilotToolCall::SetExportPreset { delivery: delivery.into() });
+        let codec = if has(&["h.264", "h264", "x264", "avc"]) {
+            Some("h264")
+        } else if has(&["hevc", "h.265", "h265", "x265"]) {
+            Some("hevc")
+        } else if has(&["av1"]) {
+            Some("av1")
+        } else if has(&["prores"]) {
+            Some("prores")
+        } else if has(&["dnxhr", "dnxhd"]) {
+            Some("dnxhr")
+        } else {
+            None
+        };
+        calls.push(CopilotToolCall::SetExportPreset { delivery: delivery.into(), codec: codec.map(Into::into) });
         notes.push("Opened the Render dialog with a delivery preset.");
     }
     if calls.is_empty() {

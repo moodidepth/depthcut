@@ -474,9 +474,11 @@ fn run_request(app: &mut App, req: nle_ai::UiRequest) -> Result<(), String> {
             app.show_captions = true;
             crate::captions_ui::start_caption_generation(app)
         }
-        nle_ai::UiRequest::OpenExport { delivery } => {
+        nle_ai::UiRequest::OpenExport { delivery, codec } => {
             let g = crate::export_ui::delivery_from_name(&delivery).ok_or_else(|| format!("unknown delivery '{delivery}'"))?;
+            let c = codec.map(|c| crate::export_ui::codec_from_name(&c).ok_or_else(|| format!("unknown codec '{c}'"))).transpose()?;
             app.export.requested_delivery = Some(g);
+            app.export.requested_codec = c;
             app.export.open = true;
             Ok(())
         }

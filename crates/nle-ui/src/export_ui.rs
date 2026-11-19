@@ -9,7 +9,7 @@ use eframe::egui;
 use nle_core::{AssetId, Clip, ClipKind, Project};
 use nle_media::encoder_probe;
 use nle_media::AudioBuffer;
-use nle_render::export::{fits_size_budget, mastering_presets, run_export, working_presets, AudioExport, ExportProgress, RateControl};
+use nle_render::export::{fits_size_budget, mastering_presets, run_export, working_presets, AudioExport, ExportCodec, ExportProgress, RateControl};
 use nle_render::{ExportPreset, ExportSettings, GamingDeliveryPreset, GpuContext};
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
@@ -42,6 +42,8 @@ pub struct ExportDialog {
     /// Delivery chosen from outside the dialog (AI Copilot); applied like a
     /// pick from the combo box the next time the dialog draws.
     pub requested_delivery: Option<GamingDeliveryPreset>,
+    /// Codec family requested the same way; applied after the delivery.
+    pub requested_codec: Option<ExportCodec>,
     preset: Option<ExportPreset>,
     quality: u8,
     use_bitrate: bool,
@@ -93,6 +95,33 @@ impl ExportDialog {
         self.fps = 0;
         self.loudness = loudness_choice(s.loudness_target);
     }
+
+    /// Switch the video codec (combo box or AI Copilot).
+    fn pick_preset(&mut self, p: ExportPreset) {
+        self.preset = Some(p);
+        self.quality = p.default_quality();
+        if p.is_mastering() && self.audio == 0 {
+            self.audio = 1;
+        }
+        // keep the file name, switch the extension to the format's
+        if let Some(path) = &mut self.path {
+            if path.extension().is_none_or(|e| !e.eq_ignore_ascii_case(p.extension())) {
+                path.set_extension(p.extension());
+            }
+        }
+    }
+}
+
+/// Copilot codec names (`nle_ai::tools_post::EXPORT_CODECS`) to codec families.
+pub fn codec_from_name(name: &str) -> Option<ExportCodec> {
+    Some(match name {
+        "h264" => ExportCodec::H264,
+        "hevc" => ExportCodec::Hevc,
+        "av1" => ExportCodec::Av1,
+        "prores" => ExportCodec::ProRes,
+        "dnxhr" => ExportCodec::Dnxhr,
+        _ => return None,
+    })
 }
 
 /// Copilot delivery names (`nle_ai::tools_post::EXPORT_DELIVERIES`) to presets.
@@ -114,6 +143,7 @@ impl Default for ExportDialog {
             open: false,
             delivery: GamingDeliveryPreset::ProjectDefault,
             requested_delivery: None,
+            requested_codec: None,
             preset: None,
             quality: 24,
             use_bitrate: false,
@@ -243,6 +273,15 @@ impl ExportDialog {
             if let Some(g) = self.requested_delivery.take() {
                 self.select_delivery(g, project, &presets);
             }
+            // Wait for the encoder probe before honouring a requested codec.
+            if probe.is_some() {
+                if let Some(c) = self.requested_codec.take() {
+                    match presets.iter().copied().find(|p| p.codec() == c) {
+                        Some(p) => self.pick_preset(p),
+                        None => self.last_result = Some(format!("No working {c:?} encoder was found; kept {}", self.preset.map(|p| p.label()).unwrap_or("none"))),
+                    }
+                }
+            }
             let dur_secs = project.timeline.extent().as_secs_f64().max(0.1);
             let mut target_w = f.width;
             let mut target_h = f.height;
@@ -275,17 +314,7 @@ impl ExportDialog {
                 egui::ComboBox::from_id_salt("preset").selected_text(self.preset.map(|p| p.label()).unwrap_or("none")).width(240.0).show_ui(ui, |ui| {
                     let mut pick = |ui: &mut egui::Ui, p: ExportPreset| {
                         if ui.selectable_label(self.preset == Some(p), p.label()).clicked() {
-                            self.preset = Some(p);
-                            self.quality = p.default_quality();
-                            if p.is_mastering() && self.audio == 0 {
-                                self.audio = 1;
-                            }
-                            // keep the file name, switch the extension to the format's
-                            if let Some(path) = &mut self.path {
-                                if path.extension().is_none_or(|e| !e.eq_ignore_ascii_case(p.extension())) {
-                                    path.set_extension(p.extension());
-                                }
-                            }
+                            self.pick_preset(p);
                         }
                     };
                     for p in &delivery_presets {

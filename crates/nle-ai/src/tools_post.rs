@@ -22,7 +22,12 @@ pub enum UiRequest {
     GenerateCaptions { language: Option<String> },
     /// Open the Render dialog with a delivery preset selected. The user still
     /// picks the file and presses Export.
-    OpenExport { delivery: String },
+    /// `codec` (one of [`EXPORT_CODECS`]) overrides the preset's encoder choice.
+    OpenExport {
+        delivery: String,
+        #[serde(default)]
+        codec: Option<String>,
+    },
 }
 
 pub const COLOR_LOOKS: [&str; 8] = ["neutral", "warm", "cool", "teal_orange", "punchy", "faded", "black_and_white", "moody"];
@@ -32,6 +37,8 @@ pub const CAPTION_COLORS: [&str; 4] = ["yellow", "coral", "green", "white"];
 pub const AUDIO_ROLES: [&str; 4] = ["dialogue", "music", "effects", "general"];
 /// Delivery presets the Render dialog knows (`GamingDeliveryPreset` in nle-render).
 pub const EXPORT_DELIVERIES: [&str; 6] = ["match_project", "youtube_1440p60", "youtube_4k60", "shorts_9x16", "discord_25mb", "discord_50mb"];
+/// Video codec families the Render dialog can be switched to (`ExportCodec` in nle-render).
+pub const EXPORT_CODECS: [&str; 5] = ["h264", "hevc", "av1", "prores", "dnxhr"];
 
 /// Name of the correction node a Copilot look lives in (replaced, not stacked,
 /// when the look changes).
@@ -115,6 +122,9 @@ fn one_of(field: &str, v: &str, allowed: &[&str]) -> Result<String, String> {
         "youtube" | "youtube_1440p" => "youtube_1440p60".to_string(),
         "youtube_4k" | "4k" => "youtube_4k60".to_string(),
         "discord" => "discord_25mb".to_string(),
+        "h_264" | "avc" | "x264" | "libx264" | "mp4" => "h264".to_string(),
+        "h265" | "h_265" | "x265" | "hevc_main10" => "hevc".to_string(),
+        "dnxhd" => "dnxhr".to_string(),
         _ => n,
     };
     if allowed.contains(&n.as_str()) {
@@ -220,6 +230,11 @@ pub(crate) fn parse_language(a: &ArgReader) -> Result<Option<String>, String> {
 
 pub(crate) fn parse_delivery(a: &ArgReader) -> Result<String, String> {
     one_of("delivery", &a.req_text("delivery")?, &EXPORT_DELIVERIES)
+}
+
+/// Optional `codec` of `set_export_preset` (`None` keeps the preset's choice).
+pub(crate) fn parse_codec(a: &ArgReader) -> Result<Option<String>, String> {
+    a.text("codec")?.map(|c| one_of("codec", &c.replace('.', ""), &EXPORT_CODECS)).transpose()
 }
 
 // ---------------------------------------------------------------------------
@@ -495,8 +510,9 @@ pub fn plan_generate_captions(tl: &Timeline, language: &Option<String>) -> Resul
     Ok((UiRequest::GenerateCaptions { language: language.clone() }, format!("Transcribing captions ({lang})")))
 }
 
-pub fn plan_export(delivery: &str) -> (UiRequest, String) {
-    (UiRequest::OpenExport { delivery: delivery.into() }, format!("Render dialog opened with '{delivery}' — choose a file and press Export"))
+pub fn plan_export(delivery: &str, codec: Option<&str>) -> (UiRequest, String) {
+    let with = codec.map(|c| format!(" and codec '{c}'")).unwrap_or_default();
+    (UiRequest::OpenExport { delivery: delivery.into(), codec: codec.map(Into::into) }, format!("Render dialog opened with '{delivery}'{with} — choose a file and press Export"))
 }
 
 /// Function declarations (Gemini schema dialect) for the tools in this module.
@@ -576,9 +592,10 @@ pub fn declarations() -> Vec<Value> {
         }),
         json!({
             "name": "set_export_preset",
-            "description": "Open the Render dialog with a delivery preset selected. It does not start the export; the user picks the file and confirms.",
+            "description": "Open the Render dialog with a delivery preset selected. It does not start the export; the user picks the file and confirms. Set `codec` whenever the user names one (\"H.264\", \"HEVC\", \"AV1\", \"ProRes\"); otherwise the preset picks.",
             "parameters": { "type": "OBJECT", "properties": {
-                "delivery": { "type": "STRING", "description": EXPORT_DELIVERIES.join(" | ") }
+                "delivery": { "type": "STRING", "description": EXPORT_DELIVERIES.join(" | ") },
+                "codec": { "type": "STRING", "description": EXPORT_CODECS.join(" | ") }
             }, "required": ["delivery"] }
         }),
     ]
@@ -632,7 +649,12 @@ mod tests {
         assert!(call("adjust_audio", json!({ "volume_db": 40 })).is_err());
         assert!(call("generate_captions", json!({ "language": "english please" })).is_err());
         assert_eq!(call("generate_captions", json!({ "language": "auto" })).unwrap(), CopilotToolCall::GenerateCaptions { language: None });
-        assert_eq!(call("set_export_preset", json!({ "delivery": "TikTok" })).unwrap(), CopilotToolCall::SetExportPreset { delivery: "shorts_9x16".into() });
+        assert_eq!(call("set_export_preset", json!({ "delivery": "TikTok" })).unwrap(), CopilotToolCall::SetExportPreset { delivery: "shorts_9x16".into(), codec: None });
+        for (name, want) in [("H.264", "h264"), ("h264", "h264"), ("AVC", "h264"), ("H.265", "hevc"), ("HEVC", "hevc"), ("AV1", "av1"), ("ProRes", "prores")] {
+            let got = call("set_export_preset", json!({ "delivery": "match_project", "codec": name })).unwrap();
+            assert_eq!(got, CopilotToolCall::SetExportPreset { delivery: "match_project".into(), codec: Some(want.into()) }, "{name}");
+        }
+        assert!(call("set_export_preset", json!({ "delivery": "match_project", "codec": "vp9" })).is_err());
         assert!(call("set_export_preset", json!({})).is_err());
         assert!(call("color_grade", json!({ "look": "x".repeat(500) })).is_err(), "over-long text");
     }
@@ -702,7 +724,7 @@ mod tests {
         let out = run_with(&mut tl, &mut h, &[gen.clone(), gen, exp], &CopilotEnv::default());
         assert_eq!(out[0].request, Some(UiRequest::GenerateCaptions { language: Some("en".into()) }));
         assert!(!out[1].applied, "second Whisper job in one reply");
-        assert_eq!(out[2].request, Some(UiRequest::OpenExport { delivery: "discord_25mb".into() }));
+        assert_eq!(out[2].request, Some(UiRequest::OpenExport { delivery: "discord_25mb".into(), codec: None }));
         assert!(!h.can_undo(), "requests change nothing on the timeline");
     }
 
@@ -734,7 +756,9 @@ mod tests {
         assert!(calls.iter().any(|c| matches!(c, CopilotToolCall::ColorGrade(a) if a.look.as_deref() == Some("teal_orange"))));
         assert!(calls.iter().any(|c| matches!(c, CopilotToolCall::AddMask(_))));
         let (_, calls) = offline_copilot_plan("export for tiktok", &tl, Time::ZERO, &[]);
-        assert_eq!(calls, vec![CopilotToolCall::SetExportPreset { delivery: "shorts_9x16".into() }]);
+        assert_eq!(calls, vec![CopilotToolCall::SetExportPreset { delivery: "shorts_9x16".into(), codec: None }]);
+        let (_, calls) = offline_copilot_plan("export the timeline as a 1080p H.264 MP4", &tl, Time::ZERO, &[]);
+        assert_eq!(calls, vec![CopilotToolCall::SetExportPreset { delivery: "match_project".into(), codec: Some("h264".into()) }]);
         let (_, calls) = offline_copilot_plan("add captions and clean up the audio", &tl, Time::ZERO, &[]);
         assert!(calls.contains(&CopilotToolCall::GenerateCaptions { language: None }));
         assert!(calls.contains(&CopilotToolCall::PolishAudio));

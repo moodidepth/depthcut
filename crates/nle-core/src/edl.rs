@@ -150,11 +150,11 @@ fn export_track(project: &Project, track: &LaneTrack, track_name: &str) -> Strin
         let (speed, ramped) = interchange::clip_speed(c);
         // source timecode at record time `t` (constant-speed approximation)
         let src = |t: Time| tc0(c) + c.source_in + Time::from_secs_f64((t - it.start).as_secs_f64() * speed);
-        let half = |d: Time| d.div_i64(2);
         let d_in = (i > 0).then(|| interchange::dissolve_after(items, i - 1)).flatten().filter(|_| is_media(project, &items[i - 1]));
         let d_out = interchange::dissolve_after(items, i).filter(|_| is_media(project, &items[i + 1]));
-        let rec_in = it.start - d_in.map(half).unwrap_or_default();
-        let rec_out = it.end() - d_out.map(half).unwrap_or_default();
+        let lead_in = d_in.map(|d| dissolve_lead(items, i - 1, d));
+        let rec_in = it.start - lead_in.unwrap_or_default();
+        let rec_out = it.end() - d_out.map(|d| dissolve_lead(items, i, d)).unwrap_or_default();
         if rec_out <= rec_in {
             continue;
         }
@@ -179,6 +179,10 @@ fn export_track(project: &Project, track: &LaneTrack, track_name: &str) -> Strin
         }
         if let Some(d) = d_in {
             let _ = writeln!(s, "* EFFECT NAME: CROSS DISSOLVE ({} FRAMES)", d.frames_round(rate));
+            let late = (d.div_i64(2) - lead_in.unwrap_or_default()).frames_round(rate);
+            if late > 0 {
+                let _ = writeln!(s, "* DISSOLVE STARTS {late} FRAME(S) LATE: NOT ENOUGH MEDIA BEFORE THE IN POINT");
+            }
             let _ = writeln!(s, "* FROM CLIP NAME: {}", one_line(&items[i - 1].clip.name));
             let _ = writeln!(s, "* TO CLIP NAME: {}", one_line(&c.name));
         } else {
@@ -191,6 +195,23 @@ fn export_track(project: &Project, track: &LaneTrack, track_name: &str) -> Strin
         s.push('\n');
     }
     s
+}
+
+/// How much of the cut dissolve between `items[i]` and `items[i + 1]` runs
+/// before the cut: half (cut-centred, as the timeline plays it), or less when
+/// the incoming clip has too little media before its in point. A `D` event
+/// plays the incoming source from the dissolve's start, so a centred dissolve
+/// there would need a negative source timecode; it starts later instead
+/// (Premiere's "start at cut" fallback). The timeline itself holds the first
+/// frame for the missing head.
+fn dissolve_lead(items: &[interchange::TrackItem], i: usize, d: Time) -> Time {
+    let half = d.div_i64(2);
+    let b = items[i + 1].clip;
+    let (speed, _) = interchange::clip_speed(b);
+    if speed <= 0.0 {
+        return half;
+    }
+    half.min(Time::from_secs_f64(b.source_in.as_secs_f64() / speed)).max(Time::ZERO)
 }
 
 fn is_media(project: &Project, it: &interchange::TrackItem) -> bool {
@@ -407,6 +428,25 @@ mod tests {
         assert!(edl.contains("001  AX       AA/V  C        00:00:02:00 00:00:05:20 01:00:00:00 01:00:03:20"), "{edl}");
         assert!(edl.contains("002  AX       AA/V  D 010    00:00:04:20 00:00:08:00 01:00:03:20 01:00:07:00"), "{edl}");
         assert!(edl.contains("* SOURCE FILE: C:/media/B002.mov"), "{edl}");
+    }
+
+    #[test]
+    fn dissolve_without_head_media_never_writes_negative_source_timecode() {
+        let mut p = sample();
+        // B starts on its first media frame: a cut-centred dissolve has no head
+        p.timeline.spine[1].source_in = Time::from_frames(2, FrameRate::FPS_25);
+        let edl = export(&p);
+        assert!(!edl.contains(" -"), "{edl}");
+        // A runs to cut − 2 frames (all the head B has); the dissolve starts there
+        assert!(edl.contains("001  AX       AA/V  C        00:00:02:00 00:00:05:23 01:00:00:00 01:00:03:23"), "{edl}");
+        assert!(edl.contains("002  AX       AA/V  D 010    00:00:00:00 00:00:03:02 01:00:03:23 01:00:07:00"), "{edl}");
+        assert!(edl.contains("* DISSOLVE STARTS 3 FRAME(S) LATE"), "{edl}");
+        // it still reads back as a 10-frame dissolve with nothing negative
+        let q = import(&edl, FrameRate::FPS_25).unwrap();
+        let sp = &q.timeline.spine;
+        assert_eq!(sp.len(), 2, "{sp:#?}");
+        assert!(sp.iter().all(|c| c.source_in >= Time::ZERO), "{sp:#?}");
+        assert_eq!(sp[0].transition_out.as_ref().map(|t| t.duration), Some(Time::from_frames(10, FrameRate::FPS_25)));
     }
 
     #[test]

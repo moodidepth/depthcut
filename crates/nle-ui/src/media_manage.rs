@@ -78,6 +78,18 @@ impl App {
             // EDLs don't name their timeline size: keep the current one
             p.timeline.format = self.project.timeline.format;
         }
+        // built-in demo media round-trips by its synthetic:// path: rebuild its streams
+        for a in p.assets.iter_mut().filter(|a| nle_media::probe::is_synthetic(a)) {
+            let s = a.path.to_string_lossy().into_owned();
+            let name = s.trim_start_matches(nle_media::probe::SYNTHETIC_SCHEME).split('?').next().unwrap_or_default().to_string();
+            let secs = a.duration.as_secs_f64().ceil() as i64;
+            let t = if s.ends_with("?music") {
+                nle_media::probe::synthetic_music(&name, secs)
+            } else {
+                nle_media::probe::synthetic_asset(&name, secs, nle_media::probe::synthetic_hue(a))
+            };
+            (a.name, a.kind, a.video, a.audio, a.tags) = (name, t.kind, t.video, t.audio, t.tags);
+        }
         self.set_project(p, None);
         let mut msg = format!("Imported {}", path.display());
         if needs_probe {
@@ -85,6 +97,9 @@ impl App {
             let base = path.parent().map(Path::to_path_buf);
             let mut offline = 0;
             for a in self.project.assets.clone() {
+                if nle_media::probe::is_synthetic(&a) {
+                    continue;
+                }
                 // paths relative to the timeline file
                 let full = match (&base, a.path.is_relative()) {
                     (Some(b), true) if b.join(&a.path).is_file() => b.join(&a.path),

@@ -261,6 +261,7 @@ pub fn build_timeline_json(tl: &Timeline, assets: &[MediaAsset], playhead: Time,
             "caption_highlight_colors": crate::tools_post::CAPTION_COLORS,
             "audio_roles": crate::tools_post::AUDIO_ROLES,
             "export_deliveries": crate::tools_post::EXPORT_DELIVERIES,
+            "export_codecs": crate::tools_post::EXPORT_CODECS,
         },
         "captions": {
             "segments": tl.captions.segments.len(),
