@@ -6,7 +6,8 @@
 use crate::theme;
 use crate::widgets::slider_f32;
 use eframe::egui::{self, Color32, Stroke};
-use nle_core::{AudioFx, AudioRole, BusId, BusSettings, EqBandType, FilterSlope, GateMode, MixerSettings, ParametricEq};
+use nle_core::{AudioFx, AudioRole, BusId, BusSettings, EqBandType, FilterSlope, GateMode, MixerSettings, ParametricEq, PluginInsert};
+use nle_media::audio::clap_host::{self, PluginInfo};
 use nle_media::audio::{GainReduction, MeterReading, ParametricEqProc};
 
 // ---------------------------------------------------------------------------
@@ -379,11 +380,24 @@ pub struct MixerView {
     hold: [[(f32, f32); 2]; 5],
     last: [MeterReading; 5],
     gr: [GainReduction; 5],
+    /// CLAP plug-ins found by the last scan (scanned when the add menu first opens).
+    clap_found: Option<Vec<PluginInfo>>,
+    /// Plug-ins that failed to load in the last scan / browse.
+    clap_errors: Vec<String>,
 }
 
 impl Default for MixerView {
     fn default() -> Self {
-        MixerView { open: false, selected: None, level: [[-90.0; 2]; 5], hold: [[(-90.0, 0.0); 2]; 5], last: Default::default(), gr: Default::default() }
+        MixerView {
+            open: false,
+            selected: None,
+            level: [[-90.0; 2]; 5],
+            hold: [[(-90.0, 0.0); 2]; 5],
+            last: Default::default(),
+            gr: Default::default(),
+            clap_found: None,
+            clap_errors: Vec::new(),
+        }
     }
 }
 
@@ -526,9 +540,9 @@ fn strip(ui: &mut egui::Ui, bus: BusId, s: &mut BusSettings, view: &mut MixerVie
                         s.solo = !s.solo;
                     }
                 }
-                let fx_on = s.eq.is_active() || s.fx.is_active();
+                let fx_on = s.eq.is_active() || s.fx.is_active() || s.plugins.iter().any(|p| !p.bypass);
                 let fx = egui::Button::new(egui::RichText::new("FX").color(if fx_on { role_color(bus) } else { theme::TEXT })).selected(selected);
-                if ui.add(fx).on_hover_text("EQ and inserts for this bus").clicked() {
+                if ui.add(fx).on_hover_text("EQ, inserts and CLAP plug-ins for this bus").clicked() {
                     view.selected = if selected { None } else { Some(b) };
                 }
             });
@@ -547,6 +561,96 @@ fn strip(ui: &mut egui::Ui, bus: BusId, s: &mut BusSettings, view: &mut MixerVie
     });
 }
 
+/// CLAP inserts of one bus: bypass, remove, parameters, add.
+fn plugin_inserts(ui: &mut egui::Ui, plugins: &mut Vec<PluginInsert>, view: &mut MixerView, b: usize) {
+    ui.label(egui::RichText::new("After the built-in EQ and inserts, before the fader. Audio effects only; no plug-in windows.").small().color(theme::TEXT_DIM));
+    let mut remove = None;
+    for (k, p) in plugins.iter_mut().enumerate() {
+        ui.push_id(("clap", b, k), |ui| {
+            ui.horizontal(|ui| {
+                let mut on = !p.bypass;
+                if ui
+                    .checkbox(&mut on, egui::RichText::new(&p.name).strong())
+                    .on_hover_text(format!(
+                        "{}
+{}
+Untick to bypass",
+                        p.id, p.path
+                    ))
+                    .changed()
+                {
+                    p.bypass = !on;
+                }
+                if ui.small_button("✕").on_hover_text("Remove plug-in").clicked() {
+                    remove = Some(k);
+                }
+            });
+            match clap_host::param_infos(std::path::Path::new(&p.path), &p.id) {
+                Ok(infos) if infos.is_empty() => {
+                    ui.label(egui::RichText::new("No parameters").small().color(theme::TEXT_DIM));
+                }
+                Ok(infos) => {
+                    for info in infos {
+                        let mut v = p.param(info.id).unwrap_or(info.default);
+                        let slider = egui::Slider::new(&mut v, info.min..=info.max).text(&info.name).step_by(if info.stepped { 1.0 } else { 0.0 });
+                        let r = ui.add(slider).on_hover_text("Double-click to reset");
+                        if r.double_clicked() {
+                            p.set_param(info.id, info.default);
+                        } else if r.changed() {
+                            p.set_param(info.id, v);
+                        }
+                    }
+                }
+                Err(e) => {
+                    ui.label(egui::RichText::new(format!("Not loaded: {e}")).small().color(theme::PLAYHEAD));
+                }
+            }
+        });
+        ui.add_space(2.0);
+    }
+    if let Some(k) = remove {
+        plugins.remove(k);
+    }
+    let add = |plugins: &mut Vec<PluginInsert>, info: &PluginInfo| {
+        plugins.push(PluginInsert { path: info.path.to_string_lossy().into_owned(), id: info.id.clone(), name: info.name.clone(), bypass: false, params: Vec::new() });
+    };
+    ui.menu_button("+ Add CLAP plug-in", |ui| {
+        if view.clap_found.is_none() {
+            let (found, errors) = clap_host::scan();
+            view.clap_found = Some(found);
+            view.clap_errors = errors;
+        }
+        let found = view.clap_found.clone().unwrap_or_default();
+        if found.is_empty() {
+            ui.label(egui::RichText::new("No CLAP plug-ins in the standard folders").small().color(theme::TEXT_DIM));
+        }
+        for info in &found {
+            let label = if info.vendor.is_empty() { info.name.clone() } else { format!("{} — {}", info.name, info.vendor) };
+            if ui.button(label).on_hover_text(info.path.display().to_string()).clicked() {
+                add(plugins, info);
+                ui.close_menu();
+            }
+        }
+        ui.separator();
+        if ui.button("Browse for a .clap file…").clicked() {
+            ui.close_menu();
+            if let Some(path) = rfd::FileDialog::new().add_filter("CLAP plug-in", &["clap"]).pick_file() {
+                match clap_host::describe(&path) {
+                    Ok(v) if v.is_empty() => view.clap_errors.push(format!("{}: no plug-ins inside", path.display())),
+                    Ok(v) => v.iter().for_each(|info| add(plugins, info)),
+                    Err(e) => view.clap_errors.push(e),
+                }
+            }
+        }
+        if ui.button("Rescan plug-in folders").clicked() {
+            view.clap_found = None;
+        }
+    });
+    for e in &view.clap_errors {
+        ui.label(egui::RichText::new(e).small().color(theme::PLAYHEAD));
+    }
+}
+
 /// The mixer drawer contents. Edits `mix` in place.
 pub fn mixer_panel(ui: &mut egui::Ui, mix: &mut MixerSettings, view: &mut MixerView) -> MixerRequests {
     let mut req = MixerRequests::default();
@@ -554,7 +658,7 @@ pub fn mixer_panel(ui: &mut egui::Ui, mix: &mut MixerSettings, view: &mut MixerV
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new("Audio Mixer").strong());
         ui.label(
-            egui::RichText::new("Clips route to their role's bus → Master (−1 dBFS limiter). Loudness per EBU R128; meters lead the speakers by ~60 ms.")
+            egui::RichText::new("Clips route to their role's bus → Master (−1 dBFS limiter). Loudness per EBU R128; meters follow what the speakers play.")
                 .small()
                 .color(theme::TEXT_DIM),
         );
@@ -584,6 +688,11 @@ pub fn mixer_panel(ui: &mut egui::Ui, mix: &mut MixerSettings, view: &mut MixerV
                 let s = mix.bus_mut(bus);
                 ui.collapsing("EQ", |ui| eq_editor(ui, &mut s.eq, egui::Id::new(("bus-eq", b))));
                 ui.collapsing("Inserts", |ui| fx_editor(ui, &mut s.fx, egui::Id::new(("bus-fx", b)), Some(gr)));
+                let n = s.plugins.len();
+                egui::CollapsingHeader::new(if n == 0 { "CLAP plug-ins".to_string() } else { format!("CLAP plug-ins ({n})") })
+                    .id_salt(("bus-clap", b))
+                    .default_open(n > 0)
+                    .show(ui, |ui| plugin_inserts(ui, &mut s.plugins, view, b));
             });
         }
     });

@@ -9,6 +9,7 @@
 //! ducking → role bus. Master: EQ → inserts → fader → preview volume →
 //! −1 dBFS limiter.
 
+use super::clap_host::ClapInstance;
 use super::ducking::{DuckCurve, DuckEnvelope, Ducker, RmsAccumulator};
 use super::eq::{BandKind, Biquad, ParametricEqProc};
 use super::fx::{FxChain, GainReduction, Leveler};
@@ -172,6 +173,9 @@ pub struct TimelineMixer {
     bus_bufs: [Vec<f32>; 4],
     bus_eq: Vec<ParametricEqProc>,
     bus_fx: Vec<FxChain>,
+    /// CLAP inserts per bus ([`BusId::ALL`] order), matching
+    /// `mix.<bus>.plugins` slot for slot; `None` = failed to load (passed through).
+    bus_plugins: [Vec<PluginSlot>; 5],
     /// Smoothed per-bus (L, R) gain so fader moves never zipper.
     bus_gain: [[f32; 2]; 5],
     /// Meters per bus ([`BusId::ALL`] order) when metering is on.
@@ -211,6 +215,7 @@ impl TimelineMixer {
             bus_bufs: Default::default(),
             bus_eq: (0..5).map(|_| ParametricEqProc::new(sample_rate as f32, Default::default())).collect(),
             bus_fx: (0..5).map(|_| FxChain::new(sample_rate as f32)).collect(),
+            bus_plugins: Default::default(),
             bus_gain: [[1.0; 2]; 5],
             meters: None,
             gr: Default::default(),
@@ -242,8 +247,34 @@ impl TimelineMixer {
     }
 
     /// Bus settings (faders, mute / solo, bus EQ and inserts).
+    ///
+    /// CLAP inserts are created / destroyed here, on the caller's thread.
     pub fn set_mixer(&mut self, mix: &MixerSettings) {
-        self.mix = *mix;
+        if self.mix == *mix {
+            return;
+        }
+        self.mix = mix.clone();
+        for bus in BusId::ALL {
+            let wanted = &self.mix.bus(bus).plugins;
+            let slots = &mut self.bus_plugins[bus.index()];
+            slots.truncate(wanted.len());
+            for (k, ins) in wanted.iter().enumerate() {
+                let key = (ins.path.clone(), ins.id.clone());
+                if slots.get(k).is_none_or(|s| s.key != key) {
+                    let inst =
+                        ClapInstance::load(std::path::Path::new(&ins.path), &ins.id, self.sample_rate).map_err(|e| log::warn!("CLAP insert on {} bus: {e}", bus.label())).ok();
+                    let slot = PluginSlot { key, inst };
+                    if k < slots.len() {
+                        slots[k] = slot;
+                    } else {
+                        slots.push(slot);
+                    }
+                }
+                if let Some(inst) = slots[k].inst.as_mut() {
+                    inst.set_params(&ins.params);
+                }
+            }
+        }
     }
 
     pub fn mixer(&self) -> &MixerSettings {
@@ -371,6 +402,9 @@ impl TimelineMixer {
         }
         for e in &mut self.bus_eq {
             e.reset();
+        }
+        for p in self.bus_plugins.iter_mut().flatten().filter_map(|s| s.inst.as_mut()) {
+            p.reset();
         }
         for m in self.meters.iter_mut().flatten() {
             m.reset_windows();
@@ -587,12 +621,14 @@ impl TimelineMixer {
 
         // role busses → master (solo is a monitoring aid: playback only)
         let any_solo = self.honor_solo && self.mix.any_solo();
+        // taken for the loop so the bus settings need no per-block clone
+        let mix = std::mem::take(&mut self.mix);
         for (i, role) in AudioRole::ALL.into_iter().enumerate() {
-            let settings = *self.mix.bus(BusId::Role(role));
+            let settings = mix.bus(BusId::Role(role));
             let mut bus = std::mem::take(&mut self.bus_bufs[i]);
             bus.resize(out.len(), 0.0);
             let audible = !settings.mute && (!any_solo || settings.solo);
-            self.process_bus(i, &settings, audible, &mut bus);
+            self.process_bus(i, settings, audible, &mut bus);
             for (o, s) in out.iter_mut().zip(&bus) {
                 *o += s;
             }
@@ -602,7 +638,7 @@ impl TimelineMixer {
 
         // Master bus: EQ, inserts, fader, preview volume, then the
         // always-on −1 dBFS soft-knee limiter (playback + export).
-        let master = self.mix.master;
+        let master = &mix.master;
         for s in out.iter_mut() {
             if !s.is_finite() {
                 *s = 0.0;
@@ -615,7 +651,8 @@ impl TimelineMixer {
             let g = self.bus_fx[4].take_gr();
             merge_gr(&mut self.gr[4], g);
         }
-        let target = bus_gains(&master, !master.mute);
+        self.process_plugins(4, master, out);
+        let target = bus_gains(master, !master.mute);
         let a = gain_smoothing(self.sample_rate);
         let mut peaks = [0.0f32; 2];
         for frame in out.as_chunks_mut::<2>().0 {
@@ -634,6 +671,16 @@ impl TimelineMixer {
         self.peaks = peaks;
         self.tmp = tmp;
         self.ducked = ducked;
+        self.mix = mix;
+    }
+
+    /// CLAP inserts of bus `i`, in order (bypassed / failed ones skipped).
+    fn process_plugins(&mut self, i: usize, s: &BusSettings, buf: &mut [f32]) {
+        for (slot, ins) in self.bus_plugins[i].iter_mut().zip(&s.plugins) {
+            if let (false, Some(inst)) = (ins.bypass, slot.inst.as_mut()) {
+                inst.process(buf);
+            }
+        }
     }
 
     /// Bus EQ → inserts → fader / pan (smoothed) → meter. A silent bus
@@ -646,6 +693,7 @@ impl TimelineMixer {
             let g = self.bus_fx[i].take_gr();
             merge_gr(&mut self.gr[i], g);
         }
+        self.process_plugins(i, s, buf);
         let target = bus_gains(s, audible);
         let a = gain_smoothing(self.sample_rate);
         let g = &mut self.bus_gain[i];
@@ -677,6 +725,12 @@ fn gain_smoothing(sample_rate: u32) -> f32 {
 }
 
 /// Bus fader + balance as (L, R) gains.
+/// A loaded CLAP insert and what it was loaded from.
+struct PluginSlot {
+    key: (String, String),
+    inst: Option<ClapInstance>,
+}
+
 fn bus_gains(s: &BusSettings, audible: bool) -> [f32; 2] {
     if !audible {
         return [0.0; 2];
@@ -1111,6 +1165,34 @@ mod tests {
         let mut out = vec![0.0f32; 48_000 * 2];
         m.render(Time::ZERO, 1.0, &mut out);
         out
+    }
+
+    #[test]
+    fn clap_inserts_on_role_bus_and_master() {
+        use nle_core::PluginInsert;
+        let tail = |o: &[f32]| rms_of(&o[2 * 24_000..]);
+        let both = tail(&render_with(&MixerSettings::default(), false));
+        let gain = |db: f64| PluginInsert {
+            path: crate::audio::clap_host::test_plugin().to_string_lossy().into_owned(),
+            id: "org.rustcutpro.test-gain".into(),
+            name: "Test Gain".into(),
+            bypass: false,
+            params: vec![(0, db)],
+        };
+        // −6 dB on the dialogue bus: voice 0.2 → 0.1, music 0.1 → total 0.2
+        let mut mix = MixerSettings::default();
+        mix.bus_mut(BusId::Role(AudioRole::Dialogue)).plugins.push(gain(-6.0206));
+        let o = tail(&render_with(&mix, false));
+        assert!((o / (0.2 / 2f32.sqrt()) - 1.0).abs() < 0.03, "dialogue insert: {o}");
+        // two in series on master: −6 + −6
+        let mut mix = MixerSettings::default();
+        mix.master.plugins = vec![gain(-6.0206), gain(-6.0206)];
+        let o = tail(&render_with(&mix, false));
+        assert!((o / (0.3 / 4.0 / 2f32.sqrt()) - 1.0).abs() < 0.03, "two master inserts: {o}");
+        // bypassed / missing plug-ins pass audio through
+        mix.master.plugins[0].bypass = true;
+        mix.master.plugins[1].path = "C:/missing/none.clap".into();
+        assert!((tail(&render_with(&mix, false)) - both).abs() < 1e-4);
     }
 
     #[test]

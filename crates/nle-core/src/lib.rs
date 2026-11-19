@@ -52,7 +52,7 @@ pub mod zoom_punch;
 pub use asset::{AssetKind, Attribution, AudioStreamInfo, MediaAsset, VideoStreamInfo, YuvMatrix};
 pub use audio_fx::{
     AudioFx, BusId, BusSettings, CompressorSettings, DeEsserSettings, DelaySettings, EqBand, EqBandType, EqFilter, FilterSlope, GateMode, GateSettings, LevelerSettings,
-    MixerSettings, NoiseReductionSettings, ParametricEq, ReverbSettings, VoiceIsolationSettings,
+    MixerSettings, NoiseReductionSettings, ParametricEq, PluginInsert, ReverbSettings, VoiceIsolationSettings,
 };
 pub use captions::{CaptionSegment, CaptionStyle, CaptionTrack, CaptionWord};
 pub use clip::{

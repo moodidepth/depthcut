@@ -401,7 +401,35 @@ impl Default for LevelerSettings {
 // Mixer busses
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+/// A CLAP plug-in in a bus insert slot (after the built-in EQ and effects,
+/// before the fader).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PluginInsert {
+    /// The `.clap` file (bundle directory on macOS).
+    pub path: String,
+    /// CLAP plug-in id inside it.
+    pub id: String,
+    pub name: String,
+    pub bypass: bool,
+    /// Values set in the editor, by CLAP parameter id; others keep the
+    /// plug-in's defaults.
+    pub params: Vec<(u32, f64)>,
+}
+
+impl PluginInsert {
+    pub fn param(&self, id: u32) -> Option<f64> {
+        self.params.iter().find(|(p, _)| *p == id).map(|(_, v)| *v)
+    }
+    pub fn set_param(&mut self, id: u32, value: f64) {
+        match self.params.iter_mut().find(|(p, _)| *p == id) {
+            Some(slot) => slot.1 = value,
+            None => self.params.push((id, value)),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BusSettings {
     /// Fader (dB).
@@ -413,11 +441,14 @@ pub struct BusSettings {
     pub solo: bool,
     pub eq: ParametricEq,
     pub fx: AudioFx,
+    /// CLAP plug-ins, processed in order.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub plugins: Vec<PluginInsert>,
 }
 
 impl Default for BusSettings {
     fn default() -> Self {
-        BusSettings { gain_db: 0.0, pan: 0.0, mute: false, solo: false, eq: ParametricEq::default(), fx: AudioFx::default() }
+        BusSettings { gain_db: 0.0, pan: 0.0, mute: false, solo: false, eq: ParametricEq::default(), fx: AudioFx::default(), plugins: Vec::new() }
     }
 }
 
@@ -433,7 +464,7 @@ impl BusSettings {
     }
     /// Does the bus process or attenuate at all (cheap pass-through otherwise)?
     pub fn is_identity(&self) -> bool {
-        self.gain_db == 0.0 && self.pan == 0.0 && !self.mute && !self.eq.is_active() && !self.fx.is_active()
+        self.gain_db == 0.0 && self.pan == 0.0 && !self.mute && !self.eq.is_active() && !self.fx.is_active() && self.plugins.iter().all(|p| p.bypass)
     }
 }
 
@@ -470,7 +501,7 @@ impl BusId {
 
 /// The timeline's mixer: one submix bus per audio role, summed into master
 /// (followed by the always-on −1 dBFS limiter).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MixerSettings {
     pub dialogue: BusSettings,

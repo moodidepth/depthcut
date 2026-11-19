@@ -6,6 +6,8 @@ members = [
     "crates/nle-render",
     "crates/nle-ai",
     "crates/nle-ui",
+    # test fixture for the CLAP host (built on demand by its tests)
+    "crates/clap-test-gain",
 ]
 default-members = [
     "crates/nle-core",
@@ -63,6 +65,11 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 3
+
+# tract 0.21.4 runs a debug-only graph-name check that DeepFilterNet's model
+# fails (duplicate node name, harmless); release builds never run it
+[profile.dev.package.tract-core]
+debug-assertions = false
 
 [profile.release]
 lto = "thin"

@@ -35,6 +35,9 @@ core_affinity.workspace = true
 crossbeam.workspace = true
 rtrb.workspace = true
 rustfft.workspace = true
+# CLAP plug-in hosting (bus inserts): C ABI types + dynamic loading.
+clap-sys = "0.5"
+libloading = "0.8"
 cpal = { workspace = true, optional = true }
 ffmpeg-next = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }

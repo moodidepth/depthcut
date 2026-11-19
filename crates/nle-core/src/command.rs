@@ -396,7 +396,7 @@ impl Command {
                 Ok(())
             }
             Command::SetMixer { mixer } => {
-                tl.mixer = **mixer;
+                tl.mixer = (**mixer).clone();
                 Ok(())
             }
             Command::InsertGap { at, duration } => {

@@ -44,6 +44,8 @@ fn main() -> eframe::Result<()> {
     // log file + panic hook + "previous session crashed" detection
     diagnostics::init("info,wgpu_core=warn,wgpu_hal=warn,naga=warn,eframe=warn,egui_wgpu=warn");
     let budget = nle_media::threads::init_media_pool();
+    #[cfg(feature = "neural-voice")]
+    nle_ai::voice::register();
     log::info!("media pool: {} workers, {} threads reserved for UI/audio ({} logical CPUs)", budget.workers, budget.reserved, budget.logical);
 
     let backends = nle_render::gpu::preferred_backends();

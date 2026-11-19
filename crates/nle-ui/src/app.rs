@@ -1589,8 +1589,8 @@ impl App {
     fn mixer_drawer(&mut self, ui: &mut egui::Ui) {
         let dt = ui.input(|i| i.stable_dt).min(0.1);
         self.mixer_view.feed(self.audio.meters(), dt);
-        let original = self.focus.root(&self.project.timeline).mixer;
-        let mut mix = original;
+        let original = self.focus.root(&self.project.timeline).mixer.clone();
+        let mut mix = original.clone();
         let req = crate::audio_ui::mixer_panel(ui, &mut mix, &mut self.mixer_view);
         if mix != original {
             self.exec_key(Command::SetMixer { mixer: Box::new(mix) }, Some(drag_key(MIXER_TAG, nle_core::ClipId(0))));

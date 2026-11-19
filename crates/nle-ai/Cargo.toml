@@ -20,8 +20,22 @@ tokio.workspace = true
 # loaded at run time (`load-dynamic`), never linked.
 ort = { version = "=2.0.0-rc.10", default-features = false, features = ["load-dynamic"], optional = true }
 
+# Neural voice isolation: DeepFilterNet 3 on tract (pure Rust, CPU, model
+# embedded). Pinned to the revision and tract release it was built against:
+# later tract 0.21.x releases changed the API it uses.
+deep_filter = { git = "https://github.com/Rikorose/DeepFilterNet", rev = "7b14b895fe7fc42cab72b4a4c1e49c982bd6404b", default-features = false, features = ["tract", "default-model"], optional = true }
+ndarray = { version = "0.15", optional = true }
+tract-core = { version = "=0.21.4", optional = true }
+tract-onnx = { version = "=0.21.4", optional = true }
+tract-pulse = { version = "=0.21.4", optional = true }
+tract-hir = { version = "=0.21.4", optional = true }
+
+[dev-dependencies]
+hound = "3.5"
+
 [features]
 onnx = ["dep:ort"]
+neural-voice = ["dep:deep_filter", "dep:ndarray", "dep:tract-core", "dep:tract-onnx", "dep:tract-pulse", "dep:tract-hir"]
 
 [target.'cfg(windows)'.dependencies]
 keyring.workspace = true

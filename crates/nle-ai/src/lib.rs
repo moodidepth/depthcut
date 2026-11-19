@@ -12,6 +12,8 @@ pub mod providers;
 pub mod segment;
 pub mod tools;
 pub mod tools_post;
+#[cfg(feature = "neural-voice")]
+pub mod voice;
 
 pub use config::{AiConfig, AiProviderKind, ThinkingLevel, DEFAULT_GEMINI_MODEL};
 pub use multimodal::{build_timeline_json, encode_proxy_480p15, upload_gemini_file};

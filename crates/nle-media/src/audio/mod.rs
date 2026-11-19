@@ -2,6 +2,7 @@
 //! ducking, role busses, master) → cpal. Restoration (noise reduction,
 //! voice isolation) is rendered ahead of time, see [`restore`].
 
+pub mod clap_host;
 pub mod decode;
 pub mod ducking;
 pub mod dynamics;
