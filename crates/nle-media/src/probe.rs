@@ -142,7 +142,28 @@ pub fn parse_ffprobe_json(path: &Path, json: &str) -> Result<MediaAsset, MediaEr
         return Err(MediaError::Unsupported(format!("no audio/video streams in {}", path.display())));
     };
     asset.duration = if asset.kind == AssetKind::Image || dur <= 0.0 { STILL_DURATION } else { Time::from_secs_f64(dur) };
+    asset.start_timecode = start_timecode(&v, &streams, asset.video.as_ref().map(|v| v.frame_rate), asset.audio.as_ref().map(|a| a.sample_rate));
     Ok(asset)
+}
+
+/// The file's start timecode: a `timecode` tag (container first, then any
+/// stream, e.g. a QuickTime `tmcd` track) counted at the video rate, else a
+/// Broadcast WAV `time_reference` (samples since midnight).
+fn start_timecode(v: &Value, streams: &[Value], rate: Option<FrameRate>, sample_rate: Option<u32>) -> Option<Time> {
+    let tag = |obj: &Value, key: &str| obj["tags"].as_object().and_then(|t| t.iter().find(|(k, _)| k.eq_ignore_ascii_case(key))).and_then(|(_, v)| v.as_str()).map(str::to_owned);
+    let tc = std::iter::once(&v["format"]).chain(streams.iter()).find_map(|o| tag(o, "timecode"));
+    let t = if let Some(tc) = tc {
+        let rate = rate.unwrap_or_default();
+        if tc.contains(';') {
+            nle_core::parse_timecode_df(&tc, rate)
+        } else {
+            nle_core::parse_timecode(&tc, rate)
+        }
+    } else {
+        let samples = tag(&v["format"], "time_reference")?.trim().parse::<u64>().ok()?;
+        Some(Time::from_secs_f64(samples as f64 / sample_rate.unwrap_or(48_000).max(1) as f64))
+    };
+    t.filter(|t| t.is_positive())
 }
 
 /// Built-in demo media (SMPTE-style bars with motion + tone) so the editor
@@ -185,6 +206,29 @@ pub fn synthetic_hue(asset: &MediaAsset) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_start_timecode_tags() {
+        let p = Path::new("a.mov");
+        let video = |tags: &str| {
+            format!(
+                r#"{{"format":{{"duration":"10.0"{tags}}},"streams":[{{"codec_type":"video","width":1920,"height":1080,"pix_fmt":"yuv420p","avg_frame_rate":"30000/1001","r_frame_rate":"30000/1001"}},{{"codec_type":"data","codec_tag_string":"tmcd","tags":{{"timecode":"01:00:00;00"}}}}]}}"#
+            )
+        };
+        // drop-frame tag on the tmcd track
+        let a = parse_ffprobe_json(p, &video("")).unwrap();
+        assert_eq!(a.start_timecode, Some(Time::from_frames(107_892, FrameRate::FPS_29_97)));
+        // the container tag wins
+        let a = parse_ffprobe_json(p, &video(r#","tags":{"TIMECODE":"00:00:10:00"}"#)).unwrap();
+        assert_eq!(a.start_timecode, Some(Time::from_frames(300, FrameRate::FPS_29_97)));
+        // BWF time reference: samples since midnight
+        let wav =
+            r#"{"format":{"duration":"5.0","tags":{"time_reference":"172800000"}},"streams":[{"codec_type":"audio","sample_rate":"48000","channels":2,"codec_name":"pcm_s24le"}]}"#;
+        assert_eq!(parse_ffprobe_json(Path::new("a.wav"), wav).unwrap().start_timecode, Some(Time::from_secs(3600)));
+        // no tags, or a zero timecode: none
+        let plain = r#"{"format":{"duration":"5.0","tags":{"timecode":"00:00:00:00"}},"streams":[{"codec_type":"audio","sample_rate":"48000","channels":2}]}"#;
+        assert_eq!(parse_ffprobe_json(Path::new("b.wav"), plain).unwrap().start_timecode, None);
+    }
 
     #[test]
     fn parses_ffprobe_output() {

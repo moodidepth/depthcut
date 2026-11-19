@@ -227,6 +227,10 @@ impl FrameRate {
     pub fn nominal(self) -> i64 {
         (self.fps().round() as i64).max(1)
     }
+    /// 29.97 and 59.94: the rates SMPTE drop-frame timecode is defined for.
+    pub fn supports_drop_frame(self) -> bool {
+        self.den == 1001 && matches!(self.nominal(), 30 | 60)
+    }
     /// Duration of a single frame in ticks.
     pub fn frame_ticks(self) -> i64 {
         let n = self.num.max(1) as i128;
@@ -267,6 +271,46 @@ pub fn format_timecode(t: Time, rate: FrameRate) -> String {
     format!("{}{:02}:{:02}:{:02}:{:02}", if neg { "-" } else { "" }, hh, mm, ss, ff)
 }
 
+/// Labels skipped per minute by drop-frame timecode (2 at 29.97, 4 at 59.94).
+fn df_drop(nominal: i64) -> i64 {
+    nominal / 15
+}
+
+/// Format a time as SMPTE drop-frame timecode `HH:MM:SS;FF`: frame labels
+/// 0 and 1 (0-3 at 59.94) are skipped every minute except every tenth, so
+/// the label stays within a frame of the wall clock. Falls back to
+/// non-drop-frame for rates without a drop-frame form.
+pub fn format_timecode_df(t: Time, rate: FrameRate) -> String {
+    if !rate.supports_drop_frame() {
+        return format_timecode(t, rate);
+    }
+    let neg = t.0 < 0;
+    let frames = t.abs().frames_floor(rate);
+    let n = rate.nominal();
+    let drop = df_drop(n);
+    let per_min = n * 60 - drop;
+    let per_10 = n * 600 - drop * 9;
+    let (tens, rem) = (frames / per_10, frames % per_10);
+    let skipped = drop * 9 * tens + if rem > drop { drop * ((rem - drop) / per_min) } else { 0 };
+    let label = frames + skipped;
+    let ff = label % n;
+    let total_s = label / n;
+    format!("{}{:02}:{:02}:{:02};{:02}", if neg { "-" } else { "" }, total_s / 3600, (total_s / 60) % 60, total_s % 60, ff)
+}
+
+/// Parse drop-frame timecode (`;` or `:` separators) into a time. For rates
+/// without a drop-frame form this is [`parse_timecode`].
+pub fn parse_timecode_df(s: &str, rate: FrameRate) -> Option<Time> {
+    if !rate.supports_drop_frame() {
+        return parse_timecode(s, rate);
+    }
+    let labels = parse_timecode(s, rate)?.frames_round(rate);
+    let n = rate.nominal();
+    let minutes = labels / (n * 60);
+    let frames = labels - df_drop(n) * (minutes - minutes / 10);
+    Some(Time::from_frames(frames, rate))
+}
+
 /// Parse `HH:MM:SS:FF` (or fewer leading fields) into a time.
 pub fn parse_timecode(s: &str, rate: FrameRate) -> Option<Time> {
     let parts: Vec<i64> = s.trim().split([':', ';']).map(|p| p.trim().parse::<i64>()).collect::<Result<_, _>>().ok()?;
@@ -301,6 +345,28 @@ mod tests {
         assert_eq!(Time::parse_rational("5s"), Some(Time::from_secs(5)));
         assert_eq!(Time::from_secs(5).to_rational_string(), "5s");
         assert_eq!(Time::parse_rational("2.5s"), Some(Time::from_millis(2500)));
+    }
+
+    #[test]
+    fn drop_frame_timecode() {
+        let r = FrameRate::FPS_29_97;
+        let f = |n: i64| format_timecode_df(Time::from_frames(n, r), r);
+        assert_eq!(f(0), "00:00:00;00");
+        assert_eq!(f(1799), "00:00:59;29");
+        // labels ;00 and ;01 don't exist at minute 1...
+        assert_eq!(f(1800), "00:01:00;02");
+        // ...but do at minute 10
+        assert_eq!(f(17982), "00:10:00;00");
+        // one hour of DF labels = 107892 frames
+        assert_eq!(f(107_892), "01:00:00;00");
+        for n in [0, 1, 2, 1799, 1800, 1801, 3597, 3598, 17981, 17982, 107_891, 107_892, 1_234_567] {
+            assert_eq!(parse_timecode_df(&f(n), r), Some(Time::from_frames(n, r)), "frame {n}");
+        }
+        let r60 = FrameRate::FPS_59_94;
+        assert_eq!(format_timecode_df(Time::from_frames(3600, r60), r60), "00:01:00;04");
+        assert_eq!(parse_timecode_df("00:01:00;04", r60), Some(Time::from_frames(3600, r60)));
+        // no drop-frame form at 25 fps
+        assert_eq!(format_timecode_df(Time::from_secs(1), FrameRate::FPS_25), "00:00:01:00");
     }
 
     #[test]

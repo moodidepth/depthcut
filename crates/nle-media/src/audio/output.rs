@@ -53,6 +53,11 @@ struct Shared {
     quit: AtomicBool,
     has_device: AtomicBool,
     sample_rate: u32,
+    /// Frames pushed into the ring since the last (re)start.
+    produced: AtomicU64,
+    /// Meter readings per rendered block, released when that block is
+    /// audible (the mixer renders ~60 ms + device latency ahead).
+    meter_delay: Mutex<MeterDelay>,
 }
 
 pub struct AudioEngine {
@@ -137,10 +142,17 @@ impl AudioEngine {
         }
     }
 
-    /// Per-bus meters ([`nle_core::BusId::ALL`] order). They read the
-    /// mixer's output ~60 ms before it is heard (render look-ahead).
+    /// Per-bus meters ([`nle_core::BusId::ALL`] order), in step with what is
+    /// audible: during playback each block's reading is held back until
+    /// that block reaches the speakers.
     pub fn meters(&self) -> Option<[MeterReading; 5]> {
-        self.shared.mixer.lock().meter_readings()
+        let playing = self.shared.transport.lock().playing;
+        if !playing || !self.has_device() {
+            self.shared.meter_delay.lock().clear();
+            return self.shared.mixer.lock().meter_readings();
+        }
+        let audible = (self.shared.audible_secs() * self.shared.sample_rate as f64) as u64;
+        self.shared.meter_delay.lock().take_until(audible)
     }
 
     pub fn reset_loudness(&self) {
@@ -175,6 +187,8 @@ impl AudioEngine {
         self.shared.consumed.store(0, Ordering::SeqCst);
         self.shared.cb_nanos.store(NO_CALLBACK, Ordering::SeqCst);
         self.shared.last_pos.store(i64::MIN, Ordering::SeqCst);
+        self.shared.produced.store(0, Ordering::SeqCst);
+        self.shared.meter_delay.lock().clear();
         self.shared.flush_gen.fetch_add(1, Ordering::SeqCst);
         drop(t);
         self.shared.mixer.lock().reset_state();
@@ -251,6 +265,67 @@ impl Shared {
     }
 }
 
+/// Meter readings of rendered blocks waiting to become audible.
+#[derive(Default)]
+struct MeterDelay {
+    /// (frames produced at the block's end, its reading), oldest first.
+    queue: std::collections::VecDeque<(u64, [MeterReading; 5])>,
+    /// Latest released reading: loudness values stay up between releases.
+    last: Option<[MeterReading; 5]>,
+}
+
+impl MeterDelay {
+    /// ~2.7 s of 256-frame blocks at 48 kHz; older ones are dropped.
+    const MAX_QUEUED: usize = 512;
+
+    fn clear(&mut self) {
+        self.queue.clear();
+    }
+
+    fn push(&mut self, end_frame: u64, r: [MeterReading; 5]) {
+        if self.queue.len() >= Self::MAX_QUEUED {
+            self.queue.pop_front();
+        }
+        self.queue.push_back((end_frame, r));
+    }
+
+    /// Merge every block audible by `audible` frames: max peaks and gain
+    /// reduction, newest loudness. Nothing new: last loudness, zero peaks.
+    fn take_until(&mut self, audible: u64) -> Option<[MeterReading; 5]> {
+        let mut out: Option<[MeterReading; 5]> = None;
+        while self.queue.front().is_some_and(|(end, _)| *end <= audible) {
+            let (_, r) = self.queue.pop_front().expect("front checked");
+            out = Some(match out {
+                None => r,
+                Some(mut acc) => {
+                    for (a, b) in acc.iter_mut().zip(r.iter()) {
+                        let (peak, gr) = (a.peak, a.gr);
+                        *a = *b;
+                        a.peak = [peak[0].max(b.peak[0]), peak[1].max(b.peak[1])];
+                        a.gr.gate = gr.gate.max(b.gr.gate);
+                        a.gr.comp = gr.comp.max(b.gr.comp);
+                        a.gr.de_esser = gr.de_esser.max(b.gr.de_esser);
+                    }
+                    acc
+                }
+            });
+        }
+        match out {
+            Some(r) => {
+                self.last = Some(r);
+                Some(r)
+            }
+            None => self.last.map(|mut r| {
+                for b in r.iter_mut() {
+                    b.peak = [0.0; 2];
+                    b.gr = Default::default();
+                }
+                r
+            }),
+        }
+    }
+}
+
 /// Audible clock: `start` = seconds handed over before the last callback,
 /// `handed` = seconds handed over in total, `since` = wall seconds since that
 /// callback minus the output latency. The first frame of the last callback
@@ -262,7 +337,35 @@ pub(crate) fn audible_position(start: f64, handed: f64, since: f64) -> f64 {
 
 #[cfg(test)]
 mod clock_tests {
-    use super::audible_position;
+    use super::{audible_position, MeterDelay, MeterReading};
+
+    #[test]
+    fn meters_wait_until_their_block_is_audible() {
+        let reading = |peak: f32, m: f32| {
+            let mut r = [MeterReading::default(); 5];
+            r[4].peak = [peak, peak / 2.0];
+            r[4].momentary = Some(m);
+            r
+        };
+        let mut d = MeterDelay::default();
+        assert!(d.take_until(10_000).is_none());
+        d.push(256, reading(0.5, -20.0));
+        d.push(512, reading(0.9, -18.0));
+        d.push(768, reading(0.1, -30.0));
+        // nothing audible yet
+        assert!(d.take_until(255).is_none());
+        // first two blocks: max peak, newest loudness
+        let r = d.take_until(600).unwrap();
+        assert_eq!(r[4].peak, [0.9, 0.45]);
+        assert_eq!(r[4].momentary, Some(-18.0));
+        // no new block: loudness held, peaks drop to zero
+        let r = d.take_until(700).unwrap();
+        assert_eq!(r[4].peak, [0.0, 0.0]);
+        assert_eq!(r[4].momentary, Some(-18.0));
+        let r = d.take_until(800).unwrap();
+        assert_eq!(r[4].momentary, Some(-30.0));
+        assert!(d.queue.is_empty());
+    }
 
     #[test]
     fn audible_clock_compensates_latency_and_interpolates() {
@@ -320,6 +423,8 @@ fn make_shared(rate: u32, has_device: bool) -> Arc<Shared> {
         quit: AtomicBool::new(false),
         has_device: AtomicBool::new(has_device),
         sample_rate: rate,
+        produced: AtomicU64::new(0),
+        meter_delay: Mutex::new(MeterDelay::default()),
     })
 }
 
@@ -351,13 +456,21 @@ fn mixer_loop(shared: Arc<Shared>, mut producer: Option<rtrb::Producer<f32>>) {
             std::thread::sleep(Duration::from_millis(2));
             continue;
         }
-        shared.mixer.lock().render(pos, speed, &mut block);
+        let reading = {
+            let mut m = shared.mixer.lock();
+            m.render(pos, speed, &mut block);
+            m.meter_readings()
+        };
         // drop the block if a seek happened while rendering
         if shared.flush_gen.load(Ordering::SeqCst) != seen_gen {
             continue;
         }
         for s in &block {
             let _ = prod.push(*s);
+        }
+        let end = shared.produced.fetch_add(RENDER_BLOCK as u64, Ordering::SeqCst) + RENDER_BLOCK as u64;
+        if let Some(r) = reading {
+            shared.meter_delay.lock().push(end, r);
         }
         let mut t = shared.transport.lock();
         if t.playing && t.render_pos == pos {

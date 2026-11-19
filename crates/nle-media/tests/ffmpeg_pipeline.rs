@@ -36,6 +36,27 @@ fn make_clip(dir: &Path) -> PathBuf {
     out
 }
 
+/// Start timecode written by ffmpeg (`-timecode`, drop-frame at 29.97) is
+/// read back by the probe: EDL export writes source times from it.
+#[test]
+fn probe_reads_start_timecode() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let dir = workdir("timecode");
+    let mov = dir.join("tc.mov");
+    let status = ffmpeg_cli::command(&ffmpeg_cli::ffmpeg_path())
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=30000/1001:duration=1"])
+        .args(["-timecode", "01:00:00;00", "-c:v", "libx264", "-preset", "ultrafast"])
+        .arg(&mov)
+        .status()
+        .expect("run ffmpeg");
+    assert!(status.success());
+    let a = probe::probe(&mov).expect("probe");
+    assert_eq!(a.start_timecode, Some(Time::from_frames(107_892, nle_core::FrameRate::FPS_29_97)));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn probe_decode_audio_thumbnails_proxy() {
     if !have_ffmpeg() {

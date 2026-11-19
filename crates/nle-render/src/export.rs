@@ -736,7 +736,14 @@ pub fn run_export(
 
     // sequences get the mix as a sidecar WAV next to the frames
     let wav = if settings.audio != AudioExport::None {
-        let path = if seq { settings.path.with_extension("wav") } else { std::env::temp_dir().join(format!("rcp-export-{}.wav", std::process::id())) };
+        let path = if seq {
+            settings.path.with_extension("wav")
+        } else {
+            // unique per export: queued / Copilot exports can run side by side
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            std::env::temp_dir().join(format!("rcp-export-{}-{n}.wav", std::process::id()))
+        };
         let mut pcm = mix_audio(project, audio_sources, settings.start, settings.end);
         if let Some(target) = settings.loudness_target {
             use nle_media::analysis::loudness::{normalize_program, CEILING_DBFS};

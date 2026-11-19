@@ -69,5 +69,5 @@ pub use presets::{ColorPreset, MontagePreset, PresetCategory};
 pub use project::Project;
 pub use speed::{FrameBlendMode, Retime, RetimeSegment};
 pub use text_anim::{TextAnimation, TitleAnim};
-pub use time::{format_timecode, parse_timecode, FrameRate, Time, TICKS_PER_SECOND};
+pub use time::{format_timecode, format_timecode_df, parse_timecode, parse_timecode_df, FrameRate, Time, TICKS_PER_SECOND};
 pub use timeline::{ClipLoc, EditError, Marker, MarkerKind, Timeline, VideoFormat};

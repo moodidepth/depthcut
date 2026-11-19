@@ -132,6 +132,15 @@ pub struct MediaAsset {
     /// Licence / credit for media downloaded from online libraries.
     #[serde(default)]
     pub attribution: Option<Attribution>,
+    /// Timecode of the first frame (the file's `timecode` tag, or a WAV's
+    /// BWF time reference). EDL source times are written relative to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_timecode: Option<Time>,
+    /// Clips on this asset still hold absolute source timecode (EDL import
+    /// before the media was probed). The first probe subtracts
+    /// `start_timecode` from them and clears this.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub source_tc_pending: bool,
 }
 
 /// Credit line for Creative Commons / public-domain media.
@@ -193,6 +202,8 @@ impl MediaAsset {
             favorite: false,
             loudness_lufs: None,
             attribution: None,
+            start_timecode: None,
+            source_tc_pending: false,
         }
     }
 

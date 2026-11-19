@@ -139,7 +139,9 @@ pub fn export(project: &Project) -> String {
     let doc = json!({
         "OTIO_SCHEMA": "Timeline.1",
         "name": project.name,
-        "global_start_time": rt(Time::from_secs(3600), rate),
+        // the frame labelled 01:00:00:00 (drop-frame at 29.97 / 59.94, as
+        // OTIO's `to_timecode` infers), not 3600 s: NTSC timecode runs slow
+        "global_start_time": rt(crate::time::parse_timecode_df("01:00:00:00", rate).unwrap_or_default(), rate),
         "metadata": { ORIGIN: { "width": project.timeline.format.width, "height": project.timeline.format.height } },
         "tracks": {
             "OTIO_SCHEMA": "Stack.1",
@@ -344,6 +346,10 @@ mod tests {
         p.add_asset(music);
 
         let text = export(&p);
+        // `scripts/validate_otio.py` loads this with the opentimelineio library
+        if let Some(dir) = std::env::var_os("RCP_OTIO_DUMP") {
+            std::fs::write(PathBuf::from(dir).join("rcp_export.otio"), &text).unwrap();
+        }
         assert!(text.contains("\"OTIO_SCHEMA\": \"Timeline.1\""));
         assert!(text.contains("file:///D:/Footage/Day%201/A%20001.mov"), "{text}");
         assert!(text.contains("LinearTimeWarp.1"));
@@ -363,6 +369,53 @@ mod tests {
         assert_eq!(m.start, Time::from_secs(2));
         assert!(placed.iter().all(|c| c.lane != 1), "the title isn't media: skipped");
         assert_eq!(q.assets.iter().find(|a| a.name == "A 001.mov").map(|a| a.path.clone()), Some(PathBuf::from("D:/Footage/Day 1/A 001.mov")));
+    }
+
+    #[test]
+    fn global_start_is_the_01_hour_timecode_label() {
+        for (rate, frames) in [(FrameRate::FPS_23_976, 86_400.0), (FrameRate::FPS_29_97, 107_892.0), (FrameRate::FPS_25, 90_000.0)] {
+            let mut p = Project::new("x");
+            p.timeline.format.rate = rate;
+            let doc: Value = serde_json::from_str(&export(&p)).unwrap();
+            assert_eq!(doc["global_start_time"]["value"].as_f64(), Some(frames), "{rate:?}");
+        }
+    }
+
+    /// Written by the opentimelineio library itself (0.18.1, see
+    /// `scripts/validate_otio.py`): 29.97, Clip.2 with several media
+    /// references, a transition, time warp, gap, nested stack, offline clip.
+    #[test]
+    fn reads_file_written_by_the_otio_library() {
+        let q = import(include_str!("../tests/fixtures/otio_library_written.otio")).unwrap();
+        let r = FrameRate::FPS_29_97;
+        let f = |n: i64| Time::from_frames(n, r);
+        assert_eq!((q.name.as_str(), q.timeline.format.rate), ("Library Cut", r));
+        let placed = q.timeline.placed_clips();
+        let v: Vec<_> = placed.iter().filter(|c| c.lane == 0 && !c.clip.is_gap()).collect();
+        let got: Vec<_> = v.iter().map(|c| (c.clip.name.as_str(), c.start, c.clip.duration, c.clip.source_in)).collect();
+        assert_eq!(
+            got,
+            [
+                ("Interview A", f(0), f(150), f(300)),
+                ("B-roll", f(150), f(90), Time::ZERO),
+                // the nested stack and gap before it keep their length
+                ("Missing", f(330), f(45), Time::ZERO),
+                ("Interview A", f(375), f(120), f(900)),
+            ]
+        );
+        // dissolve = in + out offsets, on the cut it straddles
+        assert_eq!(v[0].clip.transition_out.as_ref().map(|t| t.duration), Some(f(15)));
+        assert_eq!(v[1].clip.retime.as_ref().map(|rt| rt.segments[0].speed), Some(0.5));
+        // the active ("high") media reference, not the proxy; one asset for both uses
+        let interview: Vec<_> = q.assets.iter().filter(|a| a.name.starts_with("Interview A")).collect();
+        assert_eq!(interview.len(), 1, "{:#?}", q.assets);
+        assert_eq!(interview[0].path, PathBuf::from("C:/Media/Interview A.mov"));
+        assert!(!q.assets.iter().any(|a| a.path.to_string_lossy().contains("Proxy")));
+        assert_eq!(v[0].clip.asset_id(), v[3].clip.asset_id());
+        // A1 music after its gap, on its own lane
+        let m = placed.iter().find(|c| c.clip.name == "music.wav").expect("music");
+        assert!(m.lane != 0 && m.clip.av.audio);
+        assert_eq!((m.start, m.clip.duration), (f(60), f(240)));
     }
 
     #[test]

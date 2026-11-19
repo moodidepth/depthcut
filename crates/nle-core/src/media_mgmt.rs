@@ -5,6 +5,7 @@ use crate::asset::{AssetKind, MediaAsset};
 use crate::clip::{Clip, ClipKind};
 use crate::ids::AssetId;
 use crate::project::Project;
+use crate::time::Time;
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
@@ -38,6 +39,10 @@ pub fn used_assets(project: &Project) -> BTreeSet<AssetId> {
 /// media length.
 pub fn refresh_asset(project: &mut Project, id: AssetId, probed: MediaAsset) {
     let Some(a) = project.asset_mut(id) else { return };
+    // EDL imports keep absolute source timecode until the file's own start
+    // timecode is known
+    let tc_shift = if std::mem::take(&mut a.source_tc_pending) { probed.start_timecode.unwrap_or_default() } else { Time::ZERO };
+    a.start_timecode = probed.start_timecode;
     a.kind = probed.kind;
     a.duration = probed.duration;
     a.video = probed.video;
@@ -54,6 +59,7 @@ pub fn refresh_asset(project: &mut Project, id: AssetId, probed: MediaAsset) {
         c.audition.iter_mut().for_each(|ch| walk(ch, id, f));
     }
     let fix = |c: &mut Clip| {
+        c.source_in = (c.source_in - tc_shift).max(Time::ZERO);
         c.av.video &= has_v;
         c.av.audio &= has_a;
         c.media_duration = Some(dur);

@@ -6,9 +6,14 @@
 //! `AX`, `* FROM CLIP NAME:` / `* SOURCE FILE:` comments, `M2` speed lines,
 //! cut-centred dissolves as `D` events, record times from 01:00:00:00.
 //!
+//! Timecode: drop-frame (`;`, `FCM: DROP FRAME`) at 29.97 / 59.94, non-drop
+//! at every other rate. Source times are the media's own timecode (its
+//! `timecode` tag / BWF time reference, 00:00:00:00 when it has none); on
+//! import they stay absolute until the media is probed, which subtracts the
+//! file's start timecode (`MediaAsset::source_tc_pending`).
+//!
 //! Limitations (also listed in the UI tooltip):
-//! - non-drop-frame timecode only (drop-frame `;` timecode is read as NDF);
-//! - source timecode is assumed to start at 00:00:00:00 (source TC isn't probed);
+//! - one frame rate per EDL: source timecode is written at the timeline rate;
 //! - titles, generators, adjustment layers and compound clips are skipped
 //!   with a comment; effects, colour, keyframes and fades to black are lost;
 //! - speed ramps are written as their average constant speed.
@@ -16,12 +21,53 @@
 use crate::clip::ClipKind;
 use crate::interchange::{self, ImportClip, ImportTrack, LaneTrack, TrackKind};
 use crate::project::Project;
-use crate::time::{format_timecode, parse_timecode, FrameRate, Time};
+use crate::time::{format_timecode, format_timecode_df, parse_timecode, parse_timecode_df, FrameRate, Time};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
 /// Record timecode of the first frame of the timeline.
 const RECORD_START_HOURS: i64 = 1;
+
+/// Timecode style of one EDL.
+#[derive(Clone, Copy)]
+struct Tc {
+    rate: FrameRate,
+    df: bool,
+}
+
+impl Tc {
+    /// Drop-frame wherever the rate has a drop-frame form (Resolve / Premiere default).
+    fn for_rate(rate: FrameRate) -> Self {
+        Tc { rate, df: rate.supports_drop_frame() }
+    }
+    fn fmt(self, t: Time) -> String {
+        let t = Time::from_frames(t.frames_round(self.rate), self.rate);
+        if self.df {
+            format_timecode_df(t, self.rate)
+        } else {
+            format_timecode(t, self.rate)
+        }
+    }
+    fn parse(self, s: &str) -> Option<Time> {
+        if self.df {
+            parse_timecode_df(s, self.rate)
+        } else {
+            parse_timecode(s, self.rate)
+        }
+    }
+    /// The time labelled `HH:00:00:00` (not `HH` × 3600 s: at 23.976 / 29.97
+    /// non-drop, timecode runs slower than the clock).
+    fn hour(self, h: i64) -> Time {
+        self.parse(&format!("{h:02}:00:00:00")).unwrap_or_default()
+    }
+    fn fcm(self) -> &'static str {
+        if self.df {
+            "DROP FRAME"
+        } else {
+            "NON-DROP FRAME"
+        }
+    }
+}
 
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum EdlError {
@@ -66,13 +112,20 @@ pub fn export(project: &Project) -> String {
 
 fn header(project: &Project, track: &str) -> String {
     let title = if track == "V1" { project.name.clone() } else { format!("{} {track}", project.name) };
-    format!("TITLE: {}\nFCM: NON-DROP FRAME\n\n", title.replace(['\r', '\n'], " "))
+    let fcm = Tc::for_rate(project.timeline.format.rate).fcm();
+    format!("TITLE: {}\nFCM: {fcm}\n\n", title.replace(['\r', '\n'], " "))
 }
 
 fn export_track(project: &Project, track: &LaneTrack, track_name: &str) -> String {
     let rate = project.timeline.format.rate;
-    let rec0 = Time::from_secs(RECORD_START_HOURS * 3600);
-    let tc = |t: Time| format_timecode(Time::from_frames(t.frames_round(rate), rate), rate);
+    let tcs = Tc::for_rate(rate);
+    let rec0 = tcs.hour(RECORD_START_HOURS);
+    let tc = |t: Time| tcs.fmt(t);
+    // timecode of a clip's first media frame
+    let tc0 = |c: &crate::clip::Clip| match &c.kind {
+        ClipKind::Asset { asset } => project.asset(*asset).and_then(|a| a.start_timecode).unwrap_or_default(),
+        _ => Time::ZERO,
+    };
     let mut s = header(project, track_name);
     let mut n = 0;
     let items = &track.items;
@@ -95,8 +148,8 @@ fn export_track(project: &Project, track: &LaneTrack, track_name: &str) -> Strin
             (false, false) => continue,
         };
         let (speed, ramped) = interchange::clip_speed(c);
-        // source time at record time `t` (constant-speed approximation)
-        let src = |t: Time| c.source_in + Time::from_secs_f64((t - it.start).as_secs_f64() * speed);
+        // source timecode at record time `t` (constant-speed approximation)
+        let src = |t: Time| tc0(c) + c.source_in + Time::from_secs_f64((t - it.start).as_secs_f64() * speed);
         let half = |d: Time| d.div_i64(2);
         let d_in = (i > 0).then(|| interchange::dissolve_after(items, i - 1)).flatten().filter(|_| is_media(project, &items[i - 1]));
         let d_out = interchange::dissolve_after(items, i).filter(|_| is_media(project, &items[i + 1]));
@@ -114,7 +167,7 @@ fn export_track(project: &Project, track: &LaneTrack, track_name: &str) -> Strin
         if let Some(d) = d_in {
             let prev = items[i - 1].clip;
             let (pspeed, _) = interchange::clip_speed(prev);
-            let p_src = prev.source_in + Time::from_secs_f64((rec_in - items[i - 1].start).as_secs_f64() * pspeed);
+            let p_src = tc0(prev) + prev.source_in + Time::from_secs_f64((rec_in - items[i - 1].start).as_secs_f64() * pspeed);
             line(&mut s, "C", p_src, rec_in, rec_in);
             line(&mut s, &format!("D {:03}", d.frames_round(rate)), src(rec_in), rec_in, rec_out);
         } else {
@@ -167,6 +220,8 @@ struct Event {
 pub fn import(src: &str, rate: FrameRate) -> Result<Project, EdlError> {
     let mut title = String::from("Imported EDL");
     let mut events: Vec<Event> = Vec::new();
+    // `FCM: DROP FRAME`, or any `;` timecode, switches to drop-frame counting
+    let mut df = false;
     // index of the first line of the current event (dissolves span two lines)
     let mut group_start = 0usize;
     for (ln, raw) in src.lines().enumerate() {
@@ -178,7 +233,11 @@ pub fn import(src: &str, rate: FrameRate) -> Result<Project, EdlError> {
             title = t.trim().to_string();
             continue;
         }
-        if line.starts_with("FCM:") || line.starts_with("SPLIT:") {
+        if let Some(f) = line.strip_prefix("FCM:") {
+            df = rate.supports_drop_frame() && f.trim().eq_ignore_ascii_case("DROP FRAME");
+            continue;
+        }
+        if line.starts_with("SPLIT:") {
             continue;
         }
         if let Some(c) = line.strip_prefix('*') {
@@ -211,7 +270,9 @@ pub fn import(src: &str, rate: FrameRate) -> Result<Project, EdlError> {
         if tok.len() < 8 {
             return Err(EdlError::Syntax(ln + 1, format!("expected at least 8 fields, found {}", tok.len())));
         }
-        let tcs: Vec<Time> = tok[tok.len() - 4..].iter().map(|t| parse_timecode(t, rate)).collect::<Option<_>>().ok_or_else(|| EdlError::Syntax(ln + 1, "bad timecode".into()))?;
+        let tc_tok = &tok[tok.len() - 4..];
+        df |= rate.supports_drop_frame() && tc_tok.iter().any(|t| t.contains(';'));
+        let tcs: Vec<Time> = tc_tok.iter().map(|t| Tc { rate, df }.parse(t)).collect::<Option<_>>().ok_or_else(|| EdlError::Syntax(ln + 1, "bad timecode".into()))?;
         let kind = tok[3].to_ascii_uppercase();
         let trans = match kind.as_str() {
             "C" => None,
@@ -225,9 +286,11 @@ pub fn import(src: &str, rate: FrameRate) -> Result<Project, EdlError> {
     if events.is_empty() {
         return Err(EdlError::Empty);
     }
-    // record times relative to the whole hour the edit starts in
+    // record times relative to the whole timecode hour the edit starts in
     let first = events.iter().map(|e| e.rec_in).min().unwrap_or_default();
-    let origin = Time::from_secs((first.as_secs_f64() / 3600.0).floor() as i64 * 3600).clamp(Time::ZERO, first);
+    let tcs = Tc { rate, df };
+    let hours = tcs.fmt(first).split(':').next().and_then(|h| h.parse::<i64>().ok()).unwrap_or(0);
+    let origin = tcs.hour(hours).clamp(Time::ZERO, first);
 
     let mut main: Vec<ImportClip> = Vec::new();
     let mut extra_audio: Vec<ImportClip> = Vec::new();
@@ -288,7 +351,12 @@ pub fn import(src: &str, rate: FrameRate) -> Result<Project, EdlError> {
     if !extra_audio.is_empty() {
         tracks.push(ImportTrack { kind: TrackKind::Audio, clips: extra_audio });
     }
-    Ok(interchange::build_project(&title, rate, tracks))
+    let mut project = interchange::build_project(&title, rate, tracks);
+    // source times are the media's own timecode until a probe knows where it starts
+    for a in &mut project.assets {
+        a.source_tc_pending = true;
+    }
+    Ok(project)
 }
 
 #[cfg(test)]
@@ -376,6 +444,49 @@ M2   AX       050.0          00:00:00:00\n\
         let music = p.timeline.placed_clips().into_iter().find(|c| c.lane < 0).expect("overlapping audio is connected");
         assert_eq!(music.start, Time::from_secs(1));
         assert!(music.clip.av.audio && !music.clip.av.video);
+    }
+
+    #[test]
+    fn ntsc_rates_use_real_timecode_hours_and_drop_frame() {
+        for (rate, start) in [(FrameRate::FPS_29_97, "01:00:00;00"), (FrameRate::FPS_23_976, "01:00:00:00"), (FrameRate::FPS_59_94, "01:00:00;00")] {
+            let mut p = sample();
+            p.timeline.format.rate = rate;
+            let edl = export(&p);
+            assert_eq!(edl.contains("FCM: DROP FRAME"), rate.supports_drop_frame(), "{edl}");
+            let first = edl.lines().find(|l| l.starts_with("001")).unwrap();
+            assert!(first.split_whitespace().nth(6) == Some(start), "{rate:?}: {first}");
+            // and back: the first clip lands at zero, sources survive
+            let q = import(&edl, rate).unwrap();
+            let sp = &q.timeline.spine;
+            assert!(!sp[0].is_gap(), "{rate:?}: {sp:#?}");
+            assert_eq!(sp[0].source_in.frames_round(rate), Time::from_secs(2).frames_round(rate), "{rate:?}");
+        }
+        // a drop-frame EDL without an FCM line is recognised by its `;`
+        let src = "001  AX       V     C        00:10:00;00 00:10:01;00 01:00:00;00 01:00:01;00\n";
+        let p = import(src, FrameRate::FPS_29_97).unwrap();
+        assert_eq!(p.timeline.spine[0].source_in, Time::from_frames(17_982, FrameRate::FPS_29_97));
+    }
+
+    #[test]
+    fn source_timecode_is_the_media_timecode() {
+        let mut p = sample();
+        let tc = parse_timecode("10:00:00:00", FrameRate::FPS_25).unwrap();
+        p.assets[0].start_timecode = Some(tc);
+        let edl = export(&p);
+        assert!(edl.contains("001  AX       AA/V  C        10:00:02:00 10:00:05:20 01:00:00:00 01:00:03:20"), "{edl}");
+        // import: absolute until the probe knows the start timecode
+        let mut q = import(&edl, FrameRate::FPS_25).unwrap();
+        assert_eq!(q.timeline.spine[0].source_in, tc + Time::from_secs(2));
+        assert!(q.assets.iter().all(|a| a.source_tc_pending));
+        let id = q.timeline.spine[0].asset_id().unwrap();
+        let mut probed = asset("A001.mov", 20);
+        probed.start_timecode = Some(tc);
+        crate::media_mgmt::refresh_asset(&mut q, id, probed.clone());
+        assert_eq!(q.timeline.spine[0].source_in, Time::from_secs(2));
+        assert!(!q.asset(id).unwrap().source_tc_pending);
+        // a second probe doesn't shift again
+        crate::media_mgmt::refresh_asset(&mut q, id, probed);
+        assert_eq!(q.timeline.spine[0].source_in, Time::from_secs(2));
     }
 
     #[test]

@@ -1997,7 +1997,7 @@ impl App {
                 ui.menu_button("Export Timeline As", |ui| {
                     if ui
                         .button("EDL (CMX3600)…")
-                        .on_hover_text("Cuts, dissolves and constant speed changes; one .edl per track. Titles, effects and colour are not carried.")
+                        .on_hover_text("Cuts, dissolves and constant speed changes; one .edl per track. Drop-frame timecode at 29.97 / 59.94; source times use each file's own timecode. Titles, effects and colour are not carried.")
                         .clicked()
                     {
                         ui.close_menu();
