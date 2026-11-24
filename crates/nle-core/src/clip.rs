@@ -918,6 +918,9 @@ pub struct CompoundClip {
     /// where it has gaps). Its length always equals its contents'.
     #[serde(default, skip_serializing_if = "is_false")]
     pub storyline: bool,
+    /// Set on a multicam clip: all its angles (`spine` is the shown one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multicam: Option<Box<crate::multicam::Multicam>>,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -930,15 +933,20 @@ fn time_is_zero(t: &Time) -> bool {
 
 impl CompoundClip {
     pub fn new(spine: Vec<Clip>) -> Self {
-        CompoundClip { spine, storyline: false }
+        CompoundClip { spine, storyline: false, multicam: None }
     }
 
     pub fn storyline(spine: Vec<Clip>) -> Self {
-        CompoundClip { spine, storyline: true }
+        CompoundClip { spine, storyline: true, multicam: None }
     }
 
     pub fn duration(&self) -> Time {
         self.spine.iter().map(|c| c.duration).sum()
+    }
+
+    /// The clips heard: the heard angle of a multicam clip, else the spine.
+    pub fn audio_spine(&self) -> &[Clip] {
+        self.multicam.as_deref().and_then(|m| m.audio_spine()).unwrap_or(&self.spine)
     }
 }
 

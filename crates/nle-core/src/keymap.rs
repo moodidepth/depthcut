@@ -133,6 +133,19 @@ actions! {
     MatchFrame => "Match Frame (open source at this frame)", "Marking";
     ReplaceEdit => "Replace Edit", "Edit";
     FitToFill => "Fit to Fill Edit", "Edit";
+    SyncClipsAudio => "Synchronize Clips by Audio", "Multicam";
+    SyncClipsTimecode => "Synchronize Clips by Timecode", "Multicam";
+    NewMulticamClip => "New Multicam Clip", "Multicam";
+    ToggleAngleViewer => "Show Angles in Viewer", "Multicam";
+    SwitchAngle1 => "Cut and Switch to Angle 1", "Multicam";
+    SwitchAngle2 => "Cut and Switch to Angle 2", "Multicam";
+    SwitchAngle3 => "Cut and Switch to Angle 3", "Multicam";
+    SwitchAngle4 => "Cut and Switch to Angle 4", "Multicam";
+    SwitchAngle5 => "Cut and Switch to Angle 5", "Multicam";
+    SwitchAngle6 => "Cut and Switch to Angle 6", "Multicam";
+    SwitchAngle7 => "Cut and Switch to Angle 7", "Multicam";
+    SwitchAngle8 => "Cut and Switch to Angle 8", "Multicam";
+    SwitchAngle9 => "Cut and Switch to Angle 9", "Multicam";
 }
 
 macro_rules! keys {
@@ -467,6 +480,16 @@ impl ActionMap {
                 (FitToFill, &[B::shift(K::F11)]),
                 (ToggleSourceViewer, &[B::shift(K::Q)]),
                 (ReplaceEdit, &[B::shift(K::R)]),
+                (ToggleAngleViewer, &[B::ctrl_shift(K::Num7)]),
+                (SwitchAngle1, &[B::key(K::Num1)]),
+                (SwitchAngle2, &[B::key(K::Num2)]),
+                (SwitchAngle3, &[B::key(K::Num3)]),
+                (SwitchAngle4, &[B::key(K::Num4)]),
+                (SwitchAngle5, &[B::key(K::Num5)]),
+                (SwitchAngle6, &[B::key(K::Num6)]),
+                (SwitchAngle7, &[B::key(K::Num7)]),
+                (SwitchAngle8, &[B::key(K::Num8)]),
+                (SwitchAngle9, &[B::key(K::Num9)]),
             ],
         )
     }
@@ -574,6 +597,16 @@ impl ActionMap {
                 (FitToFill, &[B::shift(K::F11)]),
                 (ToggleSourceViewer, &[B::shift(K::Q)]),
                 (ReplaceEdit, &[B::shift(K::R)]),
+                (ToggleAngleViewer, &[B::ctrl_shift(K::Num7)]),
+                (SwitchAngle1, &[B::key(K::Num1)]),
+                (SwitchAngle2, &[B::key(K::Num2)]),
+                (SwitchAngle3, &[B::key(K::Num3)]),
+                (SwitchAngle4, &[B::key(K::Num4)]),
+                (SwitchAngle5, &[B::key(K::Num5)]),
+                (SwitchAngle6, &[B::key(K::Num6)]),
+                (SwitchAngle7, &[B::key(K::Num7)]),
+                (SwitchAngle8, &[B::key(K::Num8)]),
+                (SwitchAngle9, &[B::key(K::Num9)]),
             ],
         )
     }
@@ -681,6 +714,16 @@ impl ActionMap {
                 (FitToFill, &[B::shift(K::F11)]),
                 (ToggleSourceViewer, &[B::key(K::Q)]),
                 (ReplaceEdit, &[B::key(K::F11)]),
+                (ToggleAngleViewer, &[B::ctrl_shift(K::Num7)]),
+                (SwitchAngle1, &[B::key(K::Num1)]),
+                (SwitchAngle2, &[B::key(K::Num2)]),
+                (SwitchAngle3, &[B::key(K::Num3)]),
+                (SwitchAngle4, &[B::key(K::Num4)]),
+                (SwitchAngle5, &[B::key(K::Num5)]),
+                (SwitchAngle6, &[B::key(K::Num6)]),
+                (SwitchAngle7, &[B::key(K::Num7)]),
+                (SwitchAngle8, &[B::key(K::Num8)]),
+                (SwitchAngle9, &[B::key(K::Num9)]),
             ],
         )
     }

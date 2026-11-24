@@ -23,6 +23,7 @@ mod key_input;
 mod media;
 mod media_manage;
 mod motion_ui;
+mod multicam_ui;
 mod online_ui;
 mod presets_ui;
 mod shortcuts_ui;

@@ -68,6 +68,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             }
             ui.separator();
         }
+        if !source {
+            crate::multicam_ui::header(app, ui);
+        }
         ui.label(egui::RichText::new(title).strong());
         ui.label(egui::RichText::new(app.project.timeline.format.label()).small().color(theme::TEXT_DIM));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -195,6 +198,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 
     if app.punch.picking {
         pick_punch_anchor(app, ui, &resp, img, (fw, fh));
+    } else if crate::multicam_ui::overlay(app, ui, &resp, img) {
+        if app.viewer.drag.take().is_some() {
+            app.history.seal();
+        }
     } else if app.browser.skim.is_none()
         && !source
         && !app.playback.playing

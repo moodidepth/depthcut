@@ -839,6 +839,7 @@ impl Timeline {
         let result = f(&mut inner);
         comp.spine = inner.spine;
         result?;
+        crate::multicam::store_spine(comp);
         let new_len = comp.duration();
         let storyline = comp.storyline;
         let old_len = c.media_duration.unwrap_or(new_len);

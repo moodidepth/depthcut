@@ -234,6 +234,14 @@ pub enum Command {
         id: ClipId,
         speed: f64,
     },
+    /// Show / hear another angle of multicam clip `id`, cutting it at `at`
+    /// first (no cut at its own start).
+    SwitchAngle {
+        id: ClipId,
+        at: Option<Time>,
+        video: Option<usize>,
+        audio: Option<usize>,
+    },
 }
 
 impl Command {
@@ -287,6 +295,8 @@ impl Command {
             Command::Unlink { .. } => "Unlink",
             Command::Link { .. } => "Link",
             Command::SetSpeed { .. } => "Speed",
+            Command::SwitchAngle { at: Some(_), .. } => "Cut and Switch Angle",
+            Command::SwitchAngle { .. } => "Switch Angle",
         }
     }
 
@@ -571,6 +581,23 @@ impl Command {
             Command::Unlink { id } => tl.unlink(*id),
             Command::Link { a, b } => tl.link_clips(*a, *b),
             Command::SetSpeed { id, speed } => tl.set_speed(*id, *speed),
+            Command::SwitchAngle { id, at, video, audio } => {
+                let target = match at {
+                    Some(t) => match tl.blade_clip(*id, *t) {
+                        Ok((_, right)) => right,
+                        Err(EditError::AtBoundary) => *id,
+                        Err(e) => return Err(e),
+                    },
+                    None => *id,
+                };
+                let c = tl.clip_mut(target).ok_or(EditError::NotFound(target))?;
+                // the same angle again changes nothing (the cut is rolled back too)
+                if crate::multicam::switch(c, *video, *audio) {
+                    Ok(())
+                } else {
+                    Err(EditError::Nothing)
+                }
+            }
         }
     }
 }

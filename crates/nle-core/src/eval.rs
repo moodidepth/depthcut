@@ -866,10 +866,10 @@ fn push_clip_audio(c: &Clip, start: Time, lane: i32, window: (Time, Time), edge:
             }
             match &c.retime {
                 // same clock as the timeline around it
-                None => collect_audio(&comp.spine, start - c.source_in, (s, e), &[], out),
+                None => collect_audio(comp.audio_spine(), start - c.source_in, (s, e), &[], out),
                 Some(_) => {
                     let range = c.source_range();
-                    collect_audio(&comp.spine, Time::ZERO, range, &[], out);
+                    collect_audio(comp.audio_spine(), Time::ZERO, range, &[], out);
                 }
             }
             for span in &mut out[first..] {

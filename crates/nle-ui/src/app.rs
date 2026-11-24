@@ -141,7 +141,7 @@ fn preview_decoders() -> FrameServer {
     FrameServer::new(64, Some(1080))
 }
 
-type PreviewKey = (u64, Time, Option<f32>, bool, Option<(AssetId, Time)>, Option<nle_render::Highlight>);
+type PreviewKey = (u64, Time, Option<f32>, bool, Option<(AssetId, Time)>, Option<nle_render::Highlight>, bool);
 
 /// GPU preview: the renderer shares eframe's wgpu device and its display
 /// texture is registered with egui, so the viewer shows it without copies.
@@ -255,6 +255,8 @@ pub struct App {
     pub timeline_rename: Option<(usize, String)>,
     /// Source viewer, its marks and the timeline's single In / Out mark.
     pub source: crate::source::SourceView,
+    /// Angle viewer and the New Multicam Clip window.
+    pub multicam: crate::multicam_ui::MulticamUi,
     /// Source clip whose audio the engine is set up to play (None = timeline).
     audio_source: Option<AssetId>,
     /// Relink search / consolidate copy in progress.
@@ -397,6 +399,7 @@ impl App {
             parked: Vec::new(),
             timeline_rename: None,
             source: Default::default(),
+            multicam: Default::default(),
             audio_source: None,
             media_job: None,
             pending_switch: None,
@@ -1827,9 +1830,13 @@ impl App {
         let t = Time::from_frames(self.view_time().frames_floor(rate), rate);
         // a skimmed browser clip, else the source viewer's clip
         let src = self.browser.skim.or_else(|| self.source_frame());
-        let comp = match src {
-            Some((a, st)) => self.browser_composition(a, st),
-            None => eval::evaluate(&self.project.timeline, t),
+        // the angle grid of a multicam clip
+        let angles = if src.is_none() { self.angle_composition(t) } else { None };
+        let grid = angles.is_some();
+        let comp = match (src, angles) {
+            (Some((a, st)), _) => self.browser_composition(a, st),
+            (None, Some(c)) => c,
+            (None, None) => eval::evaluate(&self.project.timeline, t),
         };
         let proxy = self.use_proxy;
         let playing = self.playback.playing;
@@ -1866,7 +1873,7 @@ impl App {
             (Some(&clip), Some((node, matte))) if self.inspector_tab == InspectorTab::Color => Some(nle_render::Highlight { clip, node, matte }),
             _ => None,
         };
-        let key = (self.history.revision(), t, self.viewer.wipe, proxy, src, highlight);
+        let key = (self.history.revision(), t, self.viewer.wipe, proxy, src, highlight, grid);
         if p.last != Some(key) || p.pending_uploads {
             let opts = RenderOptions { wipe: self.viewer.wipe, color: true, highlight, transparent: false };
             p.renderer.render(&comp, &mut NoBlock(&self.project), opts);
@@ -2253,6 +2260,19 @@ impl App {
             Action::MatchFrame => self.match_frame(),
             Action::ReplaceEdit => self.replace_edit(),
             Action::FitToFill => self.fit_to_fill(),
+            Action::SyncClipsAudio => self.sync_selected(false),
+            Action::SyncClipsTimecode => self.sync_selected(true),
+            Action::NewMulticamClip => self.open_new_multicam(),
+            Action::ToggleAngleViewer => self.toggle_angle_viewer(),
+            Action::SwitchAngle1 => self.switch_angle(0, true),
+            Action::SwitchAngle2 => self.switch_angle(1, true),
+            Action::SwitchAngle3 => self.switch_angle(2, true),
+            Action::SwitchAngle4 => self.switch_angle(3, true),
+            Action::SwitchAngle5 => self.switch_angle(4, true),
+            Action::SwitchAngle6 => self.switch_angle(5, true),
+            Action::SwitchAngle7 => self.switch_angle(6, true),
+            Action::SwitchAngle8 => self.switch_angle(7, true),
+            Action::SwitchAngle9 => self.switch_angle(8, true),
         }
     }
 
@@ -2540,6 +2560,36 @@ impl App {
                     ui.close_menu();
                 }
                 ui.separator();
+                ui.menu_button("Multicam", |ui| {
+                    let two = self.selection.len() >= 2;
+                    if ui
+                        .add_enabled(two, egui::Button::new(self.menu_label("Synchronize Clips by Audio", Action::SyncClipsAudio)))
+                        .on_hover_text("Move the selected connected clips so their sound lines up with a selected storyline clip (or the earliest one)")
+                        .on_disabled_hover_text("Select two or more clips")
+                        .clicked()
+                    {
+                        ui.close_menu();
+                        self.sync_selected(false);
+                    }
+                    if ui
+                        .add_enabled(two, egui::Button::new(self.menu_label("Synchronize Clips by Timecode", Action::SyncClipsTimecode)))
+                        .on_disabled_hover_text("Select two or more clips")
+                        .clicked()
+                    {
+                        ui.close_menu();
+                        self.sync_selected(true);
+                    }
+                    ui.separator();
+                    if ui.button(self.menu_label("New Multicam Clip…", Action::NewMulticamClip)).clicked() {
+                        ui.close_menu();
+                        self.open_new_multicam();
+                    }
+                    let mut on = self.multicam.angles;
+                    if ui.checkbox(&mut on, self.menu_label("Show Angles in Viewer", Action::ToggleAngleViewer)).changed() {
+                        ui.close_menu();
+                        self.toggle_angle_viewer();
+                    }
+                });
                 ui.menu_button("Retime", |ui| self.retime_menu(ui));
             });
             ui.menu_button("Markers", |ui| {
@@ -3015,6 +3065,7 @@ impl eframe::App for App {
         shortcuts_ui::show(self, ctx);
         crate::about_ui::show(&mut self.about, ctx);
         self.marker_edit_window(ctx);
+        self.multicam_window(ctx);
         self.recovery_window(ctx);
         self.crash_notice(ctx);
         // closing the window with unsaved changes asks first
