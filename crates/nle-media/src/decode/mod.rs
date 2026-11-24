@@ -16,7 +16,24 @@ use crate::frame::{PixelFormat, VideoFrame};
 use crate::hwaccel::HwBackend;
 use crate::probe;
 use crate::MediaError;
-use nle_core::{FrameRate, MediaAsset, Time};
+use nle_core::{FieldOrder, FrameRate, MediaAsset, Time};
+
+/// FFmpeg filter that turns interlaced frames into progressive ones at the
+/// same frame rate (one frame per frame; motion-adaptive, Bob Weaver).
+pub fn deinterlace_filter(fields: FieldOrder) -> String {
+    let parity = match fields {
+        FieldOrder::BottomFirst => "bff",
+        _ => "tff",
+    };
+    format!("bwdif=mode=send_frame:parity={parity}:deint=all")
+}
+
+/// The deinterlace filter for decoding `asset` (not its proxy, which is
+/// already progressive), if any.
+pub fn deinterlace_for(asset: &MediaAsset, opts: DecodeOptions) -> Option<String> {
+    let proxy = opts.use_proxy && asset.proxy_path.as_ref().is_some_and(|p| p.exists());
+    asset.deinterlace_fields().filter(|_| !proxy).map(deinterlace_filter)
+}
 
 pub trait VideoDecoder: Send {
     fn width(&self) -> u32;
@@ -50,8 +67,9 @@ pub fn open(asset: &MediaAsset, opts: DecodeOptions) -> Result<Box<dyn VideoDeco
     if !asset.has_video() {
         return Err(MediaError::Unsupported(format!("{} has no video", asset.name)));
     }
+    // in-process decoding has no filter graph: interlaced sources go through the CLI
     #[cfg(feature = "ffmpeg")]
-    {
+    if deinterlace_for(asset, opts).is_none() {
         match libav::LibavDecoder::open(asset, opts) {
             Ok(d) => return Ok(Box::new(d)),
             Err(e) => log::warn!("libav decoder failed for {}: {e} — falling back to CLI", asset.name),

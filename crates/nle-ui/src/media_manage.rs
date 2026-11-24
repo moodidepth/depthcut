@@ -130,10 +130,16 @@ impl App {
         media_mgmt::refresh_asset(&mut self.project, id, probed);
         self.assets_changed = true;
         self.library.forget_asset(id);
-        self.frames.forget(id);
         if let Some(a) = self.project.asset(id).cloned() {
             self.library.ensure(&a);
         }
+        self.reload_decoders(id);
+    }
+
+    /// Drop the open decoders and cached pictures of an asset whose decode
+    /// settings (or file) changed.
+    pub fn reload_decoders(&mut self, id: AssetId) {
+        self.frames.forget(id);
         if let Some(p) = &mut self.preview {
             p.renderer.clear_cache();
             p.last = None;

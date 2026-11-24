@@ -57,12 +57,12 @@ pub mod tracks;
 pub mod xml;
 pub mod zoom_punch;
 
-pub use asset::{AssetKind, Attribution, AudioStreamInfo, MediaAsset, VideoStreamInfo, YuvMatrix};
+pub use asset::{AssetKind, Attribution, AudioStreamInfo, Deinterlace, FieldOrder, MediaAsset, VideoStreamInfo, YuvMatrix};
 pub use audio_fx::{
     AudioFx, AutoLane, AutoPoint, BusId, BusSettings, CompressorSettings, DeEsserSettings, DelaySettings, EqBand, EqBandType, EqFilter, FilterSlope, GateMode, GateSettings,
     LevelerSettings, MixerSettings, NoiseReductionSettings, ParametricEq, PluginInsert, ReverbSettings, UserBus, VoiceIsolationSettings, BUS_SLOTS, MAX_USER_BUSSES,
 };
-pub use captions::{CaptionSegment, CaptionStyle, CaptionTrack, CaptionWord};
+pub use captions::{CaptionSegment, CaptionStyle, CaptionTrack, CaptionWord, SubtitleFormat};
 pub use clip::{
     AudioParams, AudioRole, AvFlags, BlendMode, Clip, ClipKind, ColorParams, ColorWheel, CompoundClip, CropAspect, CropMode, Direction, DuckingSettings, EqSettings, FadeShape,
     LutRef, TitleParams, TitleStyle, Transition, TransitionKind, VideoParams,

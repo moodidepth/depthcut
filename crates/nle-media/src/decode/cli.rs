@@ -7,7 +7,7 @@
 //! Past the end of the picture the last frame is held; a file that cannot be
 //! read is an error, never a held frame.
 
-use super::{preroll_frames, scaled_dims, DecodeOptions, VideoDecoder};
+use super::{deinterlace_for, preroll_frames, scaled_dims, DecodeOptions, VideoDecoder};
 use crate::ffmpeg_cli;
 use crate::frame::{PixelFormat, VideoFrame};
 use crate::hwaccel::{self, Chroma, DecoderPlan, HwBackend, Platform, VideoCodec, INTEL_ARC_A750};
@@ -62,6 +62,8 @@ pub struct CliDecoder {
     expected_end: i64,
     /// The file's final frame, once it has been found.
     end: Option<(i64, VideoFrame)>,
+    /// `bwdif` filter for interlaced sources.
+    deinterlace: Option<String>,
 }
 
 impl CliDecoder {
@@ -75,6 +77,7 @@ impl CliDecoder {
         let plans = hwaccel::plan_decode(codec, depth, chroma, Platform::current(), hwaccel::probe_caps(), &INTEL_ARC_A750);
         let (width, height) = scaled_dims(v.width, v.height, opts.max_height);
         log::debug!("{}: decode plan {:?}", asset.name, plans.iter().map(|p| p.backend).collect::<Vec<_>>());
+        let deinterlace = deinterlace_for(asset, opts);
         Ok(CliDecoder {
             path,
             plans,
@@ -93,6 +96,7 @@ impl CliDecoder {
             last: None,
             expected_end: if asset.kind == AssetKind::Image { 0 } else { asset.duration.frames_floor(v.frame_rate).max(0) },
             end: None,
+            deinterlace,
         })
     }
 
@@ -106,6 +110,16 @@ impl CliDecoder {
         let (w, h) = (self.width, self.height);
         let sw_fmt = self.chroma.hw_download_format(if self.format == PixelFormat::P010 { 10 } else { 8 });
         let scale = self.needs_scale();
+        if let Some(di) = &self.deinterlace {
+            // fields must be separated before any vertical scaling, so the
+            // picture is downloaded first and scaled on the CPU
+            let sc = if scale { format!("scale={w}:{h}:flags=bilinear,") } else { String::new() };
+            return match plan.backend {
+                HwBackend::Qsv => (vec!["-hwaccel_output_format".into(), "qsv".into()], format!("hwdownload,format={sw_fmt},{di},{sc}format={out_fmt}")),
+                HwBackend::Vaapi => (vec!["-hwaccel_output_format".into(), "vaapi".into()], format!("hwdownload,format={sw_fmt},{di},{sc}format={out_fmt}")),
+                _ => (Vec::new(), format!("{di},{sc}format={out_fmt}")),
+            };
+        }
         // QSV / VA-API surfaces stay on the GPU (scaled there when needed) and
         // are downloaded explicitly. Letting FFmpeg auto-download QSV frames
         // fails for HEVC Main10 and AV1 ("Impossible to convert between the
@@ -287,7 +301,8 @@ impl VideoDecoder for CliDecoder {
         cmd.args(["-hide_banner", "-loglevel", "error", "-nostdin"]);
         cmd.args(&plan.input_args);
         seek_args(&mut cmd, &self.path, t.frames_floor(self.rate), self.rate);
-        cmd.args(["-map", "0:v:0", "-frames:v", "1", "-vf", &format!("scale={tw}:{th}:flags=area"), "-pix_fmt", "rgba", "-f", "rawvideo", "pipe:1"]);
+        let di = self.deinterlace.as_ref().map(|d| format!("{d},")).unwrap_or_default();
+        cmd.args(["-map", "0:v:0", "-frames:v", "1", "-vf", &format!("{di}scale={tw}:{th}:flags=area"), "-pix_fmt", "rgba", "-f", "rawvideo", "pipe:1"]);
         let out = cmd.stdin(Stdio::null()).stderr(Stdio::null()).output().map_err(MediaError::Io)?;
         if out.stdout.len() == (tw * th * 4) as usize {
             Ok((tw, th, out.stdout))

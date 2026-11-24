@@ -383,9 +383,33 @@ impl CaptionTrack {
 
     /// SubRip text of all segments.
     pub fn to_srt(&self) -> String {
+        self.to_subtitles(SubtitleFormat::Srt, Time::ZERO, Time::MAX)
+    }
+
+    /// Subtitle text for the timeline range `[start, end)`, timed from
+    /// `start` (an export of part of the timeline). Cues are clipped to the
+    /// range; empty ones are dropped.
+    pub fn to_subtitles(&self, format: SubtitleFormat, start: Time, end: Time) -> String {
         let mut out = String::new();
-        for (i, s) in self.segments.iter().enumerate() {
-            out.push_str(&format!("{}\n{} --> {}\n{}\n\n", i + 1, srt_time(s.start), srt_time(s.end), s.text.trim()));
+        if format == SubtitleFormat::WebVtt {
+            out.push_str("WEBVTT\n\n");
+        }
+        let mut n = 0;
+        // cues appear where the viewer shows them: shifted by the sync offset
+        let off = self.sync_offset();
+        for s in &self.segments {
+            let (a, b) = ((s.start + off).max(start), (s.end + off).min(end));
+            let text = s.text.trim();
+            if b <= a || text.is_empty() {
+                continue;
+            }
+            n += 1;
+            let (a, b) = (a - start, b - start);
+            match format {
+                SubtitleFormat::Srt => out.push_str(&format!("{n}\n{} --> {}\n{text}\n\n", srt_time(a), srt_time(b))),
+                // a blank line would end the cue early
+                SubtitleFormat::WebVtt => out.push_str(&format!("{} --> {}\n{}\n\n", vtt_time(a), vtt_time(b), text.replace("\n\n", "\n"))),
+            }
         }
         out
     }
@@ -510,6 +534,28 @@ pub fn sanitize_words(words: &[CaptionWord]) -> Vec<CaptionWord> {
     out
 }
 
+/// Subtitle file formats.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SubtitleFormat {
+    /// SubRip (`.srt`).
+    Srt,
+    /// WebVTT (`.vtt`).
+    WebVtt,
+}
+
+impl SubtitleFormat {
+    pub fn extension(self) -> &'static str {
+        match self {
+            SubtitleFormat::Srt => "srt",
+            SubtitleFormat::WebVtt => "vtt",
+        }
+    }
+}
+
+fn vtt_time(t: Time) -> String {
+    srt_time(t).replace(',', ".")
+}
+
 fn srt_time(t: Time) -> String {
     let ms = (t.as_secs_f64() * 1000.0).round().max(0.0) as u64;
     format!("{:02}:{:02}:{:02},{:03}", ms / 3_600_000, (ms / 60_000) % 60, (ms / 1000) % 60, ms % 1000)
@@ -610,6 +656,20 @@ mod tests {
         assert!(srt.contains("01:01:01,007 --> 01:01:02,000"));
         let back = parse_srt(&srt).unwrap();
         assert_eq!(back, tr.segments);
+    }
+
+    #[test]
+    fn subtitles_for_a_range_are_clipped_and_shifted() {
+        let mut tr = CaptionTrack::default();
+        tr.segments.push(CaptionSegment::new(Time::from_millis(1_000), Time::from_millis(2_000), "before"));
+        tr.segments.push(CaptionSegment::new(Time::from_millis(4_000), Time::from_millis(6_000), "straddles"));
+        tr.segments.push(CaptionSegment::new(Time::from_millis(7_000), Time::from_millis(8_000), "inside"));
+        tr.segments.push(CaptionSegment::new(Time::from_millis(9_500), Time::from_millis(12_000), "after"));
+        let (a, b) = (Time::from_millis(5_000), Time::from_millis(9_000));
+        let srt = tr.to_subtitles(SubtitleFormat::Srt, a, b);
+        assert_eq!(srt, "1\n00:00:00,000 --> 00:00:01,000\nstraddles\n\n2\n00:00:02,000 --> 00:00:03,000\ninside\n\n");
+        let vtt = tr.to_subtitles(SubtitleFormat::WebVtt, a, b);
+        assert_eq!(vtt, "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nstraddles\n\n00:00:02.000 --> 00:00:03.000\ninside\n\n");
     }
 
     #[test]

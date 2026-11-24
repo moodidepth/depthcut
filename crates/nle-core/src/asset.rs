@@ -145,6 +145,72 @@ pub struct MediaAsset {
     /// for. The file, proxy and streams are the parent's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subclip: Option<(Time, Time)>,
+    /// How the picture is scanned, as probed.
+    #[serde(default, skip_serializing_if = "FieldOrder::is_progressive")]
+    pub field_order: FieldOrder,
+    /// Whether frames are deinterlaced on decode.
+    #[serde(default, skip_serializing_if = "Deinterlace::is_auto")]
+    pub deinterlace: Deinterlace,
+}
+
+/// Scan type of a video stream.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum FieldOrder {
+    #[default]
+    Progressive,
+    /// Interlaced, top field first.
+    TopFirst,
+    /// Interlaced, bottom field first.
+    BottomFirst,
+}
+
+impl FieldOrder {
+    pub fn is_progressive(&self) -> bool {
+        *self == FieldOrder::Progressive
+    }
+
+    /// From ffprobe's `field_order` (`tt`, `bb`, `tb`, `bt`, `progressive`).
+    pub fn from_ffprobe(s: &str) -> Self {
+        match s {
+            "tt" | "tb" => FieldOrder::TopFirst,
+            "bb" | "bt" => FieldOrder::BottomFirst,
+            _ => FieldOrder::Progressive,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            FieldOrder::Progressive => "Progressive",
+            FieldOrder::TopFirst => "Interlaced (upper field first)",
+            FieldOrder::BottomFirst => "Interlaced (lower field first)",
+        }
+    }
+}
+
+/// Per-clip deinterlacing choice.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Deinterlace {
+    /// When the file is probed as interlaced.
+    #[default]
+    Auto,
+    On,
+    Off,
+}
+
+impl Deinterlace {
+    pub const ALL: [Deinterlace; 3] = [Deinterlace::Auto, Deinterlace::On, Deinterlace::Off];
+
+    pub fn is_auto(&self) -> bool {
+        *self == Deinterlace::Auto
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Deinterlace::Auto => "Auto",
+            Deinterlace::On => "On",
+            Deinterlace::Off => "Off",
+        }
+    }
 }
 
 /// Credit line for Creative Commons / public-domain media.
@@ -212,6 +278,21 @@ impl MediaAsset {
             start_timecode: None,
             source_tc_pending: false,
             subclip: None,
+            field_order: FieldOrder::Progressive,
+            deinterlace: Deinterlace::Auto,
+        }
+    }
+
+    /// The field order to deinterlace with, when frames should be: the
+    /// probed one, or upper-first when forced on for a progressive-tagged file.
+    pub fn deinterlace_fields(&self) -> Option<FieldOrder> {
+        if self.video.is_none() || self.kind == AssetKind::Image {
+            return None;
+        }
+        match (self.deinterlace, self.field_order) {
+            (Deinterlace::Off, _) | (Deinterlace::Auto, FieldOrder::Progressive) => None,
+            (Deinterlace::On, FieldOrder::Progressive) => Some(FieldOrder::TopFirst),
+            (_, f) => Some(f),
         }
     }
 

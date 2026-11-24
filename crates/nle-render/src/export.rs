@@ -13,7 +13,7 @@
 
 use crate::gpu::GpuContext;
 use crate::renderer::{FrameSource, HdrOutput, RenderOptions, Renderer};
-use nle_core::{eval, AssetId, FrameRate, MediaAsset, Project, Time};
+use nle_core::{eval, AssetId, FrameRate, MediaAsset, Project, SubtitleFormat, Time};
 use nle_media::audio::TimelineMixer;
 use nle_media::encoder_probe::EncoderProbe;
 use nle_media::hwaccel::{self, HwCaps, Platform};
@@ -436,6 +436,14 @@ pub struct ExportSettings {
     /// HDR mastering (needs a preset that [`ExportPreset::supports_hdr`];
     /// HEVC / AV1 also need `ten_bit`). See [`ExportSettings::hdr_output`].
     pub hdr: HdrOutput,
+    /// Mux the timeline's captions into the movie as a soft subtitle track
+    /// (players can switch it on and off). Ignored where the container has
+    /// no subtitle codec (see [`ExportSettings::subtitle_codec`]).
+    pub embed_subtitles: bool,
+    /// Also write the captions as a subtitle file next to the output.
+    pub subtitle_sidecar: Option<SubtitleFormat>,
+    /// The SubRip file muxed as the subtitle track; [`run_export`] writes it.
+    pub subtitle_input: Option<PathBuf>,
 }
 
 impl ExportSettings {
@@ -456,6 +464,36 @@ impl ExportSettings {
             ten_bit: false,
             alpha: false,
             hdr: HdrOutput::Sdr,
+            embed_subtitles: false,
+            subtitle_sidecar: None,
+            subtitle_input: None,
+        }
+    }
+
+    /// The subtitle codec the output container takes: `mov_text` in
+    /// MP4 / MOV, SubRip in Matroska, WebVTT in WebM; `None` for image
+    /// sequences and other containers.
+    pub fn subtitle_codec(&self) -> Option<&'static str> {
+        if self.preset.is_image_sequence() {
+            return None;
+        }
+        let ext = self.path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+        match ext.as_str() {
+            "mp4" | "m4v" | "mov" => Some("mov_text"),
+            "mkv" => Some("srt"),
+            "webm" => Some("webvtt"),
+            _ => None,
+        }
+    }
+
+    /// Subtitle input, map and codec arguments; `index` is the input's number.
+    fn subtitle_args(&self, index: usize) -> (Vec<String>, Vec<String>) {
+        match (&self.subtitle_input, self.subtitle_codec()) {
+            (Some(srt), Some(codec)) => (
+                vec!["-i".into(), srt.to_string_lossy().into_owned()],
+                vec!["-map".into(), format!("{index}:s:0"), "-c:s".into(), codec.into(), "-metadata:s:s:0".into(), "title=Captions".into()],
+            ),
+            _ => (Vec::new(), Vec::new()),
         }
     }
 
@@ -547,10 +585,13 @@ impl ExportSettings {
             a.push("-i".into());
             a.push(wav.to_string_lossy().into_owned());
         }
+        let (sub_in, sub_out) = self.subtitle_args(1 + has_audio as usize);
+        a.extend(sub_in);
         a.extend(["-map", "0:v:0"].map(String::from));
         if has_audio {
             a.extend(["-map", "1:a:0"].map(String::from));
         }
+        a.extend(sub_out);
         // Tag BT.709 limited range on the frames *before* any hardware upload.
         // Output-side -colorspace/-color_range options make FFmpeg insert an
         // auto-scaler after hwupload, which cannot take QSV/VA-API surfaces.
@@ -641,10 +682,13 @@ impl ExportSettings {
             a.push("-i".into());
             a.push(wav.to_string_lossy().into_owned());
         }
+        let (sub_in, sub_out) = self.subtitle_args(1 + has_audio as usize);
+        a.extend(sub_in);
         a.extend(["-map", "0:v:0"].map(String::from));
         if has_audio {
             a.extend(["-map", "1:a:0"].map(String::from));
         }
+        a.extend(sub_out);
         let matrix = if self.hdr_output().is_hdr() { "bt2020" } else { "bt709" };
         let tags = self.color_tags();
         let yuv = |fmt: &str| format!("scale=out_color_matrix={matrix}:out_range=tv,format={fmt},{tags}");
@@ -884,7 +928,14 @@ pub fn run_export(
         None
     };
 
+    let captions = &project.timeline.captions;
     let mut output = settings.clone();
+    output.subtitle_input = None;
+    if settings.embed_subtitles && settings.subtitle_codec().is_some() && !captions.is_empty() {
+        let srt = std::env::temp_dir().join(format!("rcp-export-{id}.srt"));
+        std::fs::write(&srt, captions.to_subtitles(SubtitleFormat::Srt, settings.start, settings.end))?;
+        output.subtitle_input = Some(srt);
+    }
     if !seq {
         output.path = partial_path(&settings.path, &id);
     }
@@ -922,6 +973,9 @@ pub fn run_export(
     if let Some(w) = wav.as_ref().filter(|_| !seq) {
         let _ = std::fs::remove_file(w);
     }
+    if let Some(s) = &output.subtitle_input {
+        let _ = std::fs::remove_file(s);
+    }
     let result = match result {
         Err(e @ (ExportError::Cancelled | ExportError::Media(_))) => Err(e),
         _ if !out.status.success() => {
@@ -932,6 +986,10 @@ pub fn run_export(
         }
         other => other,
     };
+    let result = result.and_then(|()| match settings.subtitle_sidecar.filter(|_| !captions.is_empty()) {
+        Some(fmt) => Ok(std::fs::write(settings.path.with_extension(fmt.extension()), captions.to_subtitles(fmt, settings.start, settings.end))?),
+        None => Ok(()),
+    });
     if seq {
         return result;
     }
@@ -979,6 +1037,29 @@ mod tests {
         assert!(a.contains("-tag:v hvc1"));
         assert!(!a.contains("-c:a"), "no audio input → no audio codec");
         assert!(a.contains(",hwupload,format=qsv"), "no fixed frame pool on D3D11");
+    }
+
+    #[test]
+    fn subtitle_track_follows_the_container() {
+        let mut s = settings(ExportPreset::H264Software, RateControl::Quality(20));
+        s.subtitle_input = Some(PathBuf::from("subs.srt"));
+        let a = s.ffmpeg_args(Platform::Windows, Some(Path::new("a.wav"))).join(" ");
+        assert!(a.contains("-i a.wav -i subs.srt -map 0:v:0 -map 1:a:0 -map 2:s:0 -c:s mov_text"), "{a}");
+        let a = s.ffmpeg_args(Platform::Windows, None).join(" ");
+        assert!(a.contains("-map 0:v:0 -map 1:s:0"), "no audio → subtitles are input 1: {a}");
+        s.path = PathBuf::from("/out/movie.mkv");
+        assert_eq!(s.subtitle_codec(), Some("srt"));
+        s.path = PathBuf::from("/out/movie.webm");
+        assert_eq!(s.subtitle_codec(), Some("webvtt"));
+        s.path = PathBuf::from("/out/movie.avi");
+        assert!(!s.ffmpeg_args(Platform::Windows, None).join(" ").contains("subs.srt"), "no codec → no track");
+        let mut m = settings(ExportPreset::ProRes422, RateControl::Quality(0));
+        m.path = PathBuf::from("/out/master.mov");
+        m.subtitle_input = Some(PathBuf::from("subs.srt"));
+        assert!(m.ffmpeg_args(Platform::Windows, None).join(" ").contains("-c:s mov_text"));
+        let mut q = settings(ExportPreset::PngSequence, RateControl::Quality(0));
+        q.subtitle_input = Some(PathBuf::from("subs.srt"));
+        assert_eq!(q.subtitle_codec(), None);
     }
 
     #[test]

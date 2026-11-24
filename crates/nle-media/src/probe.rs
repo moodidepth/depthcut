@@ -109,6 +109,7 @@ pub fn parse_ffprobe_json(path: &Path, json: &str) -> Result<MediaAsset, MediaEr
             if let Some(d) = s["duration"].as_str().and_then(|d| d.parse::<f64>().ok()) {
                 dur = dur.max(d);
             }
+            asset.field_order = nle_core::FieldOrder::from_ffprobe(s["field_order"].as_str().unwrap_or(""));
             let pts_table = if is_vfr { build_pts_table(Time::from_secs_f64(v_dur.max(0.0)), rate) } else { Vec::new() };
             asset.video = Some(VideoStreamInfo {
                 width: s["width"].as_u64().unwrap_or(1920) as u32,

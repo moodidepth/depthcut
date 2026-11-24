@@ -884,7 +884,20 @@ fn metadata(app: &mut App, ui: &mut egui::Ui, a: &MediaAsset) {
         let mut meta = a.meta.clone();
         let mut bin = a.bin;
         let mut changed = false;
+        let mut deinterlace = a.deinterlace;
         egui::Grid::new("meta-edit").num_columns(2).spacing([10.0, 3.0]).show(ui, |ui| {
+            if a.has_video() && a.kind != nle_core::AssetKind::Image {
+                ui.label(egui::RichText::new("Deinterlace").color(theme::TEXT_DIM));
+                ui.horizontal(|ui| {
+                    for d in nle_core::Deinterlace::ALL {
+                        ui.selectable_value(&mut deinterlace, d, d.label());
+                    }
+                    ui.label(egui::RichText::new(a.field_order.label()).small().color(theme::TEXT_DIM));
+                })
+                .response
+                .on_hover_text("Auto deinterlaces files probed as interlaced (bwdif, one frame per frame). Proxies made before a change keep the old setting.");
+                ui.end_row();
+            }
             ui.label(egui::RichText::new("Bin").color(theme::TEXT_DIM));
             let label = bin.map(|b| app.project.library.bin_path(b)).unwrap_or_else(|| "Unfiled".into());
             egui::ComboBox::from_id_salt("meta-bin").selected_text(label).show_ui(ui, |ui| {
@@ -908,6 +921,13 @@ fn metadata(app: &mut App, ui: &mut egui::Ui, a: &MediaAsset) {
                 m.bin = bin;
                 app.assets_changed = true;
             }
+        }
+        if deinterlace != a.deinterlace {
+            if let Some(m) = app.project.asset_mut(a.id) {
+                m.deinterlace = deinterlace;
+                app.assets_changed = true;
+            }
+            app.reload_decoders(a.id);
         }
         ui.horizontal_wrapped(|ui| {
             ui.label(egui::RichText::new("Keywords").color(theme::TEXT_DIM));

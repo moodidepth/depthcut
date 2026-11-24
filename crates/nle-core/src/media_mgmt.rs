@@ -47,6 +47,7 @@ pub fn refresh_asset(project: &mut Project, id: AssetId, probed: MediaAsset) {
     a.duration = probed.duration;
     a.video = probed.video;
     a.audio = probed.audio;
+    a.field_order = probed.field_order;
     let (has_v, has_a, dur) = (a.has_video(), a.has_audio(), a.duration);
     fn walk(c: &mut Clip, id: AssetId, f: &dyn Fn(&mut Clip)) {
         if matches!(c.kind, ClipKind::Asset { asset } if asset == id) {

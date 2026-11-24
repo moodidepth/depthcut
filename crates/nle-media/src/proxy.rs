@@ -109,10 +109,12 @@ pub fn transcode(asset: &MediaAsset, out_dir: &Path, mut progress: impl FnMut(f3
     let platform = Platform::current();
     let mut last_err = String::new();
     for (enc, pre, args) in proxy_encoder_args(platform, hwaccel::probe_caps()) {
+        // proxies are progressive: interlaced sources are deinterlaced first
+        let di = asset.deinterlace_fields().map(|f| format!("{},", crate::decode::deinterlace_filter(f))).unwrap_or_default();
         let vf = match enc.as_str() {
-            "h264_qsv" => format!("scale={pw}:{ph},format=nv12,{}", hwaccel::qsv_upload_filter(platform)),
-            "h264_vaapi" => format!("scale={pw}:{ph},format=nv12,hwupload"),
-            _ => format!("scale={pw}:{ph}"),
+            "h264_qsv" => format!("{di}scale={pw}:{ph},format=nv12,{}", hwaccel::qsv_upload_filter(platform)),
+            "h264_vaapi" => format!("{di}scale={pw}:{ph},format=nv12,hwupload"),
+            _ => format!("{di}scale={pw}:{ph}"),
         };
         let mut cmd = ffmpeg_cli::command(&ffmpeg_cli::ffmpeg_path());
         cmd.args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y"]);

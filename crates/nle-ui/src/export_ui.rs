@@ -6,7 +6,7 @@
 
 use crate::theme;
 use eframe::egui;
-use nle_core::{AssetId, Clip, ClipKind, Project};
+use nle_core::{AssetId, Clip, ClipKind, Project, SubtitleFormat, Time};
 use nle_media::encoder_probe;
 use nle_media::AudioBuffer;
 use nle_render::export::{fits_size_budget, mastering_presets, run_export, working_presets, AudioExport, ExportCodec, ExportProgress, RateControl};
@@ -24,16 +24,23 @@ struct Job {
     cancel: Arc<AtomicBool>,
     started: Instant,
     path: PathBuf,
-    /// The project as rendered (for the .srt / credits written afterwards).
+    /// The project as rendered (for the credits written afterwards).
     project: Arc<Project>,
-    export_srt: bool,
 }
 
 /// A render-queue entry: the project and settings as they were when queued.
+#[derive(Clone)]
 struct Queued {
     project: Arc<Project>,
     settings: ExportSettings,
-    export_srt: bool,
+}
+
+/// What part of the timeline a render covers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExportRange {
+    Whole,
+    /// The timeline's In / Out marks (missing marks = start / end).
+    InOut,
 }
 
 pub struct ExportDialog {
@@ -56,8 +63,11 @@ pub struct ExportDialog {
     tier: QualityTier,
     /// Render the caption track into the picture.
     pub burn_captions: bool,
-    /// Also write the captions as a `.srt` next to the movie.
-    pub export_srt: bool,
+    /// Mux the captions as a soft subtitle track.
+    pub embed_subtitles: bool,
+    /// Also write the captions as a subtitle file next to the movie.
+    pub subtitle_sidecar: Option<SubtitleFormat>,
+    pub range: ExportRange,
     /// Last successfully exported file (for "Open Output Folder").
     done_path: Option<PathBuf>,
     /// Program loudness: 0 = off, 1 = -14 LUFS (YouTube), 2 = -16 LUFS (Shorts/TikTok).
@@ -157,7 +167,9 @@ impl Default for ExportDialog {
             fps: 0,
             tier: QualityTier::Balanced,
             burn_captions: true,
-            export_srt: false,
+            embed_subtitles: false,
+            subtitle_sidecar: None,
+            range: ExportRange::Whole,
             done_path: None,
             loudness: 0,
             path: None,
@@ -179,21 +191,15 @@ impl ExportDialog {
         self.job.as_ref().is_some_and(|j| j.result.lock().is_none())
     }
 
-    pub fn show(&mut self, ctx: &egui::Context, project: &Project, gpu: Option<&GpuContext>, audio: &HashMap<AssetId, Arc<AudioBuffer>>) {
+    /// `marks` are the timeline's In / Out marks (either may be unset).
+    pub fn show(&mut self, ctx: &egui::Context, project: &Project, gpu: Option<&GpuContext>, audio: &HashMap<AssetId, Arc<AudioBuffer>>, marks: (Option<Time>, Option<Time>)) {
         // finished job?
-        let finished = self.job.as_ref().and_then(|j| j.result.lock().take().map(|r| (r, j.path.clone(), j.started, j.project.clone(), j.export_srt)));
-        if let Some((r, path, started, project, export_srt)) = finished {
+        let finished = self.job.as_ref().and_then(|j| j.result.lock().take().map(|r| (r, j.path.clone(), j.started, j.project.clone())));
+        if let Some((r, path, started, project)) = finished {
             self.done_path = r.is_ok().then(|| path.clone());
             let msg = match r {
                 Ok(()) => {
                     let mut msg = format!("Exported {} in {:.1}s", path.display(), started.elapsed().as_secs_f32());
-                    if export_srt && !project.timeline.captions.is_empty() {
-                        let srt = path.with_extension("srt");
-                        match std::fs::write(&srt, project.timeline.captions.to_srt()) {
-                            Ok(()) => msg.push_str(&format!(" — captions written to {}", srt.display())),
-                            Err(e) => msg.push_str(&format!(" — could not write {}: {e}", srt.display())),
-                        }
-                    }
                     if let Some(cp) = write_credits_file(&project, &path) {
                         msg.push_str(&format!(" — credits written to {}", cp.display()));
                     }
@@ -215,7 +221,7 @@ impl ExportDialog {
             match (self.queue.is_empty(), gpu) {
                 (false, Some(gpu)) => {
                     let q = self.queue.remove(0);
-                    self.spawn(q.project, q.settings, q.export_srt, gpu.clone(), audio.clone());
+                    self.spawn(q.project, q.settings, gpu.clone(), audio.clone());
                 }
                 _ => self.queue_running = false,
             }
@@ -290,7 +296,12 @@ impl ExportDialog {
                     }
                 }
             }
-            let dur_secs = project.timeline.extent().as_secs_f64().max(0.1);
+            let has_marks = marks.0.is_some() || marks.1.is_some();
+            if !has_marks {
+                self.range = ExportRange::Whole;
+            }
+            let (range_start, range_end) = self.span(project, marks);
+            let dur_secs = (range_end - range_start).as_secs_f64().max(0.1);
             let mut target_w = f.width;
             let mut target_h = f.height;
             let mut target_rate = f.rate;
@@ -424,12 +435,39 @@ impl ExportDialog {
                     }
                 });
                 ui.end_row();
+                ui.label("Range");
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.range, ExportRange::Whole, "Whole timeline");
+                    ui.add_enabled(has_marks, egui::SelectableLabel::new(self.range == ExportRange::InOut, "In to Out"))
+                        .on_disabled_hover_text("Set In / Out marks on the timeline (I / O) to render part of it")
+                        .clicked()
+                        .then(|| self.range = ExportRange::InOut);
+                    if self.range == ExportRange::InOut {
+                        ui.label(
+                            egui::RichText::new(format!("{} – {}", nle_core::format_timecode(range_start, target_rate), nle_core::format_timecode(range_end, target_rate)))
+                                .small()
+                                .color(theme::TEXT_DIM),
+                        );
+                    }
+                });
+                ui.end_row();
                 ui.label("Captions");
                 let has_captions = !project.timeline.captions.is_empty();
                 ui.add_enabled_ui(has_captions, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.checkbox(&mut self.burn_captions, "Burn In Captions").on_hover_text("Render the caption track into the video");
-                        ui.checkbox(&mut self.export_srt, "Export .srt").on_hover_text("Also write a SubRip file next to the video");
+                    ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut self.burn_captions, "Burn in").on_hover_text("Render the caption track into the picture");
+                            let can_embed = !self.preset.is_some_and(|p| p.is_image_sequence());
+                            ui.add_enabled(can_embed, egui::Checkbox::new(&mut self.embed_subtitles, "Subtitle track"))
+                                .on_hover_text("Mux the captions as a soft subtitle track viewers can switch on and off (MP4 / MOV: mov_text, MKV: SubRip)")
+                                .on_disabled_hover_text("Image sequences have no subtitle track; use a sidecar file");
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("Sidecar file").color(theme::TEXT_DIM));
+                            ui.selectable_value(&mut self.subtitle_sidecar, None, "None");
+                            ui.selectable_value(&mut self.subtitle_sidecar, Some(SubtitleFormat::Srt), ".srt");
+                            ui.selectable_value(&mut self.subtitle_sidecar, Some(SubtitleFormat::WebVtt), ".vtt");
+                        });
                     });
                 })
                 .response
@@ -459,7 +497,7 @@ impl ExportDialog {
                         _ => 0,
                     };
                     let est_mb = ((self.bitrate_kbps + a_kbps) as f64 * 1000.0 / 8.0) * dur_secs / 1_000_000.0;
-                    ui.label(format!("{} (~{est_mb:.1} MB est.)", nle_core::format_timecode(project.timeline.extent(), target_rate)));
+                    ui.label(format!("{} (~{est_mb:.1} MB est.)", nle_core::format_timecode(range_end - range_start, target_rate)));
                     if let Some(cap) = self.delivery.target_bytes() {
                         if !fits_size_budget(cap, dur_secs, self.bitrate_kbps, a_kbps) {
                             ui.end_row();
@@ -468,7 +506,7 @@ impl ExportDialog {
                         }
                     }
                 } else {
-                    ui.label(nle_core::format_timecode(project.timeline.extent(), target_rate));
+                    ui.label(nle_core::format_timecode(range_end - range_start, target_rate));
                 }
                 ui.end_row();
             });
@@ -488,7 +526,7 @@ impl ExportDialog {
                         "tif" => dlg.add_filter("TIFF sequence (first frame name)", &["tif", "tiff"]),
                         "exr" => dlg.add_filter("OpenEXR sequence (first frame name)", &["exr"]),
                         _ if chosen.is_mastering() => dlg.add_filter("QuickTime movie", &["mov"]),
-                        _ => dlg.add_filter("MP4 video", &["mp4"]).add_filter("Movie", &["mov", "mkv"]),
+                        _ => dlg.add_filter("MP4 video", &["mp4"]).add_filter("Movie", &["mov", "mkv"]).add_filter("Matroska", &["mkv"]),
                     };
                     if let Some(dir) = self.path.as_ref().and_then(|p| p.parent()) {
                         dlg = dlg.set_directory(dir);
@@ -521,9 +559,9 @@ impl ExportDialog {
                 let ready = self.preset.is_some() && self.path.is_some() && gpu.is_some();
                 if ui.add_enabled(ready, egui::Button::new(egui::RichText::new("⤴ Render").strong())).clicked() {
                     if let (Some(preset), Some(path), Some(gpu)) = (self.preset, self.path.clone(), gpu) {
-                        let (snapshot, settings) = self.build(project, preset, path);
+                        let (snapshot, settings) = self.build(project, preset, path, marks);
                         self.queue_log.clear();
-                        self.spawn(snapshot, settings, self.export_srt, gpu.clone(), audio.clone());
+                        self.spawn(snapshot, settings, gpu.clone(), audio.clone());
                     }
                 }
                 if ui
@@ -532,10 +570,20 @@ impl ExportDialog {
                     .clicked()
                 {
                     if let (Some(preset), Some(path)) = (self.preset, self.path.clone()) {
-                        let (snapshot, settings) = self.build(project, preset, path);
-                        self.queue.push(Queued { project: snapshot, settings, export_srt: self.export_srt });
+                        let (snapshot, settings) = self.build(project, preset, path, marks);
+                        self.queue.push(Queued { project: snapshot, settings });
                         // the next entry gets a fresh name instead of overwriting this one
                         self.path = self.path.as_ref().map(|p| next_free_path(p, &self.queue));
+                    }
+                }
+                if project.timeline_count() > 1
+                    && ui
+                        .add_enabled(self.preset.is_some() && self.path.is_some(), egui::Button::new("➕ Queue All Timelines"))
+                        .on_hover_text("One job per timeline with these settings, named “<output> - <timeline>” (whole timelines; In / Out marks belong to the open one)")
+                        .clicked()
+                {
+                    if let (Some(preset), Some(path)) = (self.preset, self.path.clone()) {
+                        self.queue_all_timelines(project, preset, &path);
                     }
                 }
                 if let Some(done) = &self.done_path {
@@ -557,18 +605,31 @@ impl ExportDialog {
                         self.queue.clear();
                     }
                 });
-                let mut remove = None;
+                let mut op = None;
+                let n = self.queue.len();
                 for (i, q) in self.queue.iter().enumerate() {
                     ui.horizontal(|ui| {
                         if ui.small_button("✖").on_hover_text("Remove from queue").clicked() {
-                            remove = Some(i);
+                            op = Some(QueueOp::Remove(i));
+                        }
+                        if ui.add_enabled(i > 0, egui::Button::new("⏶").small()).on_hover_text("Render earlier").clicked() {
+                            op = Some(QueueOp::Up(i));
+                        }
+                        if ui.add_enabled(i + 1 < n, egui::Button::new("⏷").small()).on_hover_text("Render later").clicked() {
+                            op = Some(QueueOp::Down(i));
+                        }
+                        if ui.small_button("⧉").on_hover_text("Duplicate (as a new file name)").clicked() {
+                            op = Some(QueueOp::Duplicate(i));
                         }
                         let (w, h) = q.settings.encoded_size();
-                        ui.label(egui::RichText::new(format!("{}  ·  {}  ·  {w}×{h}", q.settings.path.display(), q.settings.preset.label())).small());
+                        let span = q.settings.end - q.settings.start;
+                        let text =
+                            format!("{}  ·  {}  ·  {w}×{h}  ·  {}", q.settings.path.display(), q.settings.preset.label(), nle_core::format_timecode(span, q.settings.frame_rate));
+                        ui.label(egui::RichText::new(text).small());
                     });
                 }
-                if let Some(i) = remove {
-                    self.queue.remove(i);
+                if let Some(op) = op {
+                    apply_queue_op(&mut self.queue, op);
                 }
             }
             if !self.queue_log.is_empty() && !self.queue_running {
@@ -582,8 +643,42 @@ impl ExportDialog {
         self.open = open || self.running();
     }
 
+    /// The timeline span the dialog's range choice covers.
+    fn span(&self, project: &Project, marks: (Option<Time>, Option<Time>)) -> (Time, Time) {
+        let end = project.timeline.extent();
+        match self.range {
+            ExportRange::Whole => (Time::ZERO, end),
+            ExportRange::InOut => {
+                let a = marks.0.unwrap_or(Time::ZERO).clamp(Time::ZERO, end);
+                let b = marks.1.unwrap_or(end).clamp(Time::ZERO, end);
+                if b > a {
+                    (a, b)
+                } else {
+                    (Time::ZERO, end)
+                }
+            }
+        }
+    }
+
+    /// One queued job per timeline (whole timeline each), named after it.
+    fn queue_all_timelines(&mut self, project: &Project, preset: ExportPreset, path: &Path) {
+        let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let ext = path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_else(|| preset.extension().into());
+        let keep = self.range;
+        self.range = ExportRange::Whole;
+        for i in 0..project.timeline_count() {
+            let mut p = project.clone();
+            p.switch_timeline(i);
+            let name = sanitize_file_name(&p.timeline.name);
+            let target = next_free_path(&path.with_file_name(format!("{stem} - {name}.{ext}")), &self.queue);
+            let (snapshot, settings) = self.build(&p, preset, target, (None, None));
+            self.queue.push(Queued { project: snapshot, settings });
+        }
+        self.range = keep;
+    }
+
     /// Settings and a project snapshot for the dialog's current choices.
-    fn build(&self, project: &Project, preset: ExportPreset, path: PathBuf) -> (Arc<Project>, ExportSettings) {
+    fn build(&self, project: &Project, preset: ExportPreset, path: PathBuf, marks: (Option<Time>, Option<Time>)) -> (Arc<Project>, ExportSettings) {
         let mut settings = ExportSettings::new(path, preset, project);
         let available = encoder_probe::result().map(working_presets).unwrap_or_default();
         if self.delivery != GamingDeliveryPreset::ProjectDefault {
@@ -608,6 +703,9 @@ impl ExportDialog {
         if let Some(rate) = chosen_rate(self.fps) {
             settings.frame_rate = rate;
         }
+        (settings.start, settings.end) = self.span(project, marks);
+        settings.embed_subtitles = self.embed_subtitles;
+        settings.subtitle_sidecar = self.subtitle_sidecar;
         settings.ten_bit = self.ten_bit;
         settings.alpha = self.alpha;
         settings.hdr = match self.hdr {
@@ -622,7 +720,7 @@ impl ExportDialog {
         (Arc::new(project), settings)
     }
 
-    fn spawn(&mut self, project: Arc<Project>, settings: ExportSettings, export_srt: bool, gpu: GpuContext, audio: HashMap<AssetId, Arc<AudioBuffer>>) {
+    fn spawn(&mut self, project: Arc<Project>, settings: ExportSettings, gpu: GpuContext, audio: HashMap<AssetId, Arc<AudioBuffer>>) {
         let path = settings.path.clone();
         let progress = Arc::new(Mutex::new(None));
         let result = Arc::new(Mutex::new(None));
@@ -639,7 +737,31 @@ impl ExportDialog {
         }
         self.last_result = None;
         self.done_path = None;
-        self.job = Some(Job { progress, result, cancel, started: Instant::now(), path, project: job_project, export_srt });
+        self.job = Some(Job { progress, result, cancel, started: Instant::now(), path, project: job_project });
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QueueOp {
+    Remove(usize),
+    Up(usize),
+    Down(usize),
+    Duplicate(usize),
+}
+
+fn apply_queue_op(queue: &mut Vec<Queued>, op: QueueOp) {
+    match op {
+        QueueOp::Remove(i) if i < queue.len() => {
+            queue.remove(i);
+        }
+        QueueOp::Up(i) if i > 0 && i < queue.len() => queue.swap(i - 1, i),
+        QueueOp::Down(i) if i + 1 < queue.len() => queue.swap(i, i + 1),
+        QueueOp::Duplicate(i) if i < queue.len() => {
+            let mut copy = queue[i].clone();
+            copy.settings.path = next_free_path(&copy.settings.path, queue);
+            queue.insert(i + 1, copy);
+        }
+        _ => {}
     }
 }
 
@@ -836,13 +958,60 @@ mod tests {
         let project = Arc::new(Project::new("q"));
         let dir = std::env::temp_dir().join(format!("rcp-queue-name-{}", std::process::id()));
         let first = dir.join("cut.mov");
-        let q = |p: &Path| Queued { project: project.clone(), settings: ExportSettings::new(p, ExportPreset::ProRes422, &project), export_srt: false };
+        let q = |p: &Path| Queued { project: project.clone(), settings: ExportSettings::new(p, ExportPreset::ProRes422, &project) };
         let mut queue = vec![q(&first)];
         let second = next_free_path(&first, &queue);
         assert_eq!(second, dir.join("cut (2).mov"));
         queue.push(q(&second));
         assert_eq!(next_free_path(&second, &queue), dir.join("cut (3).mov"));
         assert_eq!(next_free_path(&dir.join("other.mov"), &queue), dir.join("other.mov"));
+    }
+
+    #[test]
+    fn queue_reorders_and_duplicates_without_name_clashes() {
+        let project = Arc::new(Project::new("q"));
+        let dir = std::env::temp_dir().join(format!("rcp-queue-ops-{}", std::process::id()));
+        let q = |n: &str| Queued { project: project.clone(), settings: ExportSettings::new(dir.join(n), ExportPreset::H264Software, &project) };
+        let mut queue = vec![q("a.mp4"), q("b.mp4"), q("c.mp4")];
+        let names = |queue: &[Queued]| queue.iter().map(|x| x.settings.path.file_name().unwrap().to_string_lossy().into_owned()).collect::<Vec<_>>();
+        apply_queue_op(&mut queue, QueueOp::Up(2));
+        assert_eq!(names(&queue), ["a.mp4", "c.mp4", "b.mp4"]);
+        apply_queue_op(&mut queue, QueueOp::Down(0));
+        assert_eq!(names(&queue), ["c.mp4", "a.mp4", "b.mp4"]);
+        apply_queue_op(&mut queue, QueueOp::Up(0));
+        apply_queue_op(&mut queue, QueueOp::Down(2));
+        assert_eq!(names(&queue), ["c.mp4", "a.mp4", "b.mp4"], "out-of-range moves do nothing");
+        apply_queue_op(&mut queue, QueueOp::Duplicate(1));
+        assert_eq!(names(&queue), ["c.mp4", "a.mp4", "a (2).mp4", "b.mp4"]);
+        apply_queue_op(&mut queue, QueueOp::Remove(0));
+        assert_eq!(names(&queue), ["a.mp4", "a (2).mp4", "b.mp4"]);
+    }
+
+    #[test]
+    fn in_out_range_and_all_timelines() {
+        let mut project = Project::new("r");
+        let asset = nle_core::MediaAsset::new("x", "x.mp4", Time::from_secs_f64(10.0));
+        let id = project.add_asset(asset);
+        let a = project.asset(id).cloned().unwrap();
+        project.timeline.append(Clip::from_asset_range(&a, Time::ZERO, Time::from_secs_f64(10.0))).unwrap();
+        project.timeline.name = "Main".into();
+        project.add_timeline("Teaser");
+        let mut d = ExportDialog { range: ExportRange::InOut, ..Default::default() };
+        let s = |x: f64| Time::from_secs_f64(x);
+        assert_eq!(d.span(&project, (Some(s(2.0)), Some(s(5.0)))), (s(2.0), s(5.0)));
+        assert_eq!(d.span(&project, (Some(s(2.0)), None)), (s(2.0), s(10.0)), "no Out → to the end");
+        assert_eq!(d.span(&project, (Some(s(6.0)), Some(s(5.0)))), (Time::ZERO, s(10.0)), "backwards marks → whole timeline");
+        let (_, settings) = d.build(&project, ExportPreset::H264Software, PathBuf::from("o.mp4"), (Some(s(2.0)), Some(s(5.0))));
+        assert_eq!((settings.start, settings.end), (s(2.0), s(5.0)));
+        d.range = ExportRange::Whole;
+        assert_eq!(d.span(&project, (Some(s(2.0)), Some(s(5.0)))), (Time::ZERO, s(10.0)));
+
+        let dir = std::env::temp_dir().join(format!("rcp-queue-all-{}", std::process::id()));
+        d.range = ExportRange::InOut;
+        d.queue_all_timelines(&project, ExportPreset::H264Software, &dir.join("cut.mp4"));
+        assert_eq!(d.range, ExportRange::InOut, "the dialog's choice is kept");
+        let jobs: Vec<_> = d.queue.iter().map(|q| (q.settings.path.file_name().unwrap().to_string_lossy().into_owned(), q.project.timeline.name.clone(), q.settings.end)).collect();
+        assert_eq!(jobs, [("cut - Main.mp4".into(), "Main".into(), s(10.0)), ("cut - Teaser.mp4".into(), "Teaser".into(), Time::ZERO)]);
     }
 
     #[test]

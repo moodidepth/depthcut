@@ -3134,7 +3134,8 @@ impl eframe::App for App {
         // the movie export always renders the whole project, also while stepped into a compound
         let exporting = self.export.open || self.export.running() || self.audio_export.open || self.audio_export.running();
         let full = (!self.focus.is_empty() && exporting).then(|| self.full_project().into_owned());
-        self.export.show(ctx, full.as_ref().unwrap_or(&self.project), self.gpu.as_ref(), &self.library.audio);
+        let marks = if self.focus.is_empty() { (self.source.record.mark_in, self.source.record.mark_out) } else { (None, None) };
+        self.export.show(ctx, full.as_ref().unwrap_or(&self.project), self.gpu.as_ref(), &self.library.audio, marks);
         self.audio_export.show(ctx, full.as_ref().unwrap_or(&self.project), &self.library.audio);
         let vo_dir = self.project_path.as_ref().and_then(|p| p.parent()).map(|d| d.join("Voiceover")).unwrap_or_else(|| crate::media::data_dir().join("Voiceover"));
         match self.voiceover.show(ctx, &vo_dir, self.playhead) {
