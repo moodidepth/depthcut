@@ -1,5 +1,6 @@
 //! Application state, frame loop, keyboard shortcuts and menus.
 
+use crate::browser::BrowserState;
 use crate::diagnostics::{self, PreviousCrash};
 use crate::discord::{DiscordPresence, PresenceSnapshot};
 use crate::export_ui::ExportDialog;
@@ -125,15 +126,12 @@ impl Default for PunchState {
     }
 }
 
-pub struct BrowserState {
-    pub search: String,
-    pub tag: Option<String>,
-    pub selected: Option<AssetId>,
-    pub favorites_only: bool,
-    pub thumb_size: f32,
-    pub new_tag: String,
-    /// Asset + source time being hover-scrubbed (shown in the viewer).
-    pub skim: Option<(AssetId, Time)>,
+/// A timeline's editing state while another timeline is open.
+#[derive(Default)]
+struct ParkedTimeline {
+    history: History,
+    saved_state: u64,
+    playhead: Time,
 }
 
 /// What the last preview frame was rendered from:
@@ -250,6 +248,11 @@ pub struct App {
     /// the "Save changes?" prompt only kick in once the project differs from it.
     saved_state: u64,
     pub assets_changed: bool,
+    /// Undo history, saved state and playhead of every timeline, in display
+    /// order (the open timeline's slot is stale; its state lives above).
+    parked: Vec<ParkedTimeline>,
+    /// Timeline being renamed in the timeline tabs: (index, new name).
+    pub timeline_rename: Option<(usize, String)>,
     /// Relink search / consolidate copy in progress.
     pub media_job: Option<crate::media_manage::MediaJob>,
     /// A project switch (or quit) waiting on the "Save changes?" answer.
@@ -358,7 +361,7 @@ impl App {
             color_view: Default::default(),
             motion: Default::default(),
             inspector_tab: InspectorTab::Video,
-            browser: BrowserState { search: String::new(), tag: None, selected: None, favorites_only: false, thumb_size: 132.0, new_tag: String::new(), skim: None },
+            browser: BrowserState::default(),
             export: ExportDialog::default(),
             beat_job: None,
             kill_job: None,
@@ -387,6 +390,8 @@ impl App {
             gpu_label,
             saved_state: 0,
             assets_changed: false,
+            parked: Vec::new(),
+            timeline_rename: None,
             media_job: None,
             pending_switch: None,
             allow_close: false,
@@ -402,6 +407,8 @@ impl App {
 
     pub fn after_project_loaded(&mut self) {
         self.focus.reset();
+        self.parked = (0..self.project.timeline_count()).map(|_| ParkedTimeline::default()).collect();
+        self.timeline_rename = None;
         // asset and clip ids restart in every project, so nothing that is
         // stored under one, or still on its way, may outlive a project switch
         self.library.reset();
@@ -411,13 +418,7 @@ impl App {
         if let Some(m) = self.motion.job.take() {
             m.job.cancel();
         }
-        self.audio_revision = u64::MAX;
-        self.duck_job = None;
-        self.duck_key = None;
-        if let Some((_, _, j)) = self.restore_job.take() {
-            j.cancel();
-        }
-        self.set_duck_env(None);
+        self.drop_timeline_caches();
         self.selection.clear();
         self.copied.clear(); // its assets belong to the project being left
         self.playhead = Time::ZERO;
@@ -442,13 +443,17 @@ impl App {
 
     /// True when the project differs from what was loaded or last saved.
     pub fn is_edited(&self) -> bool {
-        self.history.state_id() != self.saved_state || self.assets_changed
+        let active = self.project.active_timeline;
+        self.history.state_id() != self.saved_state || self.assets_changed || self.parked.iter().enumerate().any(|(i, p)| i != active && p.history.state_id() != p.saved_state)
     }
 
     /// The current state matches the file on disk (after load or save).
     fn mark_saved(&mut self) {
         self.saved_state = self.history.state_id();
         self.assets_changed = false;
+        for p in &mut self.parked {
+            p.saved_state = p.history.state_id();
+        }
     }
 
     /// Run `switch` now, or first ask to save when there are unsaved changes.
@@ -625,6 +630,147 @@ impl App {
         if let Some(playhead) = self.focus.step_out(&mut self.project.timeline, levels) {
             self.after_focus_change();
             self.playhead = playhead;
+        }
+    }
+
+    // ----- several timelines per project -------------------------------------
+
+    /// Forget everything cached for the open timeline's clips (after a
+    /// project or timeline switch).
+    fn drop_timeline_caches(&mut self) {
+        self.audio_revision = u64::MAX;
+        self.duck_job = None;
+        self.duck_key = None;
+        if let Some((_, _, j)) = self.restore_job.take() {
+            j.cancel();
+        }
+        self.set_duck_env(None);
+    }
+
+    /// Name of a background job whose result goes into the open timeline.
+    fn timeline_job_running(&self) -> Option<&'static str> {
+        if self.beat_job.is_some() || self.kill_job.is_some() || self.multiband_job.is_some() {
+            Some("an analysis")
+        } else if self.captions.gen_job.is_some() {
+            Some("a transcription")
+        } else if self.copilot.job.is_some() {
+            Some("a Copilot request")
+        } else if self.motion.job.is_some() {
+            Some("motion tracking")
+        } else {
+            None
+        }
+    }
+
+    fn sync_parked(&mut self) {
+        self.parked.resize_with(self.project.timeline_count(), ParkedTimeline::default);
+    }
+
+    /// Open timeline `i` for editing; each timeline keeps its own undo
+    /// history and playhead.
+    pub fn switch_timeline(&mut self, i: usize) {
+        let old = self.project.active_timeline;
+        if i == old || i >= self.project.timeline_count() {
+            return;
+        }
+        if let Some(job) = self.timeline_job_running() {
+            self.status(format!("Wait for {job} to finish before switching timelines"));
+            return;
+        }
+        // the real timeline has to be in place before it is parked
+        let depth = self.focus.levels().len();
+        if depth > 0 {
+            self.step_out(depth);
+        }
+        self.sync_parked();
+        let incoming = std::mem::take(&mut self.parked[i]);
+        self.parked[old] = ParkedTimeline {
+            history: std::mem::replace(&mut self.history, incoming.history),
+            saved_state: std::mem::replace(&mut self.saved_state, incoming.saved_state),
+            playhead: self.playhead,
+        };
+        self.project.switch_timeline(i);
+        self.after_focus_change();
+        self.drop_timeline_caches();
+        self.playhead = incoming.playhead;
+        self.timeline_rename = None;
+        self.status(format!("Opened timeline \u{201C}{}\u{201D}", self.project.timeline.name));
+    }
+
+    /// Add an empty timeline and open it.
+    pub fn new_timeline(&mut self) {
+        self.sync_parked();
+        let i = self.project.add_timeline("Timeline");
+        self.sync_parked();
+        self.assets_changed = true;
+        self.switch_timeline(i);
+    }
+
+    /// Copy timeline `i` (its undo history starts fresh) and open the copy.
+    pub fn duplicate_timeline(&mut self, i: usize) {
+        // copy the real timeline, not the container that is open
+        let depth = self.focus.levels().len();
+        if i == self.project.active_timeline && depth > 0 {
+            self.step_out(depth);
+        }
+        self.sync_parked();
+        let Some(at) = self.project.duplicate_timeline(i) else { return };
+        self.parked.insert(at, ParkedTimeline::default());
+        self.assets_changed = true;
+        self.switch_timeline(at);
+    }
+
+    pub fn rename_timeline(&mut self, i: usize, name: &str) -> bool {
+        // while stepped in, `project.timeline` is the open container: rename the root
+        if i == self.project.active_timeline && !self.focus.is_empty() {
+            self.status("Step out of the compound clip to rename the timeline");
+            return false;
+        }
+        if self.project.rename_timeline(i, name) {
+            self.assets_changed = true;
+            true
+        } else {
+            self.status("Timeline names must be unique and not blank");
+            false
+        }
+    }
+
+    /// Delete a timeline that is not open.
+    pub fn delete_timeline(&mut self, i: usize) {
+        self.sync_parked();
+        if let Some(t) = self.project.remove_timeline(i) {
+            self.parked.remove(i);
+            self.assets_changed = true;
+            self.status(format!("Deleted timeline \u{201C}{}\u{201D}", t.name));
+        }
+    }
+
+    /// Rate the clip selected in the browser, else the media of the clips
+    /// selected in the timeline.
+    fn rate_targets(&mut self, r: nle_core::Rating) {
+        let ids: Vec<AssetId> = match self.browser.selected {
+            Some(id) => vec![id],
+            None => {
+                let mut v: Vec<AssetId> = self.selection.iter().filter_map(|c| self.project.timeline.clip(*c).and_then(|c| c.asset_id())).collect();
+                v.dedup();
+                v
+            }
+        };
+        if ids.is_empty() {
+            self.status("Select a clip in the browser or the timeline to rate it");
+            return;
+        }
+        browser::rate(self, &ids, r);
+        let what = if ids.len() == 1 { self.project.asset(ids[0]).map(|a| a.name.clone()).unwrap_or_default() } else { format!("{} clips", ids.len()) };
+        self.status(format!("{what}: {}", r.label()));
+    }
+
+    /// Next / previous timeline (wraps around).
+    pub fn cycle_timeline(&mut self, forward: bool) {
+        let n = self.project.timeline_count();
+        if n > 1 {
+            let i = self.project.active_timeline;
+            self.switch_timeline(if forward { (i + 1) % n } else { (i + n - 1) % n });
         }
     }
 
@@ -2057,6 +2203,12 @@ impl App {
             Action::SaveAs => self.save(true),
             Action::Export => self.export.open = true,
             Action::ShowShortcuts => self.show_shortcuts = !self.show_shortcuts,
+            Action::NewTimeline => self.new_timeline(),
+            Action::NextTimeline => self.cycle_timeline(true),
+            Action::PrevTimeline => self.cycle_timeline(false),
+            Action::RateFavorite => self.rate_targets(nle_core::Rating::Favorite),
+            Action::RateReject => self.rate_targets(nle_core::Rating::Rejected),
+            Action::RateClear => self.rate_targets(nle_core::Rating::None),
         }
     }
 
@@ -2093,7 +2245,7 @@ impl App {
 
     // ----- menus -------------------------------------------------------------
 
-    fn menu_label(&self, text: &str, a: Action) -> String {
+    pub fn menu_label(&self, text: &str, a: Action) -> String {
         let hint = self.keymap.hint(a);
         if hint.is_empty() {
             text.to_string()
@@ -2122,6 +2274,27 @@ impl App {
                 if ui.button(self.menu_label("Save As…", Action::SaveAs)).clicked() {
                     ui.close_menu();
                     self.save(true);
+                }
+                ui.separator();
+                if ui.button(self.menu_label("New Timeline", Action::NewTimeline)).clicked() {
+                    ui.close_menu();
+                    self.new_timeline();
+                }
+                if ui.button("Duplicate Timeline").clicked() {
+                    ui.close_menu();
+                    self.duplicate_timeline(self.project.active_timeline);
+                }
+                if self.project.timeline_count() > 1 {
+                    ui.menu_button("Open Timeline", |ui| {
+                        let active = self.project.active_timeline;
+                        let names: Vec<String> = self.project.all_timelines().map(|t| t.name.clone()).collect();
+                        for (i, n) in names.into_iter().enumerate() {
+                            if ui.radio(i == active, n).clicked() {
+                                ui.close_menu();
+                                self.switch_timeline(i);
+                            }
+                        }
+                    });
                 }
                 ui.separator();
                 if ui.button(self.menu_label("Import Media…", Action::Import)).clicked() {

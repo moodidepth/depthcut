@@ -1300,6 +1300,22 @@ impl Clip {
         }
     }
 
+    /// Every asset this clip, its connected clips, nested clips and
+    /// audition takes use.
+    pub fn collect_assets(&self, out: &mut std::collections::HashSet<AssetId>) {
+        if let Some(a) = self.asset_id() {
+            out.insert(a);
+        }
+        for c in self.connected.iter().chain(self.audition.iter()) {
+            c.collect_assets(out);
+        }
+        if let ClipKind::Compound(comp) = &self.kind {
+            for c in &comp.spine {
+                c.collect_assets(out);
+            }
+        }
+    }
+
     /// Highest id in this clip, its nested clips and their audition takes
     /// (so freshly generated ids never collide after a load).
     pub fn max_id(&self) -> u64 {

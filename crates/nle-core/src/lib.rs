@@ -38,6 +38,7 @@ pub mod ids;
 pub mod interchange;
 pub mod keyframe;
 pub mod keymap;
+pub mod library;
 mod links;
 pub mod media_mgmt;
 pub mod motion;
@@ -69,6 +70,7 @@ pub use eval::{audio_spans, evaluate, AudioSpan, Composition, Layer, LayerSource
 pub use ids::{AssetId, ClipId};
 pub use keyframe::{Curve, Handle, Interpolation, Keyframe, Param};
 pub use keymap::{Action, ActionMap, KeyBinding, KeyCode};
+pub use library::{AssetMetadata, Bin, Collection, KindFilter, Library, Rating, SmartCollection, SmartRule};
 pub use presets::{ColorPreset, MontagePreset, PresetCategory};
 pub use project::Project;
 pub use speed::{FrameBlendMode, Retime, RetimeSegment};

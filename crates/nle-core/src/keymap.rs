@@ -116,6 +116,12 @@ actions! {
     SaveAs => "Save As", "File";
     Export => "Export Movie", "File";
     ShowShortcuts => "Keyboard Shortcuts", "Help";
+    NewTimeline => "New Timeline", "Timeline";
+    NextTimeline => "Open Next Timeline", "Timeline";
+    PrevTimeline => "Open Previous Timeline", "Timeline";
+    RateFavorite => "Rate Favorite", "Library";
+    RateReject => "Rate Reject", "Library";
+    RateClear => "Clear Rating", "Library";
 }
 
 macro_rules! keys {
@@ -433,6 +439,12 @@ impl ActionMap {
                 (ToggleAudioLanes, &[B::ctrl_shift(K::L)]),
                 (ToggleScopes, &[B::ctrl(K::Num7)]),
                 (ToggleAudioMixer, &[B::ctrl(K::Num8)]),
+                (NewTimeline, &[B::ctrl(K::N)]),
+                (NextTimeline, &[B::ctrl(K::PageDown)]),
+                (PrevTimeline, &[B::ctrl(K::PageUp)]),
+                (RateFavorite, &[B::key(K::F)]),
+                (RateReject, &[B::alt(K::Delete)]),
+                (RateClear, &[B::key(K::U)]),
             ],
         )
     }
@@ -523,6 +535,12 @@ impl ActionMap {
                 (ToggleAudioLanes, &[B::ctrl_shift(K::L)]),
                 (ToggleScopes, &[B::ctrl(K::Num7)]),
                 (ToggleAudioMixer, &[B::ctrl(K::Num8)]),
+                (NewTimeline, &[B::ctrl(K::N)]),
+                (NextTimeline, &[B::ctrl(K::PageDown)]),
+                (PrevTimeline, &[B::ctrl(K::PageUp)]),
+                (RateFavorite, &[B::key(K::F)]),
+                (RateReject, &[B::alt(K::Delete)]),
+                (RateClear, &[B::key(K::U)]),
             ],
         )
     }
@@ -613,6 +631,12 @@ impl ActionMap {
                 (ToggleAudioLanes, &[B::ctrl_shift(K::L)]),
                 (ToggleScopes, &[B::ctrl(K::Num7)]),
                 (ToggleAudioMixer, &[B::ctrl(K::Num8)]),
+                (NewTimeline, &[B::ctrl(K::N)]),
+                (NextTimeline, &[B::ctrl(K::PageDown)]),
+                (PrevTimeline, &[B::ctrl(K::PageUp)]),
+                (RateFavorite, &[B::key(K::F)]),
+                (RateReject, &[B::alt(K::Delete)]),
+                (RateClear, &[B::key(K::U)]),
             ],
         )
     }

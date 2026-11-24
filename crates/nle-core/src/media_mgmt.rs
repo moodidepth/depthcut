@@ -14,7 +14,7 @@ pub fn missing_assets(project: &Project) -> Vec<AssetId> {
     project.assets.iter().filter(|a| a.kind != AssetKind::Synthetic && !a.path.is_file()).map(|a| a.id).collect()
 }
 
-/// Assets referenced anywhere in the timeline (compound clips, storylines,
+/// Assets referenced anywhere in any timeline (compound clips, storylines,
 /// auditions and connected clips included).
 pub fn used_assets(project: &Project) -> BTreeSet<AssetId> {
     fn walk(c: &Clip, out: &mut BTreeSet<AssetId>) {
@@ -29,7 +29,7 @@ pub fn used_assets(project: &Project) -> BTreeSet<AssetId> {
         c.audition.iter().for_each(|ch| walk(ch, out));
     }
     let mut out = BTreeSet::new();
-    project.timeline.spine.iter().for_each(|c| walk(c, &mut out));
+    project.all_timelines().flat_map(|t| t.spine.iter()).for_each(|c| walk(c, &mut out));
     out
 }
 
@@ -64,7 +64,7 @@ pub fn refresh_asset(project: &mut Project, id: AssetId, probed: MediaAsset) {
         c.av.audio &= has_a;
         c.media_duration = Some(dur);
     };
-    project.timeline.spine.iter_mut().for_each(|c| walk(c, id, &fix));
+    project.timeline.spine.iter_mut().chain(project.timelines.iter_mut().flat_map(|t| t.spine.iter_mut())).for_each(|c| walk(c, id, &fix));
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -286,5 +286,23 @@ mod tests {
         let again = plan_consolidate(&p, &dest, false);
         assert!(again.copies.is_empty() && again.in_place.len() == 2, "{again:?}");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn other_timelines_count_as_used_and_get_refreshed() {
+        let mut p = Project::new("t");
+        let a = MediaAsset::new("b.mov", "b.mov", Time::from_secs(10));
+        let i = p.add_asset(a.clone());
+        let other = p.add_timeline("B-roll");
+        p.switch_timeline(other);
+        p.timeline.spine.push(Clip::from_asset(&a));
+        p.switch_timeline(0);
+        assert!(used_assets(&p).contains(&i), "an inactive timeline still uses its media");
+        let mut probed = MediaAsset::new("b.mov", "b.mov", Time::from_secs(4));
+        probed.video = None;
+        refresh_asset(&mut p, i, probed);
+        let c = &p.timeline_at(other).unwrap().spine[0];
+        assert_eq!(c.media_duration, Some(Time::from_secs(4)));
+        assert!(!c.av.video);
     }
 }

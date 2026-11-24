@@ -117,6 +117,15 @@ pub struct MediaAsset {
     pub tags: Vec<String>,
     #[serde(default)]
     pub favorite: bool,
+    /// Marked as rejected (never true together with `favorite`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rejected: bool,
+    /// Bin the asset is filed in (`None` = top level).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bin: Option<u64>,
+    /// Logging metadata (notes, scene, take, reel, camera).
+    #[serde(default, skip_serializing_if = "crate::library::AssetMetadata::is_empty")]
+    pub meta: crate::library::AssetMetadata,
     /// Integrated loudness (EBU R128 / BS.1770), measured after import.
     #[serde(default)]
     pub loudness_lufs: Option<f32>,
@@ -191,6 +200,9 @@ impl MediaAsset {
             audio: None,
             tags: Vec::new(),
             favorite: false,
+            rejected: false,
+            bin: None,
+            meta: Default::default(),
             loudness_lufs: None,
             attribution: None,
             start_timecode: None,
@@ -215,7 +227,25 @@ impl MediaAsset {
         if q.is_empty() {
             return true;
         }
-        self.name.to_lowercase().contains(&q) || self.tags.iter().any(|t| t.to_lowercase().contains(&q)) || self.video.as_ref().is_some_and(|v| v.codec.to_lowercase().contains(&q))
+        self.name.to_lowercase().contains(&q)
+            || self.tags.iter().any(|t| t.to_lowercase().contains(&q))
+            || self.video.as_ref().is_some_and(|v| v.codec.to_lowercase().contains(&q))
+            || self.meta.contains_lower(&q)
+    }
+
+    pub fn rating(&self) -> crate::library::Rating {
+        if self.rejected {
+            crate::library::Rating::Rejected
+        } else if self.favorite {
+            crate::library::Rating::Favorite
+        } else {
+            crate::library::Rating::None
+        }
+    }
+
+    pub fn set_rating(&mut self, r: crate::library::Rating) {
+        self.favorite = r == crate::library::Rating::Favorite;
+        self.rejected = r == crate::library::Rating::Rejected;
     }
 
     /// Human-readable one-line metadata summary.

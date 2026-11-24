@@ -1146,7 +1146,7 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
             }
             ui.separator();
             if app.focus.is_empty() {
-                ui.label(egui::RichText::new(&app.project.timeline.name).strong());
+                timeline_switcher(app, ui);
             } else {
                 breadcrumb(app, ui);
             }
@@ -1192,6 +1192,37 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
             });
         });
     });
+}
+
+/// The open timeline's name; a menu opens the project's other timelines.
+fn timeline_switcher(app: &mut App, ui: &mut egui::Ui) {
+    let active = app.project.active_timeline;
+    let names: Vec<String> = app.project.all_timelines().map(|t| t.name.clone()).collect();
+    let mut open = None;
+    let mut new = false;
+    let title = egui::RichText::new(format!("{} ⏷", app.project.timeline.name)).strong();
+    let tip = format!("Timelines in this project ({} / {} to cycle)", app.keymap.hint(Action::PrevTimeline), app.keymap.hint(Action::NextTimeline));
+    ui.menu_button(title, |ui| {
+        for (i, n) in names.iter().enumerate() {
+            if ui.radio(i == active, n).clicked() {
+                open = Some(i);
+                ui.close_menu();
+            }
+        }
+        ui.separator();
+        if ui.button(app.keymap.tip("New Timeline", Action::NewTimeline)).clicked() {
+            new = true;
+            ui.close_menu();
+        }
+    })
+    .response
+    .on_hover_text(tip);
+    if let Some(i) = open {
+        app.switch_timeline(i);
+    }
+    if new {
+        app.new_timeline();
+    }
 }
 
 /// "Project ▸ Compound ▸ Storyline" while stepped into containers; each
