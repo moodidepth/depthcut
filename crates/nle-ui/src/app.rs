@@ -2200,6 +2200,8 @@ impl App {
             Action::RippleTrimEnd => self.ripple_trim_playhead(false),
             Action::RippleDelete => self.delete_selection(false),
             Action::DeleteWithGap => self.delete_selection(true),
+            Action::LiftRange => self.lift_extract(false),
+            Action::ExtractRange => self.lift_extract(true),
             Action::InsertGap => self.insert_gap(),
             Action::Copy => {
                 self.copy_selection();
@@ -2509,6 +2511,14 @@ impl App {
                 }
                 if ui.button(self.menu_label("Replace with Gap", Action::DeleteWithGap)).clicked() {
                     self.delete_selection(true);
+                    ui.close_menu();
+                }
+                if ui.button(self.menu_label("Lift Range", Action::LiftRange)).on_hover_text("Clear the In-Out range on the targeted tracks; nothing moves").clicked() {
+                    self.lift_extract(false);
+                    ui.close_menu();
+                }
+                if ui.button(self.menu_label("Extract Range", Action::ExtractRange)).on_hover_text("Cut the In-Out range out of the targeted tracks and close the gap").clicked() {
+                    self.lift_extract(true);
                     ui.close_menu();
                 }
                 if ui.button(self.menu_label("Insert Gap (2 s)", Action::InsertGap)).clicked() {

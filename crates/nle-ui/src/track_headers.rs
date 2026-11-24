@@ -33,7 +33,8 @@ fn switches(t: &TrackState) -> [Switch; 4] {
 
 /// "A1: muted, locked"
 fn flags(t: &TrackState) -> String {
-    let set: Vec<&str> = [(t.hidden, "hidden"), (t.muted, "muted"), (t.solo, "soloed"), (t.locked, "locked")].into_iter().filter(|f| f.0).map(|f| f.1).collect();
+    let set: Vec<&str> =
+        [(t.hidden, "hidden"), (t.muted, "muted"), (t.solo, "soloed"), (t.locked, "locked"), (t.target, "targeted")].into_iter().filter(|f| f.0).map(|f| f.1).collect();
     format!("{}: {}", lane_name(t.lane), set.join(", "))
 }
 
@@ -73,6 +74,28 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, column: Rect, top: f32, rows: &[(i
             continue;
         }
         let state = app.project.timeline.track(lane);
+        // track target: source edits and Lift / Extract go here
+        let pill = Rect::from_min_size(Pos2::new(row.right() - 26.0, row.top() + 3.0), Vec2::new(21.0, 15.0));
+        if pill.intersect(body).is_positive() {
+            let tip = if state.target {
+                "Targeted: Insert / Overwrite / Connect from the source land on this track; Lift ( ; ) and Extract ( ' ) cut it. Click to untarget"
+            } else {
+                "Target this track for source edits and Lift / Extract"
+            };
+            let r = ui.interact(pill.intersect(body), id.with((lane, "target")), Sense::click()).on_hover_text(tip);
+            let fill = if state.target {
+                theme::SELECTION
+            } else if r.hovered() {
+                Color32::from_white_alpha(30)
+            } else {
+                Color32::from_white_alpha(10)
+            };
+            clipped.rect_filled(pill, CornerRadius::same(3), fill);
+            clipped.text(pill.center(), Align2::CENTER_CENTER, "◎", FontId::proportional(11.0), if state.target { Color32::BLACK } else { theme::TEXT_DIM });
+            if r.clicked() {
+                change = Some(TrackState { target: !state.target, ..state });
+            }
+        }
         for (n, (glyph, on, colour, tip)) in switches(&state).into_iter().enumerate() {
             let min = Pos2::new(row.left() + 5.0 + n as f32 * (BUTTON.x + 3.0), row.top() + 22.0);
             let button = Rect::from_min_size(min, BUTTON);

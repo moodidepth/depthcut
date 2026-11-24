@@ -223,18 +223,43 @@ impl App {
         };
         let clip = three_point::plan_clip(&a, &p);
         let at = p.record_in;
-        let lane = if a.has_video() { self.project.timeline.free_lane(1, at, p.duration) } else { self.project.timeline.free_lane(-1, at, p.duration) };
-        let cmd = match mode {
-            EditMode::Append => Command::Append { clip },
-            EditMode::Insert => Command::Insert { at, clip },
-            EditMode::Overwrite => Command::Overwrite { at, clip },
-            EditMode::Connect => Command::Connect { clip, at, lane },
+        // track targeting: a targeted lane on the clip's side takes the edit
+        let target = self.project.timeline.target_lane(a.has_video());
+        let lane = match target {
+            Some(l) if l != 0 => l,
+            _ if a.has_video() => self.project.timeline.free_lane(1, at, p.duration),
+            _ => self.project.timeline.free_lane(-1, at, p.duration),
+        };
+        let cmd = match (mode, target) {
+            (EditMode::Append, _) => Command::Append { clip },
+            (EditMode::Insert, Some(l)) if l != 0 => Command::InsertLane { at, clip, lane: l },
+            (EditMode::Insert, _) => Command::Insert { at, clip },
+            (EditMode::Overwrite, Some(l)) if l != 0 => Command::OverwriteLane { at, clip, lane: l },
+            (EditMode::Overwrite, _) => Command::Overwrite { at, clip },
+            (EditMode::Connect, _) => Command::Connect { clip, at, lane },
         };
         if self.exec(cmd) {
             self.playhead = if mode == EditMode::Append { self.project.timeline.duration() } else { at + p.duration };
             if !record.is_empty() {
                 self.clear_timeline_marks();
             }
+        }
+    }
+
+    /// Lift (or extract) the timeline In-Out range on the targeted tracks;
+    /// with no track targeted, on every track.
+    pub fn lift_extract(&mut self, extract: bool) {
+        let Some((start, end)) = self.timeline_marks().range() else {
+            self.status("Mark an In and Out on the timeline first (I / O or the range tool)");
+            return;
+        };
+        let lanes = self.project.timeline.targeted_lanes();
+        let names = if lanes.is_empty() { "all tracks".to_string() } else { lanes.iter().map(|&l| crate::track_headers::lane_name(l)).collect::<Vec<_>>().join(", ") };
+        let cmd = if extract { Command::ExtractRange { start, end, lanes } } else { Command::LiftRange { start, end, lanes } };
+        if self.exec(cmd) {
+            self.clear_timeline_marks();
+            self.seek(start);
+            self.status(format!("{} on {names}", if extract { "Extracted" } else { "Lifted" }));
         }
     }
 

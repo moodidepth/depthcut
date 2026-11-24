@@ -42,6 +42,30 @@ pub enum Command {
         start: Time,
         end: Time,
     },
+    /// Track targeting: overwrite onto a lane (0 = storyline).
+    OverwriteLane {
+        at: Time,
+        clip: Clip,
+        lane: i32,
+    },
+    /// Track targeting: ripple everything and place the clip on a lane.
+    InsertLane {
+        at: Time,
+        clip: Clip,
+        lane: i32,
+    },
+    /// Clear `[start, end)` on `lanes` (all when empty), nothing moves.
+    LiftRange {
+        start: Time,
+        end: Time,
+        lanes: Vec<i32>,
+    },
+    /// Clear `[start, end)` on `lanes` (all when empty) and close the gap.
+    ExtractRange {
+        start: Time,
+        end: Time,
+        lanes: Vec<i32>,
+    },
     Blade {
         at: Time,
     },
@@ -254,6 +278,10 @@ impl Command {
             Command::DeleteRipple { .. } => "Delete",
             Command::DeleteWithGap { .. } => "Replace with Gap",
             Command::DeleteRange { .. } => "Delete Range",
+            Command::OverwriteLane { .. } => "Overwrite",
+            Command::InsertLane { .. } => "Insert",
+            Command::LiftRange { .. } => "Lift",
+            Command::ExtractRange { .. } => "Extract",
             Command::Blade { .. } | Command::BladeClip { .. } => "Blade",
             Command::BladeAll { .. } => "Blade All",
             Command::TrimStart { .. } | Command::TrimEnd { .. } => "Trim",
@@ -399,6 +427,10 @@ impl Command {
             Command::DeleteRipple { id } => tl.remove_ripple(*id).map(drop),
             Command::DeleteWithGap { id } => tl.remove_with_gap(*id).map(drop),
             Command::DeleteRange { start, end } => tl.range_delete(*start, *end).map(drop),
+            Command::OverwriteLane { at, clip, lane } => tl.overwrite_on_lane(*at, clip.clone(), *lane).map(drop),
+            Command::InsertLane { at, clip, lane } => tl.insert_on_lane(*at, clip.clone(), *lane).map(drop),
+            Command::LiftRange { start, end, lanes } => tl.lift_range(*start, *end, lanes).map(drop),
+            Command::ExtractRange { start, end, lanes } => tl.extract_range(*start, *end, lanes).map(drop),
             Command::Blade { at } => tl.blade(*at).map(drop),
             Command::BladeClip { id, at } => tl.blade_clip(*id, *at).map(drop),
             Command::BladeAll { at } => {

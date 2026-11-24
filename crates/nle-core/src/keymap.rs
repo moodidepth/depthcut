@@ -59,6 +59,8 @@ actions! {
     RippleTrimEnd => "Ripple Trim End to Playhead (W)", "Edit";
     RippleDelete => "Ripple Delete", "Edit";
     DeleteWithGap => "Lift Delete (Leave Gap)", "Edit";
+    LiftRange => "Lift In-Out Range (targeted tracks)", "Edit";
+    ExtractRange => "Extract In-Out Range (targeted tracks)", "Edit";
     InsertGap => "Insert Gap at Playhead", "Edit";
     Copy => "Copy Clips", "Edit";
     Cut => "Cut Clips", "Edit";
@@ -418,6 +420,8 @@ impl ActionMap {
                 (RippleTrimEnd, &[B::key(K::W)]),
                 (RippleDelete, &[B::shift(K::Delete), B::shift(K::Backspace)]),
                 (DeleteWithGap, &[B::key(K::Delete), B::key(K::Backspace)]),
+                (LiftRange, &[B::key(K::Semicolon)]),
+                (ExtractRange, &[B::key(K::Quote)]),
                 (InsertGap, &[B::alt(K::G)]),
                 (Copy, &[B::ctrl(K::C)]),
                 (Cut, &[B::ctrl(K::X)]),
@@ -543,6 +547,8 @@ impl ActionMap {
                 (RippleTrimEnd, &[B::alt(K::CloseBracket)]),
                 (RippleDelete, &[B::key(K::Delete), B::key(K::Backspace)]),
                 (DeleteWithGap, &[B::shift(K::Delete), B::shift(K::Backspace)]),
+                (LiftRange, &[B::key(K::Semicolon)]),
+                (ExtractRange, &[B::key(K::Quote)]),
                 (InsertGap, &[B::alt(K::W)]),
                 (Copy, &[B::ctrl(K::C)]),
                 (Cut, &[B::ctrl(K::X)]),
@@ -668,6 +674,8 @@ impl ActionMap {
                 (RippleTrimEnd, &[B::alt(K::CloseBracket)]),
                 (RippleDelete, &[B::key(K::Delete), B::shift(K::Delete), B::shift(K::Backspace)]),
                 (DeleteWithGap, &[B::key(K::Backspace)]),
+                (LiftRange, &[B::key(K::Semicolon)]),
+                (ExtractRange, &[B::key(K::Quote)]),
                 (InsertGap, &[B::alt(K::W)]),
                 (Copy, &[B::ctrl(K::C)]),
                 (Cut, &[B::ctrl(K::X)]),

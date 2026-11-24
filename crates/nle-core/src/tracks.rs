@@ -23,6 +23,10 @@ pub struct TrackState {
     pub solo: bool,
     #[serde(default)]
     pub locked: bool,
+    /// Track targeting: source edits land on the targeted lane, Lift /
+    /// Extract work on targeted lanes, Up / Down stop at their edit points.
+    #[serde(default)]
+    pub target: bool,
 }
 
 impl TrackState {
@@ -71,6 +75,158 @@ impl Timeline {
             lane += step;
         }
         lane
+    }
+
+    /// Lanes switched on as edit targets.
+    pub fn targeted_lanes(&self) -> Vec<i32> {
+        self.tracks.iter().filter(|t| t.target).map(|t| t.lane).collect()
+    }
+
+    /// Where a source edit lands: the targeted lane nearest the storyline
+    /// on the video side (lane >= 0) or the audio side (< 0).
+    pub fn target_lane(&self, video: bool) -> Option<i32> {
+        self.targeted_lanes().into_iter().filter(|&l| (l >= 0) == video).min_by_key(|l| l.abs())
+    }
+
+    /// `lanes`, or every lane in use (and the storyline) when empty.
+    fn range_lanes(&self, lanes: &[i32]) -> Vec<i32> {
+        if !lanes.is_empty() {
+            return lanes.to_vec();
+        }
+        let mut all: Vec<i32> = self.placed_clips().iter().map(|p| p.lane).chain([0]).collect();
+        all.sort();
+        all.dedup();
+        all
+    }
+
+    /// Remove `[start, end)` from `lane`, cutting clips that cross the
+    /// edges. Nothing moves. On the storyline the range becomes a gap.
+    pub fn lane_clear(&mut self, lane: i32, start: Time, end: Time) -> EditResult<usize> {
+        if end <= start {
+            return Err(EditError::Nothing);
+        }
+        if lane == 0 {
+            return self.lift_storyline(start, end);
+        }
+        for at in [start, end] {
+            let crossing: Vec<ClipId> = self.placed_clips().iter().filter(|p| p.lane == lane && p.start < at && p.end() > at).map(|p| p.clip.id).collect();
+            for id in crossing {
+                self.blade_clip(id, at)?;
+            }
+        }
+        let inside: Vec<ClipId> = self.placed_clips().iter().filter(|p| p.lane == lane && p.start >= start && p.end() <= end).map(|p| p.clip.id).collect();
+        for id in &inside {
+            self.remove_ripple(*id)?;
+        }
+        Ok(inside.len())
+    }
+
+    /// Replace `[start, end)` of the storyline with a gap; connected
+    /// clips keep their places.
+    pub fn lift_storyline(&mut self, start: Time, end: Time) -> EditResult<usize> {
+        let end = end.min(self.duration());
+        if end <= start {
+            return Ok(0);
+        }
+        let _ = self.blade(start);
+        let _ = self.blade(end);
+        let starts = self.spine_starts();
+        let doomed: Vec<ClipId> = self.spine.iter().zip(starts).filter(|(c, s)| !c.is_gap() && *s >= start && *s + c.duration <= end).map(|(c, _)| c.id).collect();
+        for id in &doomed {
+            self.remove_with_gap(*id)?;
+        }
+        self.merge_gaps();
+        Ok(doomed.len())
+    }
+
+    /// Lift: clear `[start, end)` on `lanes` (every lane when empty);
+    /// nothing moves.
+    pub fn lift_range(&mut self, start: Time, end: Time, lanes: &[i32]) -> EditResult<usize> {
+        let mut n = 0;
+        for lane in self.range_lanes(lanes) {
+            n += self.lane_clear(lane, start, end)?;
+        }
+        if n == 0 {
+            return Err(EditError::Nothing);
+        }
+        Ok(n)
+    }
+
+    /// Extract: clear `[start, end)` on `lanes` (every lane when empty) and
+    /// close the gap. The storyline always ripples; lanes that are not
+    /// targeted move with it and keep their clips (sync lock), clips that
+    /// started inside the range landing at its start.
+    pub fn extract_range(&mut self, start: Time, end: Time, lanes: &[i32]) -> EditResult<usize> {
+        if end <= start {
+            return Err(EditError::Nothing);
+        }
+        let mut n = 0;
+        for lane in self.range_lanes(lanes).into_iter().filter(|&l| l != 0) {
+            n += self.lane_clear(lane, start, end)?;
+        }
+        let ripple_end = end.min(self.duration());
+        let len = if ripple_end > start { ripple_end - start } else { Time::ZERO };
+        let all: Vec<ClipId> = self.spine.iter().map(|c| c.id).collect();
+        let held = self.detach_connected(&all);
+        if len.is_positive() {
+            n += self.range_delete(start, ripple_end)?;
+        }
+        let held = held
+            .into_iter()
+            .map(|(t, c)| {
+                let t = if t >= ripple_end {
+                    t - len
+                } else if t > start {
+                    start
+                } else {
+                    t
+                };
+                (t, c)
+            })
+            .collect();
+        self.reattach(held)?;
+        self.merge_gaps();
+        if n == 0 {
+            return Err(EditError::Nothing);
+        }
+        Ok(n)
+    }
+
+    /// Overwrite onto `lane`: the storyline (0) or a connected lane, which
+    /// is cleared under the clip first.
+    pub fn overwrite_on_lane(&mut self, at: Time, clip: Clip, lane: i32) -> EditResult<ClipId> {
+        let id = clip.id;
+        if lane == 0 {
+            self.overwrite(at, clip)?;
+            return Ok(id);
+        }
+        let end = at + clip.duration;
+        match self.lane_clear(lane, at.max(Time::ZERO), end) {
+            Ok(_) | Err(EditError::Nothing) => {}
+            Err(e) => return Err(e),
+        }
+        self.connect(clip, at, lane)
+    }
+
+    /// Insert onto `lane`: everything from `at` on moves later by the
+    /// clip's length (a gap opens in the storyline) and the clip lands on
+    /// the lane.
+    pub fn insert_on_lane(&mut self, at: Time, clip: Clip, lane: i32) -> EditResult<ClipId> {
+        let id = clip.id;
+        if lane == 0 {
+            self.insert(at, clip)?;
+            return Ok(id);
+        }
+        let at = at.max(Time::ZERO);
+        if at < self.duration() {
+            // the part of a clip on the lane after `at` moves with the ripple
+            let crossing: Vec<ClipId> = self.placed_clips().iter().filter(|p| p.lane == lane && p.start < at && p.end() > at).map(|p| p.clip.id).collect();
+            for c in crossing {
+                self.blade_clip(c, at)?;
+            }
+            self.insert(at, Clip::gap(clip.duration))?;
+        }
+        self.connect(clip, at, lane)
     }
 }
 
