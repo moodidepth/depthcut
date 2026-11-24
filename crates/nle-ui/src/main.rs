@@ -8,6 +8,7 @@
 
 mod about_ui;
 mod app;
+mod audio_export_ui;
 mod audio_ui;
 mod browser;
 mod captions_ui;
@@ -33,6 +34,7 @@ mod theme;
 mod timeline_ui;
 mod track_headers;
 mod viewer;
+mod voiceover_ui;
 mod whisper_runtime;
 mod widgets;
 

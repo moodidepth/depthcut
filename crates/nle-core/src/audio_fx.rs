@@ -4,6 +4,7 @@
 //! of the mixer. These are plain data; the DSP lives in `nle-media::audio`.
 
 use crate::clip::{AudioRole, EqSettings};
+use crate::time::Time;
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -444,11 +445,160 @@ pub struct BusSettings {
     /// CLAP plug-ins, processed in order.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub plugins: Vec<PluginInsert>,
+    /// Fader automation (dB) on the timeline clock; replaces `gain_db` while
+    /// it has points and is read.
+    #[serde(skip_serializing_if = "AutoLane::is_empty")]
+    pub gain_auto: AutoLane,
+    /// Balance automation (−1..1); replaces `pan` likewise.
+    #[serde(skip_serializing_if = "AutoLane::is_empty")]
+    pub pan_auto: AutoLane,
+    /// Ignore the automation (it is kept) and use the static fader / balance.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub auto_off: bool,
 }
 
 impl Default for BusSettings {
     fn default() -> Self {
-        BusSettings { gain_db: 0.0, pan: 0.0, mute: false, solo: false, eq: ParametricEq::default(), fx: AudioFx::default(), plugins: Vec::new() }
+        BusSettings {
+            gain_db: 0.0,
+            pan: 0.0,
+            mute: false,
+            solo: false,
+            eq: ParametricEq::default(),
+            fx: AudioFx::default(),
+            plugins: Vec::new(),
+            gain_auto: AutoLane::default(),
+            pan_auto: AutoLane::default(),
+            auto_off: false,
+        }
+    }
+}
+
+/// One automation point.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AutoPoint {
+    pub time: Time,
+    pub value: f32,
+}
+
+/// A bus automation lane: points on the timeline clock, linear in between,
+/// held before the first and after the last.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AutoLane {
+    pub points: Vec<AutoPoint>,
+}
+
+impl AutoLane {
+    pub fn is_empty(&self) -> bool {
+        self.points.is_empty()
+    }
+
+    /// The value at `t`, `None` without points.
+    pub fn at(&self, t: Time) -> Option<f32> {
+        let p = &self.points;
+        let first = p.first()?;
+        if t <= first.time {
+            return Some(first.value);
+        }
+        let i = p.partition_point(|k| k.time <= t);
+        if i >= p.len() {
+            return Some(p[p.len() - 1].value);
+        }
+        let (a, b) = (p[i - 1], p[i]);
+        let span = (b.time - a.time).0.max(1) as f64;
+        let u = ((t - a.time).0 as f64 / span) as f32;
+        Some(a.value + (b.value - a.value) * u)
+    }
+
+    /// Index of the point within `tol` of `t`.
+    pub fn near(&self, t: Time, tol: Time) -> Option<usize> {
+        self.points.iter().position(|k| (k.time - t).abs() <= tol)
+    }
+
+    /// Set (or add) a point at `t`.
+    pub fn set(&mut self, t: Time, value: f32, tol: Time) {
+        match self.near(t, tol) {
+            Some(i) => self.points[i].value = value,
+            None => {
+                let i = self.points.partition_point(|k| k.time < t);
+                self.points.insert(i, AutoPoint { time: t, value });
+            }
+        }
+    }
+
+    pub fn remove_near(&mut self, t: Time, tol: Time) -> bool {
+        match self.near(t, tol) {
+            Some(i) => {
+                self.points.remove(i);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Replace everything between the first and last of `pass` (a recorded
+    /// touch pass, in time order) with it. The value just outside the pass is
+    /// pinned so the curve elsewhere does not change.
+    pub fn write_pass(&mut self, pass: &[AutoPoint]) {
+        let (Some(first), Some(last)) = (pass.first(), pass.last()) else { return };
+        let (from, to) = (first.time, last.time);
+        let before = self.at(from);
+        let after = self.at(to);
+        let had_after = self.points.iter().any(|k| k.time > to);
+        let had_before = self.points.iter().any(|k| k.time < from);
+        self.points.retain(|k| k.time < from || k.time > to);
+        let mut add: Vec<AutoPoint> = Vec::new();
+        // a 10 ms glide from the old curve into the pass and back out
+        let glide = Time::from_secs_f64(0.01);
+        if had_before {
+            if let Some(v) = before {
+                add.push(AutoPoint { time: from - glide, value: v });
+            }
+        }
+        add.extend_from_slice(pass);
+        if had_after {
+            if let Some(v) = after {
+                add.push(AutoPoint { time: to + glide, value: v });
+            }
+        }
+        self.points.retain(|k| !add.iter().any(|a| (a.time - k.time).abs() <= glide));
+        self.points.extend(add);
+        self.points.sort_by_key(|k| k.time);
+        self.points.dedup_by_key(|k| k.time);
+    }
+
+    /// Drop points the straight line between their neighbours already gives
+    /// to within `tol` (Ramer-Douglas-Peucker), so a recorded pass stays small.
+    pub fn thin(points: &[AutoPoint], tol: f32) -> Vec<AutoPoint> {
+        if points.len() < 3 {
+            return points.to_vec();
+        }
+        let mut keep = vec![false; points.len()];
+        keep[0] = true;
+        keep[points.len() - 1] = true;
+        let mut stack = vec![(0usize, points.len() - 1)];
+        while let Some((a, b)) = stack.pop() {
+            if b <= a + 1 {
+                continue;
+            }
+            let (pa, pb) = (points[a], points[b]);
+            let span = (pb.time - pa.time).0.max(1) as f64;
+            let mut worst = (0.0f32, a);
+            for (i, p) in points.iter().enumerate().take(b).skip(a + 1) {
+                let u = ((p.time - pa.time).0 as f64 / span) as f32;
+                let d = (pa.value + (pb.value - pa.value) * u - p.value).abs();
+                if d > worst.0 {
+                    worst = (d, i);
+                }
+            }
+            if worst.0 > tol {
+                keep[worst.1] = true;
+                stack.push((a, worst.1));
+                stack.push((worst.1, b));
+            }
+        }
+        points.iter().zip(keep).filter(|(_, k)| *k).map(|(p, _)| *p).collect()
     }
 }
 
@@ -464,9 +614,63 @@ impl BusSettings {
     }
     /// Does the bus process or attenuate at all (cheap pass-through otherwise)?
     pub fn is_identity(&self) -> bool {
-        self.gain_db == 0.0 && self.pan == 0.0 && !self.mute && !self.eq.is_active() && !self.fx.is_active() && self.plugins.iter().all(|p| p.bypass)
+        self.gain_db == 0.0
+            && self.pan == 0.0
+            && !self.mute
+            && !self.eq.is_active()
+            && !self.fx.is_active()
+            && self.plugins.iter().all(|p| p.bypass)
+            && (self.auto_off || (self.gain_auto.is_empty() && self.pan_auto.is_empty()))
+    }
+
+    /// Whether automation drives the fader or balance.
+    pub fn is_automated(&self) -> bool {
+        !self.auto_off && (!self.gain_auto.is_empty() || !self.pan_auto.is_empty())
+    }
+
+    /// Fader level (dB) at timeline time `t`, automation included.
+    pub fn gain_db_at(&self, t: Time) -> f32 {
+        if self.auto_off {
+            return self.gain_db;
+        }
+        self.gain_auto.at(t).unwrap_or(self.gain_db)
+    }
+
+    /// Balance at timeline time `t`, automation included.
+    pub fn pan_at(&self, t: Time) -> f32 {
+        if self.auto_off {
+            return self.pan;
+        }
+        self.pan_auto.at(t).unwrap_or(self.pan)
+    }
+
+    /// Linear fader gain at `t`.
+    pub fn gain_at(&self, t: Time) -> f32 {
+        let db = self.gain_db_at(t);
+        if db <= *Self::FADER_RANGE.start() {
+            0.0
+        } else {
+            crate::clip::db_to_gain(db.min(*Self::FADER_RANGE.end()))
+        }
     }
 }
+
+/// A submix bus the user made ("Voices", "Ambience"…): clips are sent to it
+/// ([`crate::clip::AudioParams::bus`]), it is processed like a role bus and
+/// then feeds the bus of `feeds`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UserBus {
+    pub id: u64,
+    pub name: String,
+    pub feeds: AudioRole,
+    #[serde(default)]
+    pub settings: BusSettings,
+}
+
+/// User busses beyond this are not processed (their clips go to the role bus).
+pub const MAX_USER_BUSSES: usize = 8;
+/// Mixer slots: the five fixed strips ([`BusId::ALL`]) then the user busses.
+pub const BUS_SLOTS: usize = 5 + MAX_USER_BUSSES;
 
 /// Which bus a mixer strip addresses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -509,9 +713,38 @@ pub struct MixerSettings {
     pub effects: BusSettings,
     pub general: BusSettings,
     pub master: BusSettings,
+    /// User-made submix busses (at most [`MAX_USER_BUSSES`]).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub user: Vec<UserBus>,
 }
 
 impl MixerSettings {
+    /// The processed user bus `id`, with its mixer slot.
+    pub fn user_bus(&self, id: u64) -> Option<(usize, &UserBus)> {
+        self.user.iter().take(MAX_USER_BUSSES).enumerate().find(|(_, b)| b.id == id).map(|(i, b)| (5 + i, b))
+    }
+    /// Add a user bus feeding `feeds`; `None` when all slots are taken.
+    pub fn add_user_bus(&mut self, name: impl Into<String>, feeds: AudioRole) -> Option<u64> {
+        if self.user.len() >= MAX_USER_BUSSES {
+            return None;
+        }
+        let id = self.user.iter().map(|b| b.id).max().unwrap_or(0) + 1;
+        self.user.push(UserBus { id, name: name.into(), feeds, settings: BusSettings::default() });
+        Some(id)
+    }
+    /// Settings of mixer slot `slot` ([`BUS_SLOTS`] numbering).
+    pub fn slot(&self, slot: usize) -> Option<&BusSettings> {
+        match slot {
+            0..5 => Some(self.bus(BusId::ALL[slot])),
+            _ => self.user.get(slot - 5).map(|b| &b.settings),
+        }
+    }
+    pub fn slot_mut(&mut self, slot: usize) -> Option<&mut BusSettings> {
+        match slot {
+            0..5 => Some(self.bus_mut(BusId::ALL[slot])),
+            _ => self.user.get_mut(slot - 5).map(|b| &mut b.settings),
+        }
+    }
     pub fn bus(&self, id: BusId) -> &BusSettings {
         match id {
             BusId::Role(AudioRole::Dialogue) => &self.dialogue,
@@ -530,15 +763,20 @@ impl MixerSettings {
             BusId::Master => &mut self.master,
         }
     }
-    /// Any role bus soloed?
+    /// Any role or user bus soloed?
     pub fn any_solo(&self) -> bool {
-        [&self.dialogue, &self.music, &self.effects, &self.general].iter().any(|b| b.solo)
+        [&self.dialogue, &self.music, &self.effects, &self.general].iter().any(|b| b.solo) || self.user.iter().any(|b| b.settings.solo)
     }
     /// Whether role bus `role` is heard. `honor_solo` is on for playback
-    /// monitoring only; mutes always apply.
+    /// monitoring only; mutes always apply. A soloed user bus keeps the role
+    /// bus it feeds open.
     pub fn audible(&self, role: AudioRole, honor_solo: bool) -> bool {
         let b = self.bus(BusId::Role(role));
-        !b.mute && (!honor_solo || !self.any_solo() || b.solo)
+        !b.mute && (!honor_solo || !self.any_solo() || b.solo || self.user.iter().any(|u| u.feeds == role && u.settings.solo))
+    }
+    /// Whether user bus `u` is heard (its role bus may still mute it).
+    pub fn user_audible(&self, u: &UserBus, honor_solo: bool) -> bool {
+        !u.settings.mute && (!honor_solo || !self.any_solo() || u.settings.solo || self.bus(BusId::Role(u.feeds)).solo)
     }
 }
 
@@ -565,6 +803,68 @@ mod tests {
         // missing fields fall back to defaults
         let partial: ParametricEq = serde_json::from_str(r#"{"enabled":true}"#).unwrap();
         assert_eq!(partial, ParametricEq { enabled: true, ..Default::default() });
+    }
+
+    #[test]
+    fn automation_interpolates_holds_and_reads_over_the_fader() {
+        let s = |x: f64| Time::from_secs_f64(x);
+        let mut b = BusSettings { gain_db: -3.0, ..Default::default() };
+        assert_eq!(b.gain_db_at(s(5.0)), -3.0);
+        b.gain_auto.set(s(1.0), 0.0, Time::ZERO);
+        b.gain_auto.set(s(3.0), -10.0, Time::ZERO);
+        assert!(b.is_automated() && !b.is_identity());
+        assert_eq!(b.gain_db_at(s(0.0)), 0.0, "held before the first point");
+        assert!((b.gain_db_at(s(2.0)) + 5.0).abs() < 1e-4);
+        assert_eq!(b.gain_db_at(s(9.0)), -10.0, "held after the last");
+        b.auto_off = true;
+        assert_eq!(b.gain_db_at(s(2.0)), -3.0);
+        // a second set within tolerance updates instead of adding
+        b.gain_auto.set(s(1.005), 2.0, s(0.01));
+        assert_eq!(b.gain_auto.points.len(), 2);
+        assert_eq!(b.gain_auto.points[0].value, 2.0);
+    }
+
+    #[test]
+    fn a_touch_pass_replaces_its_range_and_keeps_the_rest() {
+        let s = |x: f64| Time::from_secs_f64(x);
+        let p = |t: f64, v: f32| AutoPoint { time: s(t), value: v };
+        let mut lane = AutoLane { points: vec![p(0.0, 0.0), p(2.0, -6.0), p(4.0, -6.0), p(10.0, 0.0)] };
+        lane.write_pass(&[p(3.0, -20.0), p(3.5, -18.0), p(5.0, -20.0)]);
+        assert!(lane.points.iter().all(|k| !(k.time > s(3.0) && k.time < s(5.0)) || k.value <= -18.0));
+        assert!(!lane.points.iter().any(|k| k.time == s(4.0)), "old point inside the pass is gone");
+        assert_eq!(lane.at(s(0.0)), Some(0.0));
+        assert_eq!(lane.at(s(10.0)), Some(0.0));
+        assert_eq!(lane.at(s(3.0)), Some(-20.0));
+        // the curve just before the pass is what it was
+        assert!((lane.at(s(2.5)).unwrap() + 6.0).abs() < 0.2);
+        // thinning keeps the shape
+        let ramp: Vec<AutoPoint> = (0..=100).map(|i| p(i as f64 * 0.01, i as f32 * 0.1)).collect();
+        let thin = AutoLane::thin(&ramp, 0.05);
+        assert_eq!(thin.len(), 2, "a straight ramp needs two points");
+    }
+
+    #[test]
+    fn user_busses_get_slots_and_solo_opens_their_role() {
+        let mut m = MixerSettings::default();
+        let a = m.add_user_bus("Voices", AudioRole::Dialogue).unwrap();
+        let b = m.add_user_bus("Ambience", AudioRole::General).unwrap();
+        assert_ne!(a, b);
+        assert_eq!(m.user_bus(b).map(|(s, _)| s), Some(6));
+        m.user[1].settings.solo = true;
+        assert!(m.audible(AudioRole::General, true));
+        assert!(!m.audible(AudioRole::Dialogue, true));
+        assert!(!m.user_audible(&m.user[0], true));
+        assert!(m.user_audible(&m.user[1], true));
+        for _ in 2..MAX_USER_BUSSES {
+            m.add_user_bus("x", AudioRole::Music).unwrap();
+        }
+        assert!(m.add_user_bus("one too many", AudioRole::Music).is_none());
+        let json = serde_json::to_string(&m).unwrap();
+        let back: MixerSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, m);
+        // old projects without user busses / automation still load
+        let old: MixerSettings = serde_json::from_str(r#"{"music":{"gain_db":-4.0}}"#).unwrap();
+        assert!(old.user.is_empty() && old.music.gain_auto.is_empty());
     }
 
     #[test]

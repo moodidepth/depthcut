@@ -22,6 +22,7 @@
 //! Decoded frames live in VRAM in an LRU cache capped at 2.5 GB
 //! ([`cache::VRAM_FRAME_CACHE_BUDGET`]) for the 8 GB Arc A750.
 
+pub mod audio_export;
 pub mod cache;
 pub mod colormath;
 pub mod export;

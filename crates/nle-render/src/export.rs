@@ -709,6 +709,13 @@ pub fn write_wav_f32(path: &Path, rate: u32, samples: &[f32]) -> std::io::Result
 
 /// Mix the timeline's audio for `[start, end)` at 48 kHz stereo.
 pub fn mix_audio(project: &Project, sources: &HashMap<AssetId, Arc<AudioBuffer>>, start: Time, end: Time) -> Vec<f32> {
+    let mut mixer = prepared_mixer(project, sources);
+    render_range(&mut mixer, start, end, &AtomicBool::new(false), &mut |_| {}).unwrap_or_default()
+}
+
+/// A 48 kHz offline mixer for the project, with the duck envelope and the
+/// restored audio rendered up front (as the preview does).
+pub(crate) fn prepared_mixer(project: &Project, sources: &HashMap<AssetId, Arc<AudioBuffer>>) -> TimelineMixer {
     let mut mixer = TimelineMixer::new(48_000);
     let spans = eval::audio_spans(&project.timeline);
     // Look-ahead ducking: the same cached-envelope computation the preview uses,
@@ -729,18 +736,29 @@ pub fn mix_audio(project: &Project, sources: &HashMap<AssetId, Arc<AudioBuffer>>
     }
     // Bus faders / mutes / inserts apply; solo is a monitoring aid only.
     mixer.set_mixer(&project.timeline.mixer);
+    mixer
+}
+
+/// Render `[start, end)` from `mixer`; `None` when cancelled. `progress` gets 0..1.
+pub(crate) fn render_range(mixer: &mut TimelineMixer, start: Time, end: Time, cancel: &AtomicBool, progress: &mut dyn FnMut(f32)) -> Option<Vec<f32>> {
     // Integer sample positions: audio never drifts against video PTS.
     let frames = (end - start).max(Time::ZERO).samples_round(48_000) as usize;
     let mut out = vec![0.0f32; frames * 2];
     const CHUNK: usize = 4_800;
     let mut i = 0;
     while i < frames {
+        if cancel.load(Ordering::Relaxed) {
+            return None;
+        }
         let n = CHUNK.min(frames - i);
         let t = start + Time::from_samples(i as i64, 48_000);
         mixer.render(t, 1.0, &mut out[i * 2..(i + n) * 2]);
         i += n;
+        if i % (CHUNK * 20) == 0 {
+            progress(i as f32 / frames as f32);
+        }
     }
-    out
+    Some(out)
 }
 
 /// Frame source backed by blocking full-resolution decoders.
@@ -788,7 +806,7 @@ impl FrameSource for ExportSource {
 
 /// `decoded`, plus the sound of any clip audible in `start..end` that is not
 /// in it yet (media still being analysed, or just relinked).
-fn export_audio(
+pub(crate) fn export_audio(
     project: &Project,
     decoded: &HashMap<AssetId, Arc<AudioBuffer>>,
     start: Time,
@@ -815,7 +833,7 @@ fn export_audio(
 }
 
 /// Where `path` is written until it is complete.
-fn partial_path(path: &Path, id: &str) -> PathBuf {
+pub(crate) fn partial_path(path: &Path, id: &str) -> PathBuf {
     let stem = path.file_stem().unwrap_or_default().to_string_lossy();
     let ext = path.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
     path.with_file_name(format!("{stem}.part-{id}{ext}"))

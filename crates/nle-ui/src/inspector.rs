@@ -71,6 +71,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let beat_busy = app.beat_job.is_some();
     let kill_busy = app.kill_job.is_some();
     let mb_busy = app.multiband_job.is_some();
+    let busses: Vec<(u64, String)> =
+        app.focus.root(&app.project.timeline).mixer.user.iter().map(|u| (u.id, format!("{} → {}", u.name, nle_core::BusId::Role(u.feeds).label()))).collect();
     let detected_space = match &c.kind {
         ClipKind::Asset { asset } => app.project.asset(*asset).and_then(|a| a.video.as_ref()).and_then(|v| nle_core::color::ColorSpace::from_ffmpeg_transfer(&v.color_transfer)),
         _ => None,
@@ -103,6 +105,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             &mut scan_kills,
             &mut sync_beats,
             &mut learn_noise,
+            &busses,
         ),
         InspectorTab::TitlesTransitions => titles_tab(ui, &mut c, &mut add_title),
         InspectorTab::Motion => motion_action = crate::motion_ui::tab(ui, &mut c, &motion_cx, motion_ui),
@@ -810,6 +813,7 @@ fn audio_tab(
     scan_kills: &mut bool,
     sync_beats: &mut bool,
     learn_noise: &mut bool,
+    busses: &[(u64, String)],
 ) {
     if !c.has_audio() {
         let why = if c.link.is_some() { "This clip's audio is on its linked audio clip." } else { "No audio in this clip." };
@@ -826,6 +830,29 @@ fn audio_tab(
             for r in AudioRole::ALL {
                 ui.selectable_value(&mut a.role, r, r.label());
             }
+        });
+        ui.horizontal(|ui| {
+            ui.add_sized([96.0, 20.0], egui::Label::new(egui::RichText::new("Bus").color(theme::TEXT_DIM)));
+            let current = a.bus.and_then(|id| busses.iter().find(|b| b.0 == id));
+            let text = match (a.bus, current) {
+                (None, _) => format!("{} (role bus)", a.role.label()),
+                (Some(_), Some(b)) => b.1.clone(),
+                (Some(_), None) => format!("{} (its bus was deleted)", a.role.label()),
+            };
+            egui::ComboBox::from_id_salt("clip-audio-bus")
+                .selected_text(text)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut a.bus, None, format!("{} (role bus)", a.role.label()));
+                    for (id, name) in busses {
+                        ui.selectable_value(&mut a.bus, Some(*id), name);
+                    }
+                })
+                .response
+                .on_hover_text(if busses.is_empty() {
+                    "Add submix busses in the Audio Mixer (Ctrl+8) → + Bus"
+                } else {
+                    "Send this clip through a submix bus (ducking still follows the role)"
+                });
         });
     });
     if reset {

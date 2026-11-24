@@ -215,6 +215,10 @@ pub struct App {
     pub inspector_tab: InspectorTab,
     pub browser: BrowserState,
     pub export: ExportDialog,
+    pub audio_export: crate::audio_export_ui::AudioExportDialog,
+    pub voiceover: crate::voiceover_ui::VoiceoverDialog,
+    /// Voiceover takes being imported, placed at their record start once probed.
+    pending_voiceover: Vec<(PathBuf, Time)>,
     pub beat_job: Option<Job<(Vec<Marker>, f64)>>,
     pub kill_job: Option<Job<Vec<Marker>>>,
     pub multiband_job: Option<Job<Vec<Marker>>>,
@@ -371,6 +375,9 @@ impl App {
             inspector_tab: InspectorTab::Video,
             browser: BrowserState::default(),
             export: ExportDialog::default(),
+            audio_export: Default::default(),
+            voiceover: Default::default(),
+            pending_voiceover: Vec::new(),
             beat_job: None,
             kill_job: None,
             multiband_job: None,
@@ -850,6 +857,25 @@ impl App {
             self.exec(Command::Connect { clip, at: self.playhead, lane });
         }
         self.inspector_tab = InspectorTab::TitlesTransitions;
+    }
+
+    /// A finished voiceover take was imported: put it where recording started,
+    /// as Dialogue on the first free lane below the spine.
+    fn place_voiceover(&mut self, id: AssetId) {
+        let Some(asset) = self.project.asset(id).cloned() else { return };
+        let Some(i) = self.pending_voiceover.iter().position(|(p, _)| *p == asset.path) else { return };
+        let (_, at) = self.pending_voiceover.remove(i);
+        let mut clip = Clip::from_asset(&asset);
+        clip.name = asset.name.clone();
+        clip.audio.role = nle_core::AudioRole::Dialogue;
+        clip.audio.ducking.enabled = false;
+        if self.project.timeline.spine.is_empty() {
+            self.exec(Command::Append { clip });
+        } else {
+            let lane = self.project.timeline.free_lane(-1, at, clip.duration);
+            self.exec(Command::Connect { clip, at, lane });
+        }
+        self.status(format!("Voiceover placed at {:.2}s", at.as_secs_f64()));
     }
 
     fn free_lane_above(&self, at: Time, dur: Time) -> i32 {
@@ -1958,7 +1984,8 @@ impl App {
         self.mixer_view.feed(self.audio.meters(), dt);
         let original = self.focus.root(&self.project.timeline).mixer.clone();
         let mut mix = original.clone();
-        let req = crate::audio_ui::mixer_panel(ui, &mut mix, &mut self.mixer_view);
+        let clock = crate::audio_ui::AutoClock { t: self.playhead, playing: self.playback.playing, end: self.project.timeline.duration() };
+        let req = crate::audio_ui::mixer_panel(ui, &mut mix, &mut self.mixer_view, clock);
         if mix != original {
             self.exec_key(Command::SetMixer { mixer: Box::new(mix) }, Some(drag_key(MIXER_TAG, nle_core::ClipId(0))));
         }
@@ -2374,6 +2401,10 @@ impl App {
                     ui.close_menu();
                     self.import_dialog();
                 }
+                if ui.button("Record Voiceover…").on_hover_text("Record a microphone while the timeline plays; the take lands at the playhead").clicked() {
+                    self.voiceover.open = true;
+                    ui.close_menu();
+                }
                 if ui.button(self.menu_label("Import FCPXML…", Action::ImportFcpxml)).clicked() {
                     ui.close_menu();
                     self.request_switch(ProjectSwitch::ImportFcpxml);
@@ -2419,6 +2450,10 @@ impl App {
                 ui.separator();
                 if ui.button(self.menu_label("Share / Export Movie…", Action::Export)).clicked() {
                     self.export.open = true;
+                    ui.close_menu();
+                }
+                if ui.button("Export Audio / Stems…").on_hover_text("The mix and per-bus stems as WAV, FLAC or AAC").clicked() {
+                    self.audio_export.open = true;
                     ui.close_menu();
                 }
                 ui.separator();
@@ -2935,6 +2970,7 @@ impl App {
                     }
                     self.browser.selected = Some(id);
                     self.status(format!("Imported {name}"));
+                    self.place_voiceover(id);
                 }
                 MediaEvent::AudioReady(id, buf, lufs) => {
                     self.audio.set_source(id, buf);
@@ -3096,8 +3132,25 @@ impl eframe::App for App {
         egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::BG).inner_margin(egui::Margin::same(6))).show(ctx, |ui| viewer::show(self, ui));
 
         // the movie export always renders the whole project, also while stepped into a compound
-        let full = (!self.focus.is_empty() && (self.export.open || self.export.running())).then(|| self.full_project().into_owned());
+        let exporting = self.export.open || self.export.running() || self.audio_export.open || self.audio_export.running();
+        let full = (!self.focus.is_empty() && exporting).then(|| self.full_project().into_owned());
         self.export.show(ctx, full.as_ref().unwrap_or(&self.project), self.gpu.as_ref(), &self.library.audio);
+        self.audio_export.show(ctx, full.as_ref().unwrap_or(&self.project), &self.library.audio);
+        let vo_dir = self.project_path.as_ref().and_then(|p| p.parent()).map(|d| d.join("Voiceover")).unwrap_or_else(|| crate::media::data_dir().join("Voiceover"));
+        match self.voiceover.show(ctx, &vo_dir, self.playhead) {
+            Some(crate::voiceover_ui::VoiceoverAction::Started { at, play }) => {
+                if play && !self.playback.playing {
+                    self.set_cursor(at);
+                    self.play(1.0);
+                }
+            }
+            Some(crate::voiceover_ui::VoiceoverAction::Finished { path, at }) => {
+                self.stop();
+                self.pending_voiceover.push((path.clone(), at));
+                self.library.import([path]);
+            }
+            None => {}
+        }
         captions_ui::show(self, ctx);
         self.discord.show_dialog(ctx);
         shortcuts_ui::show(self, ctx);

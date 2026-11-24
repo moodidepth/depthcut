@@ -6,8 +6,9 @@
 //!
 //! Per clip: source (or its cleaned [`Restored`] copy) → retime → gain /
 //! pan → low-pass → EQ → sub-bass → vocal clarity → leveler → inserts →
-//! ducking → role bus. Master: EQ → inserts → fader → preview volume →
-//! −1 dBFS limiter.
+//! ducking → user bus (optional) → role bus. Master: EQ → inserts → fader →
+//! preview volume → −1 dBFS limiter. Bus faders and balance follow their
+//! automation on the timeline clock.
 
 use super::clap_host::ClapInstance;
 use super::ducking::{DuckCurve, DuckEnvelope, Ducker, RmsAccumulator};
@@ -18,7 +19,7 @@ use super::restore::{restore_key, RestoreKey, Restored};
 use super::vocal::VocalClarity;
 use crate::frame::AudioBuffer;
 use nle_core::eval::AudioSpan;
-use nle_core::{AssetId, AudioRole, BusId, BusSettings, ClipId, MixerSettings, Time};
+use nle_core::{AssetId, AudioRole, BusId, BusSettings, ClipId, MixerSettings, Time, BUS_SLOTS, MAX_USER_BUSSES};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
@@ -171,16 +172,22 @@ pub struct TimelineMixer {
     /// Honour bus solo (playback monitoring only; export ignores solo).
     pub honor_solo: bool,
     bus_bufs: [Vec<f32>; 4],
+    /// Inputs of the user busses (slot − 5).
+    user_bufs: Vec<Vec<f32>>,
+    /// Per mixer slot ([`BUS_SLOTS`]: [`BusId::ALL`], then user busses).
     bus_eq: Vec<ParametricEqProc>,
     bus_fx: Vec<FxChain>,
-    /// CLAP inserts per bus ([`BusId::ALL`] order), matching
-    /// `mix.<bus>.plugins` slot for slot; `None` = failed to load (passed through).
-    bus_plugins: [Vec<PluginSlot>; 5],
+    /// CLAP inserts per mixer slot, matching that bus's `plugins` slot for
+    /// slot; `None` = failed to load (passed through).
+    bus_plugins: [Vec<PluginSlot>; BUS_SLOTS],
     /// Smoothed per-bus (L, R) gain so fader moves never zipper.
-    bus_gain: [[f32; 2]; 5],
-    /// Meters per bus ([`BusId::ALL`] order) when metering is on.
+    bus_gain: [[f32; 2]; BUS_SLOTS],
+    /// Meters per mixer slot when metering is on.
     meters: Option<Vec<LoudnessMeter>>,
-    gr: [GainReduction; 5],
+    gr: [GainReduction; BUS_SLOTS],
+    /// Render only this bus, post-fader and without the master chain (stem export).
+    stem: Option<StemTap>,
+    stem_buf: Vec<f32>,
     lowpasses: HashMap<ClipId, Biquad>,
     sub_basses: HashMap<ClipId, Biquad>,
     duckers: HashMap<ClipId, Ducker>,
@@ -213,12 +220,15 @@ impl TimelineMixer {
             mix: MixerSettings::default(),
             honor_solo: false,
             bus_bufs: Default::default(),
-            bus_eq: (0..5).map(|_| ParametricEqProc::new(sample_rate as f32, Default::default())).collect(),
-            bus_fx: (0..5).map(|_| FxChain::new(sample_rate as f32)).collect(),
+            user_bufs: vec![Vec::new(); MAX_USER_BUSSES],
+            bus_eq: (0..BUS_SLOTS).map(|_| ParametricEqProc::new(sample_rate as f32, Default::default())).collect(),
+            bus_fx: (0..BUS_SLOTS).map(|_| FxChain::new(sample_rate as f32)).collect(),
             bus_plugins: Default::default(),
-            bus_gain: [[1.0; 2]; 5],
+            bus_gain: [[1.0; 2]; BUS_SLOTS],
             meters: None,
             gr: Default::default(),
+            stem: None,
+            stem_buf: Vec::new(),
             lowpasses: HashMap::new(),
             sub_basses: HashMap::new(),
             duckers: HashMap::new(),
@@ -254,15 +264,15 @@ impl TimelineMixer {
             return;
         }
         self.mix = mix.clone();
-        for bus in BusId::ALL {
-            let wanted = &self.mix.bus(bus).plugins;
-            let slots = &mut self.bus_plugins[bus.index()];
+        for b in 0..BUS_SLOTS {
+            let empty = Vec::new();
+            let wanted = self.mix.slot(b).map_or(&empty, |s| &s.plugins);
+            let slots = &mut self.bus_plugins[b];
             slots.truncate(wanted.len());
             for (k, ins) in wanted.iter().enumerate() {
                 let key = (ins.path.clone(), ins.id.clone());
                 if slots.get(k).is_none_or(|s| s.key != key) {
-                    let inst =
-                        ClapInstance::load(std::path::Path::new(&ins.path), &ins.id, self.sample_rate).map_err(|e| log::warn!("CLAP insert on {} bus: {e}", bus.label())).ok();
+                    let inst = ClapInstance::load(std::path::Path::new(&ins.path), &ins.id, self.sample_rate).map_err(|e| log::warn!("CLAP insert on mixer slot {b}: {e}")).ok();
                     let slot = PluginSlot { key, inst };
                     if k < slots.len() {
                         slots[k] = slot;
@@ -284,17 +294,17 @@ impl TimelineMixer {
     /// Turn loudness metering on (playback) or off (export / analysis).
     pub fn set_metering(&mut self, on: bool) {
         match (on, self.meters.is_some()) {
-            (true, false) => self.meters = Some((0..5).map(|_| LoudnessMeter::new(self.sample_rate)).collect()),
+            (true, false) => self.meters = Some((0..BUS_SLOTS).map(|_| LoudnessMeter::new(self.sample_rate)).collect()),
             (false, true) => self.meters = None,
             _ => {}
         }
     }
 
-    /// Current meter readings per bus ([`BusId::ALL`] order); resets the
+    /// Current meter readings per mixer slot ([`BUS_SLOTS`]); resets the
     /// per-reading peaks and gain-reduction maxima.
-    pub fn meter_readings(&mut self) -> Option<[MeterReading; 5]> {
+    pub fn meter_readings(&mut self) -> Option<[MeterReading; BUS_SLOTS]> {
         let meters = self.meters.as_mut()?;
-        let mut out = [MeterReading::default(); 5];
+        let mut out = [MeterReading::default(); BUS_SLOTS];
         for (i, m) in meters.iter_mut().enumerate() {
             out[i] = m.read();
             out[i].gr = std::mem::take(&mut self.gr[i]);
@@ -423,6 +433,11 @@ impl TimelineMixer {
         self.vocals.clear();
         self.retime.clear();
         self.limiter.reset();
+    }
+
+    /// Render one bus only (post-fader, no master chain) or the full mix (`None`).
+    pub fn set_stem(&mut self, stem: Option<StemTap>) {
+        self.stem = stem;
     }
 
     /// A block of scrub audio. It stays out of the loudness measurement.
@@ -585,14 +600,16 @@ impl TimelineMixer {
                 self.clip_fx.entry(span.clip).or_insert_with(|| FxChain::new(self.sample_rate as f32)).process(&span.params.fx, &mut tmp);
             }
 
+            // every dialogue clip feeds the (pre-bus) ducking sidechain
             if span.params.role == AudioRole::Dialogue {
                 for (d, s) in self.dialogue.iter_mut().zip(&tmp) {
                     *d += s;
                 }
-            } else if span.params.ducking.enabled {
+            }
+            if span.params.role != AudioRole::Dialogue && span.params.ducking.enabled {
                 ducked.push((span.clip, tmp.clone()));
             } else {
-                let bus = &mut self.bus_bufs[BusId::Role(span.params.role).index()];
+                let bus = route(&mut self.bus_bufs, &mut self.user_bufs, &self.mix, span.params.role, span.params.bus);
                 bus.resize(out.len(), 0.0);
                 for (o, s) in bus.iter_mut().zip(&tmp) {
                     *o += s;
@@ -600,18 +617,10 @@ impl TimelineMixer {
             }
         }
 
-        // the dialogue bus input is also the (pre-fader) ducking sidechain
-        {
-            let bus = &mut self.bus_bufs[0];
-            bus.resize(out.len(), 0.0);
-            for (o, d) in bus.iter_mut().zip(&self.dialogue) {
-                *o += d;
-            }
-        }
         for (clip, buf) in &ducked {
-            let (settings, role) = self.spans.iter().find(|s| s.clip == *clip).map(|s| (s.params.ducking, s.params.role)).unwrap_or_default();
+            let (settings, role, user) = self.spans.iter().find(|s| s.clip == *clip).map(|s| (s.params.ducking, s.params.role, s.params.bus)).unwrap_or_default();
             let curve = self.duck_curve(*clip, settings);
-            let bus = &mut self.bus_bufs[BusId::Role(role).index()];
+            let bus = route(&mut self.bus_bufs, &mut self.user_bufs, &self.mix, role, user);
             bus.resize(out.len(), 0.0);
             if let Some(curve) = curve {
                 // look-ahead curve on the timeline clock: identical in preview and export
@@ -632,16 +641,44 @@ impl TimelineMixer {
             }
         }
 
-        // role busses → master (solo is a monitoring aid: playback only)
-        let any_solo = self.honor_solo && self.mix.any_solo();
-        // taken for the loop so the bus settings need no per-block clone
+        // taken for the loops so the bus settings need no per-block clone
         let mix = std::mem::take(&mut self.mix);
+        let clock = (t0, speed);
+        let stem = self.stem;
+        if stem.is_some() {
+            self.stem_buf.clear();
+            self.stem_buf.resize(out.len(), 0.0);
+        }
+
+        // user busses → the role bus they feed
+        for (u, ub) in mix.user.iter().take(MAX_USER_BUSSES).enumerate() {
+            let slot = 5 + u;
+            let mut bus = std::mem::take(&mut self.user_bufs[u]);
+            bus.resize(out.len(), 0.0);
+            let audible = mix.user_audible(ub, self.honor_solo);
+            self.process_bus(slot, &ub.settings, audible, &mut bus, clock);
+            if stem == Some(StemTap::User(ub.id)) {
+                self.stem_buf.copy_from_slice(&bus);
+            }
+            let dest = &mut self.bus_bufs[BusId::Role(ub.feeds).index()];
+            dest.resize(out.len(), 0.0);
+            for (o, s) in dest.iter_mut().zip(&bus) {
+                *o += s;
+            }
+            bus.fill(0.0);
+            self.user_bufs[u] = bus;
+        }
+
+        // role busses → master (solo is a monitoring aid: playback only)
         for (i, role) in AudioRole::ALL.into_iter().enumerate() {
             let settings = mix.bus(BusId::Role(role));
             let mut bus = std::mem::take(&mut self.bus_bufs[i]);
             bus.resize(out.len(), 0.0);
-            let audible = !settings.mute && (!any_solo || settings.solo);
-            self.process_bus(i, settings, audible, &mut bus);
+            let audible = mix.audible(role, self.honor_solo);
+            self.process_bus(i, settings, audible, &mut bus, clock);
+            if stem == Some(StemTap::Role(role)) {
+                self.stem_buf.copy_from_slice(&bus);
+            }
             for (o, s) in out.iter_mut().zip(&bus) {
                 *o += s;
             }
@@ -665,10 +702,13 @@ impl TimelineMixer {
             merge_gr(&mut self.gr[4], g);
         }
         self.process_plugins(4, master, out);
-        let target = bus_gains(master, !master.mute);
         let a = gain_smoothing(self.sample_rate);
         let mut peaks = [0.0f32; 2];
-        for frame in out.as_chunks_mut::<2>().0 {
+        let mut target = bus_gains_at(master, !master.mute, Time::from_secs_f64(t0));
+        for (k, frame) in out.as_chunks_mut::<2>().0.iter_mut().enumerate() {
+            if master.is_automated() && k % BLOCK == 0 {
+                target = bus_gains_at(master, !master.mute, Time::from_secs_f64(t0 + speed * k as f64 / sr));
+            }
             for (c, s) in frame.iter_mut().enumerate() {
                 let g = &mut self.bus_gain[4][c];
                 *g += (target[c] - *g) * a;
@@ -680,6 +720,9 @@ impl TimelineMixer {
         }
         if let Some(m) = self.meters.as_mut() {
             m[4].push(out);
+        }
+        if matches!(stem, Some(StemTap::Role(_) | StemTap::User(_))) {
+            out.copy_from_slice(&self.stem_buf);
         }
         self.peaks = peaks;
         self.tmp = tmp;
@@ -696,9 +739,10 @@ impl TimelineMixer {
         }
     }
 
-    /// Bus EQ → inserts → fader / pan (smoothed) → meter. A silent bus
-    /// still feeds its meter so it falls to −∞ instead of freezing.
-    fn process_bus(&mut self, i: usize, s: &BusSettings, audible: bool, buf: &mut [f32]) {
+    /// Bus EQ → inserts → fader / pan (smoothed, automated) → meter. A silent
+    /// bus still feeds its meter so it falls to −∞ instead of freezing.
+    /// `clock` = (timeline seconds at the first frame, speed).
+    fn process_bus(&mut self, i: usize, s: &BusSettings, audible: bool, buf: &mut [f32], clock: (f64, f64)) {
         self.bus_eq[i].update(&s.eq);
         self.bus_eq[i].process(buf);
         if s.fx.is_active() {
@@ -707,9 +751,26 @@ impl TimelineMixer {
             merge_gr(&mut self.gr[i], g);
         }
         self.process_plugins(i, s, buf);
-        let target = bus_gains(s, audible);
         let a = gain_smoothing(self.sample_rate);
         let g = &mut self.bus_gain[i];
+        if s.is_automated() && audible {
+            let sr = self.sample_rate as f64;
+            let mut target = [0.0; 2];
+            for (k, f) in buf.as_chunks_mut::<2>().0.iter_mut().enumerate() {
+                if k % BLOCK == 0 {
+                    target = bus_gains_at(s, true, Time::from_secs_f64(clock.0 + clock.1 * k as f64 / sr));
+                }
+                for c in 0..2 {
+                    g[c] += (target[c] - g[c]) * a;
+                    f[c] *= g[c];
+                }
+            }
+            if let Some(m) = self.meters.as_mut() {
+                m[i].push(buf);
+            }
+            return;
+        }
+        let target = bus_gains(s, audible);
         if (g[0] - target[0]).abs() < 1e-6 && (g[1] - target[1]).abs() < 1e-6 {
             *g = target;
             if target != [1.0, 1.0] {
@@ -748,9 +809,36 @@ fn bus_gains(s: &BusSettings, audible: bool) -> [f32; 2] {
     if !audible {
         return [0.0; 2];
     }
-    let g = s.gain();
-    let pan = s.pan.clamp(-1.0, 1.0);
+    balance_gains(s.gain(), s.pan)
+}
+
+/// [`bus_gains`] with the automation at timeline time `t`.
+fn bus_gains_at(s: &BusSettings, audible: bool, t: Time) -> [f32; 2] {
+    if !audible {
+        return [0.0; 2];
+    }
+    balance_gains(s.gain_at(t), s.pan_at(t))
+}
+
+fn balance_gains(g: f32, pan: f32) -> [f32; 2] {
+    let pan = pan.clamp(-1.0, 1.0);
     [g * if pan > 0.0 { 1.0 - pan } else { 1.0 }, g * if pan < 0.0 { 1.0 + pan } else { 1.0 }]
+}
+
+/// Which bus a stem render taps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum StemTap {
+    Role(AudioRole),
+    User(u64),
+}
+
+/// The input buffer a clip lands in: its user bus when that exists (and has
+/// a slot), else its role bus.
+fn route<'a>(roles: &'a mut [Vec<f32>; 4], users: &'a mut [Vec<f32>], mix: &MixerSettings, role: AudioRole, user: Option<u64>) -> &'a mut Vec<f32> {
+    match user.and_then(|id| mix.user_bus(id)) {
+        Some((slot, _)) => &mut users[slot - 5],
+        None => &mut roles[BusId::Role(role).index()],
+    }
 }
 
 fn merge_gr(acc: &mut GainReduction, g: GainReduction) {
@@ -920,6 +1008,109 @@ mod tests {
         let residual: f32 = (60_000..130_000).map(|i| (out2[2 * i] - v_only[2 * i]).powi(2)).sum::<f32>() / 70_000.0;
         let residual_rms = residual.sqrt();
         assert!(residual_rms < music_alone * 0.15, "music ducked: {residual_rms} vs {music_alone}");
+    }
+
+    /// Two tones on the timeline: a 2 s Dialogue clip and a 2 s Music clip
+    /// under it (no ducking), and their sources.
+    fn two_roles() -> (Timeline, MediaAsset, MediaAsset) {
+        let mut voice = MediaAsset::new("voice", "/v.wav", Time::from_secs(2));
+        voice.audio = Some(nle_core::AudioStreamInfo { sample_rate: 48_000, channels: 2, codec: "pcm".into() });
+        let mut music = MediaAsset::new("music", "/m.wav", Time::from_secs(2));
+        music.audio = voice.audio.clone();
+        let mut tl = Timeline::default();
+        let mut v = Clip::from_asset(&voice);
+        v.audio.role = AudioRole::Dialogue;
+        tl.append(v).unwrap();
+        let mut m = Clip::from_asset(&music);
+        m.audio.role = AudioRole::Music;
+        m.audio.ducking.enabled = false;
+        tl.connect(m, Time::ZERO, -1).unwrap();
+        (tl, voice, music)
+    }
+
+    fn rms(x: &[f32]) -> f32 {
+        (x.iter().map(|s| s * s).sum::<f32>() / x.len().max(1) as f32).sqrt()
+    }
+
+    #[test]
+    fn bus_fader_automation_is_followed_on_the_timeline_clock() {
+        let (mut tl, voice, music) = two_roles();
+        tl.mixer.music.mute = true;
+        // dialogue: 0 dB for the first second, silence from 1.0 s
+        let s = Time::from_secs_f64;
+        tl.mixer.dialogue.gain_auto.set(s(0.0), 0.0, Time::ZERO);
+        tl.mixer.dialogue.gain_auto.set(s(0.99), 0.0, Time::ZERO);
+        tl.mixer.dialogue.gain_auto.set(s(1.0), -60.0, Time::ZERO);
+        let mut mixer = TimelineMixer::new(48_000);
+        mixer.set_spans(nle_core::audio_spans(&tl));
+        mixer.set_source(voice.id, tone(2.0, 0.3));
+        mixer.set_source(music.id, tone(2.0, 0.3));
+        mixer.set_mixer(&tl.mixer);
+        let mut out = vec![0.0f32; 48_000 * 2 * 2];
+        // rendered in small blocks like playback
+        for (k, chunk) in out.chunks_mut(512).enumerate() {
+            mixer.render(Time::from_samples(k as i64 * 256, 48_000), 1.0, chunk);
+        }
+        assert!(rms(&out[20_000 * 2..40_000 * 2]) > 0.1, "heard before the automation drops");
+        assert!(rms(&out[52_000 * 2..90_000 * 2]) < 1e-4, "silent after it");
+        // bypassed automation: the static fader again
+        tl.mixer.dialogue.auto_off = true;
+        mixer.set_mixer(&tl.mixer);
+        mixer.reset_state();
+        let mut out = vec![0.0f32; 48_000 * 2 * 2];
+        mixer.render(Time::ZERO, 1.0, &mut out);
+        assert!(rms(&out[52_000 * 2..90_000 * 2]) > 0.1);
+    }
+
+    #[test]
+    fn user_bus_processes_its_clips_and_stems_tap_one_bus() {
+        let (mut tl, voice, music) = two_roles();
+        let id = tl.mixer.add_user_bus("Voices", AudioRole::Dialogue).unwrap();
+        tl.mixer.user[0].settings.gain_db = -60.0; // closed fader
+        let clip = tl.spine[0].id;
+        tl.clip_mut(clip).unwrap().audio.bus = Some(id);
+        let mut mixer = TimelineMixer::new(48_000);
+        mixer.set_spans(nle_core::audio_spans(&tl));
+        mixer.set_source(voice.id, sine(2.0, 440.0, 0.3));
+        mixer.set_source(music.id, sine(2.0, 1_000.0, 0.3));
+        mixer.set_mixer(&tl.mixer);
+
+        // music only reaches master: the voice went through the closed user bus
+        mixer.set_stem(Some(StemTap::Role(AudioRole::Dialogue)));
+        let mut dia = vec![0.0f32; 48_000 * 2];
+        mixer.render(Time::ZERO, 1.0, &mut dia);
+        assert!(rms(&dia[4_000..]) < 1e-3, "dialogue stem ~-60 dB: {}", rms(&dia[4_000..]));
+        mixer.set_stem(Some(StemTap::Role(AudioRole::Music)));
+        mixer.reset_state();
+        let mut mus = vec![0.0f32; 48_000 * 2];
+        mixer.render(Time::ZERO, 1.0, &mut mus);
+        assert!(rms(&mus[4_000..]) > 0.15, "music stem: {}", rms(&mus[4_000..]));
+
+        // open the user bus: its stem and the dialogue stem carry the voice
+        tl.mixer.user[0].settings.gain_db = 0.0;
+        mixer.set_mixer(&tl.mixer);
+        for tap in [StemTap::User(id), StemTap::Role(AudioRole::Dialogue)] {
+            mixer.set_stem(Some(tap));
+            mixer.reset_state();
+            let mut buf = vec![0.0f32; 48_000 * 2];
+            mixer.render(Time::ZERO, 1.0, &mut buf);
+            assert!(rms(&buf[4_000..]) > 0.15, "{tap:?}: {}", rms(&buf[4_000..]));
+        }
+        // full mix again
+        mixer.set_stem(None);
+        mixer.reset_state();
+        let mut all = vec![0.0f32; 48_000 * 2];
+        mixer.render(Time::ZERO, 1.0, &mut all);
+        assert!(rms(&all[4_000..]) > rms(&mus[4_000..]) * 1.2);
+
+        // a clip sent to a bus that was deleted falls back to its role bus
+        tl.mixer.user.clear();
+        mixer.set_mixer(&tl.mixer);
+        mixer.set_stem(Some(StemTap::Role(AudioRole::Dialogue)));
+        mixer.reset_state();
+        let mut back = vec![0.0f32; 48_000 * 2];
+        mixer.render(Time::ZERO, 1.0, &mut back);
+        assert!(rms(&back[4_000..]) > 0.15);
     }
 
     #[test]

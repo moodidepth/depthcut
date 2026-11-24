@@ -1,12 +1,15 @@
 //! Fairlight-style audio UI: the 6-band parametric EQ editor (drag the
 //! handles: x = frequency, y = gain, scroll = Q, double-click = reset), the
 //! insert editors (expander/gate, compressor, de-esser, delay, reverb), the
-//! restoration / leveler controls, and the Audio Mixer drawer (Ctrl+8).
+//! restoration / leveler controls, and the Audio Mixer drawer (Ctrl+8) with
+//! user submix busses and fader / balance automation (Read, Touch).
 
 use crate::theme;
 use crate::widgets::slider_f32;
 use eframe::egui::{self, Color32, Stroke};
-use nle_core::{AudioFx, AudioRole, BusId, BusSettings, EqBandType, FilterSlope, GateMode, MixerSettings, ParametricEq, PluginInsert};
+use nle_core::{
+    AudioFx, AudioRole, AutoLane, AutoPoint, BusId, BusSettings, EqBandType, FilterSlope, GateMode, MixerSettings, ParametricEq, PluginInsert, Time, BUS_SLOTS, MAX_USER_BUSSES,
+};
 use nle_media::audio::clap_host::{self, PluginInfo};
 use nle_media::audio::{GainReduction, MeterReading, ParametricEqProc};
 
@@ -372,14 +375,18 @@ fn compressor_curve_plot(ui: &mut egui::Ui, c: &nle_core::CompressorSettings) {
 /// thread only reports raw readings).
 pub struct MixerView {
     pub open: bool,
-    /// Bus whose EQ / inserts are shown next to the strips.
+    /// Mixer slot ([`BUS_SLOTS`]) whose EQ / inserts are shown next to the strips.
     pub selected: Option<usize>,
     /// Displayed per-channel level (dBFS) with a 24 dB/s fall.
-    level: [[f32; 2]; 5],
+    level: [[f32; 2]; BUS_SLOTS],
     /// Peak hold (dBFS, seconds left).
-    hold: [[(f32, f32); 2]; 5],
-    last: [MeterReading; 5],
-    gr: [GainReduction; 5],
+    hold: [[(f32, f32); 2]; BUS_SLOTS],
+    last: [MeterReading; BUS_SLOTS],
+    gr: [GainReduction; BUS_SLOTS],
+    /// Touch write armed per slot.
+    armed: [bool; BUS_SLOTS],
+    /// The touch pass being recorded.
+    touch: Option<Touch>,
     /// CLAP plug-ins found by the last scan (scanned when the add menu first opens).
     clap_found: Option<Vec<PluginInfo>>,
     /// Plug-ins that failed to load in the last scan / browse.
@@ -391,10 +398,12 @@ impl Default for MixerView {
         MixerView {
             open: false,
             selected: None,
-            level: [[-90.0; 2]; 5],
-            hold: [[(-90.0, 0.0); 2]; 5],
-            last: Default::default(),
+            level: [[-90.0; 2]; BUS_SLOTS],
+            hold: [[(-90.0, 0.0); 2]; BUS_SLOTS],
+            last: [MeterReading::default(); BUS_SLOTS],
             gr: Default::default(),
+            armed: [false; BUS_SLOTS],
+            touch: None,
             clap_found: None,
             clap_errors: Vec::new(),
         }
@@ -405,6 +414,157 @@ impl Default for MixerView {
 #[derive(Default)]
 pub struct MixerRequests {
     pub reset_loudness: bool,
+}
+
+/// The timeline clock the automation controls work against.
+#[derive(Clone, Copy)]
+pub struct AutoClock {
+    pub t: Time,
+    pub playing: bool,
+    /// Timeline length (the automation editor's width).
+    pub end: Time,
+}
+
+/// A fader / balance move being written while the timeline plays.
+struct Touch {
+    slot: usize,
+    pan: bool,
+    /// The lane before the pass.
+    base: AutoLane,
+    /// The static value, for a lane that had no points yet.
+    fallback: f32,
+    pass: Vec<AutoPoint>,
+}
+
+impl Touch {
+    /// `base` with the pass written in (thinned for the final commit).
+    fn lane(&self, thin: bool) -> AutoLane {
+        let mut lane = self.base.clone();
+        let pass = if thin { AutoLane::thin(&self.pass, if self.pan { 0.005 } else { 0.1 }) } else { self.pass.clone() };
+        if let (true, Some(a), Some(b)) = (lane.is_empty(), pass.first(), pass.last()) {
+            // a new lane returns to the static value around the pass
+            let glide = Time::from_secs_f64(0.01);
+            lane.set(a.time - glide, self.fallback, Time::ZERO);
+            lane.set(b.time + glide, self.fallback, Time::ZERO);
+        }
+        lane.write_pass(&pass);
+        lane
+    }
+}
+
+fn lane_mut(s: &mut BusSettings, pan: bool) -> &mut AutoLane {
+    if pan {
+        &mut s.pan_auto
+    } else {
+        &mut s.gain_auto
+    }
+}
+
+/// Apply a fader (`pan` = false) or balance move to `v`. Touch-armed while
+/// playing: the move is written as automation at the playhead. On an
+/// automated lane: a key is set at the playhead. Otherwise: the static value.
+#[allow(clippy::too_many_arguments)]
+fn automate(view: &mut MixerView, slot: usize, pan: bool, s: &mut BusSettings, clock: AutoClock, v: f32, changed: bool, held: bool) {
+    if view.armed[slot] && clock.playing && (held || changed) {
+        let fresh = !matches!(&view.touch, Some(t) if t.slot == slot && t.pan == pan);
+        // a loop back to an earlier time starts a new pass on the result so far
+        let looped = matches!(&view.touch, Some(t) if !fresh && t.pass.last().is_some_and(|p| clock.t < p.time));
+        if fresh || looped {
+            let base = if looped { view.touch.as_ref().map(|t| t.lane(true)) } else { None }.unwrap_or_else(|| lane_mut(s, pan).clone());
+            view.touch = Some(Touch { slot, pan, base, fallback: if pan { s.pan } else { s.gain_db }, pass: Vec::new() });
+        }
+        let Some(t) = view.touch.as_mut() else { return };
+        match t.pass.last_mut() {
+            Some(p) if p.time == clock.t => p.value = v,
+            _ => t.pass.push(AutoPoint { time: clock.t, value: v }),
+        }
+        let lane = t.lane(false);
+        s.auto_off = false;
+        *lane_mut(s, pan) = lane;
+        return;
+    }
+    if !changed {
+        return;
+    }
+    let off = s.auto_off;
+    let lane = lane_mut(s, pan);
+    if !off && !lane.is_empty() {
+        lane.set(clock.t, v, Time::from_secs_f64(0.02));
+    } else if pan {
+        s.pan = v;
+    } else {
+        s.gain_db = v;
+    }
+}
+
+/// End a touch pass once the mouse is up or playback stopped.
+fn finish_touch(ui: &egui::Ui, mix: &mut MixerSettings, view: &mut MixerView, clock: AutoClock) {
+    if view.touch.is_none() || (clock.playing && ui.input(|i| i.pointer.any_down())) {
+        return;
+    }
+    let Some(t) = view.touch.take() else { return };
+    if let Some(s) = mix.slot_mut(t.slot) {
+        *lane_mut(s, t.pan) = t.lane(true);
+    }
+}
+
+/// A small editor for one automation lane over `[0, end]`: drag a point
+/// (time and value), double-click to add, right-click to remove.
+fn lane_editor(ui: &mut egui::Ui, lane: &mut AutoLane, range: std::ops::RangeInclusive<f32>, clock: AutoClock, id: egui::Id, fmt: &dyn Fn(f32) -> String) {
+    let w = ui.available_width().clamp(200.0, 420.0);
+    let (r, resp) = ui.allocate_exact_size(egui::vec2(w, 70.0), egui::Sense::click_and_drag());
+    let p = ui.painter_at(r);
+    p.rect_filled(r, egui::CornerRadius::same(2), theme::BG);
+    let end = clock.end.max(lane.points.last().map_or(Time::ZERO, |k| k.time)).max(Time::from_secs(1)).as_secs_f64();
+    let (lo, hi) = (*range.start(), *range.end());
+    let x = |t: Time| r.left() + (t.as_secs_f64() / end).clamp(0.0, 1.0) as f32 * r.width();
+    let y = |v: f32| r.bottom() - ((v - lo) / (hi - lo)).clamp(0.0, 1.0) * r.height();
+    let t_of = |px: f32| Time::from_secs_f64(((px - r.left()) / r.width()).clamp(0.0, 1.0) as f64 * end);
+    let v_of = |py: f32| lo + ((r.bottom() - py) / r.height()).clamp(0.0, 1.0) * (hi - lo);
+    let pts: Vec<egui::Pos2> = lane.points.iter().map(|k| egui::pos2(x(k.time), y(k.value))).collect();
+    if let (Some(a), Some(b)) = (pts.first(), pts.last()) {
+        let mut line = vec![egui::pos2(r.left(), a.y)];
+        line.extend(&pts);
+        line.push(egui::pos2(r.right(), b.y));
+        p.add(egui::Shape::line(line, Stroke::new(1.5_f32, theme::AUDIO)));
+    }
+    for q in &pts {
+        p.circle_filled(*q, 3.0, theme::TEXT);
+    }
+    let px = x(clock.t);
+    p.line_segment([egui::pos2(px, r.top()), egui::pos2(px, r.bottom())], Stroke::new(1.0_f32, theme::PLAYHEAD));
+    let drag_id = id.with("drag");
+    let nearest = |pos: egui::Pos2| pts.iter().enumerate().map(|(i, q)| (i, q.distance(pos))).filter(|(_, d)| *d < 8.0).min_by(|a, b| a.1.total_cmp(&b.1)).map(|(i, _)| i);
+    if let Some(pos) = resp.interact_pointer_pos() {
+        if resp.drag_started() {
+            ui.data_mut(|d| d.insert_temp(drag_id, nearest(pos)));
+        }
+        if resp.dragged() {
+            if let Some(Some(i)) = ui.data(|d| d.get_temp::<Option<usize>>(drag_id)) {
+                if let Some(k) = lane.points.get_mut(i) {
+                    k.time = t_of(pos.x).max(Time::ZERO);
+                    k.value = v_of(pos.y);
+                }
+                // keep the order without losing which point is held
+                let held = lane.points.get(i).copied();
+                lane.points.sort_by_key(|k| k.time);
+                if let Some(h) = held {
+                    let j = lane.points.iter().position(|k| *k == h);
+                    ui.data_mut(|d| d.insert_temp(drag_id, j));
+                }
+            }
+        }
+        if resp.double_clicked() {
+            lane.set(t_of(pos.x), v_of(pos.y), Time::ZERO);
+        }
+        if resp.secondary_clicked() {
+            if let Some(i) = nearest(pos) {
+                lane.points.remove(i);
+            }
+        }
+    }
+    let hover = resp.hover_pos().map(|pos| format!("\n{:.2} s · {}", t_of(pos.x).as_secs_f64(), fmt(v_of(pos.y)))).unwrap_or_default();
+    resp.on_hover_text(format!("Drag a point · double-click to add · right-click to remove{hover}"));
 }
 
 const METER_MIN: f32 = -60.0;
@@ -426,7 +586,7 @@ fn lufs_text(v: Option<f32>) -> String {
 
 impl MixerView {
     /// Fold a fresh reading into the display ballistics.
-    pub fn feed(&mut self, readings: Option<[MeterReading; 5]>, dt: f32) {
+    pub fn feed(&mut self, readings: Option<[MeterReading; BUS_SLOTS]>, dt: f32) {
         let Some(r) = readings else { return };
         for (b, m) in r.iter().enumerate() {
             for c in 0..2 {
@@ -493,33 +653,74 @@ fn meter(ui: &mut egui::Ui, view: &MixerView, b: usize, height: f32) {
     ));
 }
 
-fn strip(ui: &mut egui::Ui, bus: BusId, s: &mut BusSettings, view: &mut MixerView, req: &mut MixerRequests, solo_active: bool) {
-    let b = bus.index();
+/// Which strip is drawn.
+struct StripInfo<'a> {
+    slot: usize,
+    label: &'a str,
+    /// Shown under the name (a user bus's destination).
+    sub: Option<&'a str>,
+    color: Color32,
+    master: bool,
+}
+
+fn strip(ui: &mut egui::Ui, info: StripInfo, s: &mut BusSettings, view: &mut MixerView, req: &mut MixerRequests, solo_active: bool, clock: AutoClock) {
+    let b = info.slot;
     let selected = view.selected == Some(b);
     let frame = egui::Frame::new()
         .fill(if selected { theme::WIDGET } else { theme::PANEL })
-        .stroke(Stroke::new(1.0_f32, if selected { role_color(bus) } else { theme::BORDER }))
+        .stroke(Stroke::new(1.0_f32, if selected { info.color } else { theme::BORDER }))
         .corner_radius(egui::CornerRadius::same(4))
         .inner_margin(egui::Margin::same(4));
     frame.show(ui, |ui| {
         ui.set_width(96.0);
         ui.vertical_centered(|ui| {
-            ui.label(egui::RichText::new(bus.label()).strong().color(role_color(bus)));
-            let dimmed = s.mute || (solo_active && !s.solo && bus != BusId::Master);
-            let h = (ui.available_height() - 132.0).clamp(80.0, 260.0);
+            ui.add(egui::Label::new(egui::RichText::new(info.label).strong().color(info.color)).truncate());
+            if let Some(sub) = info.sub {
+                ui.label(egui::RichText::new(sub).small().color(theme::TEXT_DIM));
+            }
+            let dimmed = s.mute || (solo_active && !s.solo && !info.master);
+            let touching = |view: &MixerView, pan: bool| matches!(&view.touch, Some(t) if t.slot == b && t.pan == pan);
+            let read_gain = (!s.auto_off && !s.gain_auto.is_empty()) || touching(view, false);
+            let read_pan = (!s.auto_off && !s.pan_auto.is_empty()) || touching(view, true);
+            let mut gain = if read_gain { s.gain_db_at(clock.t) } else { s.gain_db };
+            let mut pan = if read_pan { s.pan_at(clock.t) } else { s.pan };
+            let h = (ui.available_height() - 156.0).clamp(80.0, 260.0);
             ui.horizontal(|ui| {
                 ui.add_space(4.0);
                 meter(ui, view, b, h);
                 ui.spacing_mut().slider_width = h;
-                ui.add(egui::Slider::new(&mut s.gain_db, BusSettings::FADER_RANGE).vertical().show_value(false).step_by(0.1))
-                    .on_hover_text(format!("{:+.1} dB (double-click the value below to type)", s.gain_db));
+                let r = ui
+                    .add(egui::Slider::new(&mut gain, BusSettings::FADER_RANGE).vertical().show_value(false).step_by(0.1))
+                    .on_hover_text(format!("{gain:+.1} dB (double-click the value below to type)"));
+                automate(view, b, false, s, clock, gain, r.changed(), r.dragged());
             });
-            ui.add(egui::DragValue::new(&mut s.gain_db).range(BusSettings::FADER_RANGE).speed(0.1).suffix(" dB").max_decimals(1));
+            let r = ui.add(egui::DragValue::new(&mut gain).range(BusSettings::FADER_RANGE).speed(0.1).suffix(" dB").max_decimals(1));
+            automate(view, b, false, s, clock, gain, r.changed(), r.dragged());
             ui.spacing_mut().slider_width = 80.0;
-            ui.add(egui::Slider::new(&mut s.pan, -1.0..=1.0).show_value(false)).on_hover_text(match s.pan {
+            let r = ui.add(egui::Slider::new(&mut pan, -1.0..=1.0).show_value(false)).on_hover_text(match pan {
                 p if p.abs() < 0.005 => "Balance: centre".to_string(),
                 p if p < 0.0 => format!("Balance: L {:.0}", -p * 100.0),
                 p => format!("Balance: R {:.0}", p * 100.0),
+            });
+            automate(view, b, true, s, clock, pan, r.changed(), r.dragged());
+            ui.horizontal(|ui| {
+                let has = !s.gain_auto.is_empty() || !s.pan_auto.is_empty();
+                let read =
+                    egui::Button::new(egui::RichText::new("Read").small().color(if has && !s.auto_off { theme::AUDIO } else { theme::TEXT_DIM })).selected(has && !s.auto_off);
+                let tip = if has {
+                    "Automation: on = the fader and balance follow it, off = the static settings"
+                } else {
+                    "No automation yet: arm Touch and move the fader while playing"
+                };
+                if ui.add_enabled(has, read).on_hover_text(tip).on_disabled_hover_text(tip).clicked() {
+                    s.auto_off = !s.auto_off;
+                }
+                let armed = view.armed[b];
+                let label = if touching(view, false) || touching(view, true) { "● Touch" } else { "Touch" };
+                let w = egui::Button::new(egui::RichText::new(label).small().color(if armed { theme::PLAYHEAD } else { theme::TEXT })).selected(armed);
+                if ui.add(w).on_hover_text("Touch write: while playing, fader and balance moves are recorded; on release they glide back to the existing automation").clicked() {
+                    view.armed[b] = !armed;
+                }
             });
             ui.horizontal(|ui| {
                 let m = egui::Button::new(egui::RichText::new("M").strong().color(if s.mute { theme::BG } else { theme::TEXT })).fill(if s.mute {
@@ -530,7 +731,7 @@ fn strip(ui: &mut egui::Ui, bus: BusId, s: &mut BusSettings, view: &mut MixerVie
                 if ui.add(m).on_hover_text("Mute (applies to export)").clicked() {
                     s.mute = !s.mute;
                 }
-                if bus != BusId::Master {
+                if !info.master {
                     let so = egui::Button::new(egui::RichText::new("S").strong().color(if s.solo { theme::BG } else { theme::TEXT })).fill(if s.solo {
                         theme::SELECTION
                     } else {
@@ -541,8 +742,8 @@ fn strip(ui: &mut egui::Ui, bus: BusId, s: &mut BusSettings, view: &mut MixerVie
                     }
                 }
                 let fx_on = s.eq.is_active() || s.fx.is_active() || s.plugins.iter().any(|p| !p.bypass);
-                let fx = egui::Button::new(egui::RichText::new("FX").color(if fx_on { role_color(bus) } else { theme::TEXT })).selected(selected);
-                if ui.add(fx).on_hover_text("EQ, inserts and CLAP plug-ins for this bus").clicked() {
+                let fx = egui::Button::new(egui::RichText::new("FX").color(if fx_on { info.color } else { theme::TEXT })).selected(selected);
+                if ui.add(fx).on_hover_text("EQ, inserts, CLAP plug-ins and automation for this bus").clicked() {
                     view.selected = if selected { None } else { Some(b) };
                 }
             });
@@ -554,7 +755,7 @@ fn strip(ui: &mut egui::Ui, bus: BusId, s: &mut BusSettings, view: &mut MixerVie
             line(ui, "S", lufs_text(m.short_term));
             line(ui, "I", lufs_text(m.integrated));
             line(ui, "TP", lufs_text(m.true_peak_db));
-            if bus == BusId::Master && ui.small_button("Reset I/TP").on_hover_text("Restart integrated loudness and the true-peak hold on every bus").clicked() {
+            if info.master && ui.small_button("Reset I/TP").on_hover_text("Restart integrated loudness and the true-peak hold on every bus").clicked() {
                 req.reset_loudness = true;
             }
         });
@@ -651,14 +852,25 @@ Untick to bypass",
     }
 }
 
+/// Colour of a mixer slot: a user bus takes its destination's.
+fn slot_color(mix: &MixerSettings, slot: usize) -> Color32 {
+    match slot {
+        0..5 => role_color(BusId::ALL[slot]),
+        _ => mix.user.get(slot - 5).map_or(theme::TEXT, |u| role_color(BusId::Role(u.feeds)).gamma_multiply(0.8)),
+    }
+}
+
 /// The mixer drawer contents. Edits `mix` in place.
-pub fn mixer_panel(ui: &mut egui::Ui, mix: &mut MixerSettings, view: &mut MixerView) -> MixerRequests {
+pub fn mixer_panel(ui: &mut egui::Ui, mix: &mut MixerSettings, view: &mut MixerView, clock: AutoClock) -> MixerRequests {
     let mut req = MixerRequests::default();
     let solo_active = mix.any_solo();
+    if view.selected.is_some_and(|b| mix.slot(b).is_none()) {
+        view.selected = None;
+    }
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new("Audio Mixer").strong());
         ui.label(
-            egui::RichText::new("Clips route to their role's bus → Master (−1 dBFS limiter). Loudness per EBU R128; meters follow what the speakers play.")
+            egui::RichText::new("Clips route to their bus (Inspector → Audio) → role bus → Master (−1 dBFS limiter). Loudness per EBU R128; meters follow what the speakers play.")
                 .small()
                 .color(theme::TEXT_DIM),
         );
@@ -669,23 +881,100 @@ pub fn mixer_panel(ui: &mut egui::Ui, mix: &mut MixerSettings, view: &mut MixerV
     ui.horizontal_top(|ui| {
         egui::ScrollArea::horizontal().id_salt("mixer-strips").auto_shrink([true, false]).show(ui, |ui| {
             ui.horizontal_top(|ui| {
-                for bus in BusId::ALL {
-                    strip(ui, bus, mix.bus_mut(bus), view, &mut req, solo_active);
+                for bus in &BusId::ALL[..4] {
+                    let info = StripInfo { slot: bus.index(), label: bus.label(), sub: None, color: role_color(*bus), master: false };
+                    strip(ui, info, mix.bus_mut(*bus), view, &mut req, solo_active, clock);
                 }
+                for u in 0..mix.user.len().min(MAX_USER_BUSSES) {
+                    let color = slot_color(mix, 5 + u);
+                    let ub = &mut mix.user[u];
+                    let (name, sub) = (ub.name.clone(), format!("→ {}", BusId::Role(ub.feeds).label()));
+                    let info = StripInfo { slot: 5 + u, label: &name, sub: Some(&sub), color, master: false };
+                    strip(ui, info, &mut ub.settings, view, &mut req, solo_active, clock);
+                }
+                if mix.user.len() < MAX_USER_BUSSES {
+                    ui.menu_button("+ Bus", |ui| {
+                        ui.label(egui::RichText::new("A submix bus feeding…").small().color(theme::TEXT_DIM));
+                        for role in AudioRole::ALL {
+                            if ui.button(BusId::Role(role).label()).clicked() {
+                                let n = mix.user.len() + 1;
+                                if mix.add_user_bus(format!("Bus {n}"), role).is_some() {
+                                    view.selected = Some(4 + mix.user.len());
+                                }
+                                ui.close_menu();
+                            }
+                        }
+                    })
+                    .response
+                    .on_hover_text("Add a submix bus: route clips to it in Inspector → Audio, process them together, then it feeds a role bus");
+                }
+                let info = StripInfo { slot: 4, label: BusId::Master.label(), sub: None, color: role_color(BusId::Master), master: true };
+                strip(ui, info, mix.bus_mut(BusId::Master), view, &mut req, solo_active, clock);
             });
         });
         if let Some(b) = view.selected {
-            let bus = BusId::ALL[b];
             ui.separator();
             egui::ScrollArea::vertical().id_salt("mixer-inserts").auto_shrink([false, false]).show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(format!("{} bus", bus.label())).strong().color(role_color(bus)));
-                    if ui.small_button("Reset bus").clicked() {
-                        *mix.bus_mut(bus) = BusSettings::default();
+                let color = slot_color(mix, b);
+                let mut delete = false;
+                if b < 5 {
+                    let bus = BusId::ALL[b];
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(format!("{} bus", bus.label())).strong().color(color));
+                        if ui.small_button("Reset bus").clicked() {
+                            *mix.bus_mut(bus) = BusSettings::default();
+                        }
+                    });
+                } else if let Some(ub) = mix.user.get_mut(b - 5) {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::TextEdit::singleline(&mut ub.name).desired_width(120.0).text_color(color));
+                        egui::ComboBox::from_id_salt(("bus-feeds", ub.id)).selected_text(format!("→ {}", BusId::Role(ub.feeds).label())).show_ui(ui, |ui| {
+                            for role in AudioRole::ALL {
+                                ui.selectable_value(&mut ub.feeds, role, BusId::Role(role).label());
+                            }
+                        });
+                        if ui.small_button("Reset").clicked() {
+                            ub.settings = BusSettings::default();
+                        }
+                        delete = ui.small_button("Delete bus").on_hover_text("Clips sent here go back to their role bus").clicked();
+                    });
+                }
+                if delete {
+                    mix.user.remove(b - 5);
+                    // the strips after it moved down one slot
+                    for k in b..BUS_SLOTS {
+                        view.armed[k] = view.armed.get(k + 1).copied().unwrap_or(false);
                     }
-                });
+                    view.touch = None;
+                    view.selected = None;
+                    return;
+                }
                 let gr = view.gr[b];
-                let s = mix.bus_mut(bus);
+                let Some(s) = mix.slot_mut(b) else { return };
+                let n = s.gain_auto.points.len() + s.pan_auto.points.len();
+                egui::CollapsingHeader::new(if n == 0 { "Automation".to_string() } else { format!("Automation ({n} points)") }).id_salt(("bus-auto", b)).default_open(n > 0).show(
+                    ui,
+                    |ui| {
+                        ui.label(egui::RichText::new("Fader").small());
+                        lane_editor(ui, &mut s.gain_auto, -60.0..=12.0, clock, egui::Id::new(("lane-gain", b)), &|v| format!("{v:+.1} dB"));
+                        ui.label(egui::RichText::new("Balance").small());
+                        lane_editor(ui, &mut s.pan_auto, -1.0..=1.0, clock, egui::Id::new(("lane-pan", b)), &|v| format!("{v:+.2}"));
+                        ui.horizontal(|ui| {
+                            if ui.small_button("Key at playhead").on_hover_text("Add the current fader and balance as points at the playhead").clicked() {
+                                let (g, p) = (s.gain_db_at(clock.t), s.pan_at(clock.t));
+                                s.gain_auto.set(clock.t, g, Time::from_secs_f64(0.02));
+                                s.pan_auto.set(clock.t, p, Time::from_secs_f64(0.02));
+                                s.auto_off = false;
+                            }
+                            if ui.add_enabled(!s.gain_auto.is_empty(), egui::Button::new("Clear fader").small()).clicked() {
+                                s.gain_auto = AutoLane::default();
+                            }
+                            if ui.add_enabled(!s.pan_auto.is_empty(), egui::Button::new("Clear balance").small()).clicked() {
+                                s.pan_auto = AutoLane::default();
+                            }
+                        });
+                    },
+                );
                 ui.collapsing("EQ", |ui| eq_editor(ui, &mut s.eq, egui::Id::new(("bus-eq", b))));
                 ui.collapsing("Inserts", |ui| fx_editor(ui, &mut s.fx, egui::Id::new(("bus-fx", b)), Some(gr)));
                 let n = s.plugins.len();
@@ -696,5 +985,6 @@ pub fn mixer_panel(ui: &mut egui::Ui, mix: &mut MixerSettings, view: &mut MixerV
             });
         }
     });
+    finish_touch(ui, mix, view, clock);
     req
 }

@@ -12,6 +12,7 @@ pub mod meter;
 pub mod mixer;
 pub mod output;
 pub mod preview;
+pub mod record;
 pub mod resample;
 pub mod restore;
 pub mod vocal;
@@ -21,7 +22,7 @@ pub use ducking::{duck_curve, DuckCurve, DuckEnvelope, Ducker, EnvelopeFollower,
 pub use eq::ParametricEqProc;
 pub use fx::{FxChain, GainReduction, Leveler};
 pub use meter::{LoudnessMeter, MeterReading};
-pub use mixer::{dialogue_envelope, dialogue_spans, mixdown, needs_duck_envelope, restore_all, restore_requests, to_mono_16k, TimelineMixer};
+pub use mixer::{dialogue_envelope, dialogue_spans, mixdown, needs_duck_envelope, restore_all, restore_requests, to_mono_16k, StemTap, TimelineMixer};
 pub use output::{preview_gain, preview_gain_db, AudioEngine, PREVIEW_VOLUME_MAX};
 pub use preview::AudioPreview;
 pub use resample::{to_internal, INTERNAL_RATE};

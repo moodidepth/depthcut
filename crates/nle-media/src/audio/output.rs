@@ -156,7 +156,7 @@ impl AudioEngine {
     /// Per-bus meters ([`nle_core::BusId::ALL`] order), in step with what is
     /// audible: during playback each block's reading is held back until
     /// that block reaches the speakers.
-    pub fn meters(&self) -> Option<[MeterReading; 5]> {
+    pub fn meters(&self) -> Option<[MeterReading; nle_core::BUS_SLOTS]> {
         let playing = self.shared.transport.lock().playing;
         if !playing || !self.has_device() {
             self.shared.meter_delay.lock().clear();
@@ -292,9 +292,9 @@ impl Shared {
 #[derive(Default)]
 struct MeterDelay {
     /// (frames produced at the block's end, its reading), oldest first.
-    queue: std::collections::VecDeque<(u64, [MeterReading; 5])>,
+    queue: std::collections::VecDeque<(u64, [MeterReading; nle_core::BUS_SLOTS])>,
     /// Latest released reading: loudness values stay up between releases.
-    last: Option<[MeterReading; 5]>,
+    last: Option<[MeterReading; nle_core::BUS_SLOTS]>,
 }
 
 impl MeterDelay {
@@ -305,7 +305,7 @@ impl MeterDelay {
         self.queue.clear();
     }
 
-    fn push(&mut self, end_frame: u64, r: [MeterReading; 5]) {
+    fn push(&mut self, end_frame: u64, r: [MeterReading; nle_core::BUS_SLOTS]) {
         if self.queue.len() >= Self::MAX_QUEUED {
             self.queue.pop_front();
         }
@@ -314,8 +314,8 @@ impl MeterDelay {
 
     /// Merge every block audible by `audible` frames: max peaks and gain
     /// reduction, newest loudness. Nothing new: last loudness, zero peaks.
-    fn take_until(&mut self, audible: u64) -> Option<[MeterReading; 5]> {
-        let mut out: Option<[MeterReading; 5]> = None;
+    fn take_until(&mut self, audible: u64) -> Option<[MeterReading; nle_core::BUS_SLOTS]> {
+        let mut out: Option<[MeterReading; nle_core::BUS_SLOTS]> = None;
         while self.queue.front().is_some_and(|(end, _)| *end <= audible) {
             let (_, r) = self.queue.pop_front().expect("front checked");
             out = Some(match out {
@@ -365,7 +365,7 @@ mod clock_tests {
     #[test]
     fn meters_wait_until_their_block_is_audible() {
         let reading = |peak: f32, m: f32| {
-            let mut r = [MeterReading::default(); 5];
+            let mut r = [MeterReading::default(); nle_core::BUS_SLOTS];
             r[4].peak = [peak, peak / 2.0];
             r[4].momentary = Some(m);
             r

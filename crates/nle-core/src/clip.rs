@@ -567,6 +567,10 @@ pub struct AudioParams {
     /// Audio Crossfade on the cut after this clip (a fade-out without a neighbour).
     #[serde(default, skip_serializing_if = "time_is_zero")]
     pub crossfade_out: Time,
+    /// User bus ([`crate::audio_fx::UserBus::id`]) this clip is sent to
+    /// instead of straight to its role bus. Gone / `None` = the role bus.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bus: Option<u64>,
 }
 
 fn default_lowpass_hz() -> Param {
@@ -610,6 +614,7 @@ impl Default for AudioParams {
             leveler: Default::default(),
             crossfade_in: Time::ZERO,
             crossfade_out: Time::ZERO,
+            bus: None,
         }
     }
 }
