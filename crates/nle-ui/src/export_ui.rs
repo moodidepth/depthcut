@@ -69,6 +69,10 @@ pub struct ExportDialog {
     ten_bit: bool,
     /// Transparent background for ProRes 4444 / PNG / TIFF / EXR.
     alpha: bool,
+    /// 0 = SDR (Rec.709), 1 = HDR10 (PQ), 2 = HLG.
+    hdr: u8,
+    /// Mastering peak for HDR10, in nits.
+    hdr_peak: f32,
     queue: Vec<Queued>,
     /// Working through `queue`.
     queue_running: bool,
@@ -160,6 +164,8 @@ impl Default for ExportDialog {
             job: None,
             last_result: None,
             ten_bit: false,
+            hdr: 0,
+            hdr_peak: 1000.0,
             alpha: false,
             queue: Vec::new(),
             queue_running: false,
@@ -342,6 +348,28 @@ impl ExportDialog {
                         }
                     });
                     ui.end_row();
+                }
+                if chosen.supports_hdr() {
+                    ui.label("Dynamic range");
+                    ui.horizontal(|ui| {
+                        let names = ["SDR (Rec.709)", "HDR10 (PQ)", "HLG"];
+                        egui::ComboBox::from_id_salt("rcp-export-hdr").selected_text(names[self.hdr as usize % 3]).show_ui(ui, |ui| {
+                            for (i, n) in names.iter().enumerate() {
+                                ui.selectable_value(&mut self.hdr, i as u8, *n);
+                            }
+                        });
+                        if self.hdr == 1 {
+                            ui.add(egui::DragValue::new(&mut self.hdr_peak).range(400.0..=10_000.0).speed(10.0).suffix(" nits"))
+                                .on_hover_text("Mastering peak: highlights are kept up to this brightness and it is written as HDR10 metadata (x265)");
+                        }
+                    })
+                    .response
+                    .on_hover_text("BT.2020 output with SDR white at 203 nits; highlights above white are kept instead of rolled off. The viewer still shows SDR.");
+                    ui.end_row();
+                    if self.hdr != 0 && chosen.supports_ten_bit() && !self.ten_bit {
+                        // HEVC / AV1 carry HDR only in 10 bits
+                        self.ten_bit = true;
+                    }
                 }
                 ui.label("Encoder");
                 ui.label(egui::RichText::new(self.preset.map(|p| p.encoder()).unwrap_or("-")).monospace().color(theme::TEXT_DIM));
@@ -582,6 +610,11 @@ impl ExportDialog {
         }
         settings.ten_bit = self.ten_bit;
         settings.alpha = self.alpha;
+        settings.hdr = match self.hdr {
+            1 => nle_render::HdrOutput::Pq { peak_nits: self.hdr_peak },
+            2 => nle_render::HdrOutput::Hlg,
+            _ => nle_render::HdrOutput::Sdr,
+        };
         let mut project = project.clone();
         if !self.burn_captions {
             project.timeline.captions.enabled = false;

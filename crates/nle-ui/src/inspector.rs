@@ -79,9 +79,16 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let mut motion_action = None;
     let motion_ui = &mut app.motion;
     let color_view = &mut app.color_view;
+    let stills = &app.project.stills;
+    let grade_ui = &mut app.grade;
+    let mut gallery_action = None;
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match app.inspector_tab {
         InspectorTab::Video => video_tab(ui, &mut c, local, frame, layer, &mut retime_action, &mut toggle_reframe_916, &mut app.punch, &mut punch_request, color_view),
-        InspectorTab::Color => color_tab(ui, &mut c, local, frame, detected_space, color_view),
+        InspectorTab::Color => {
+            color_tab(ui, &mut c, local, frame, detected_space, color_view);
+            ui.add_space(6.0);
+            gallery_action = crate::grade_ui::gallery(ui, stills, grade_ui);
+        }
         InspectorTab::Audio => audio_tab(
             ui,
             &mut c,
@@ -124,6 +131,14 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     }
     if !ui.ctx().input(|i| i.pointer.any_down()) && !ui.ctx().wants_keyboard_input() {
         app.history.seal();
+    }
+    if let Some(a) = gallery_action {
+        app.gallery_action(a);
+    }
+    if let Some(lt) = app.color_view.seek_local.take() {
+        if let Some(start) = app.project.timeline.clip_start(id) {
+            app.seek(start + lt);
+        }
     }
     match retime_action {
         Some(RetimeAction::Preset(s)) => app.retime_preset(s),
@@ -774,7 +789,7 @@ fn color_tab(ui: &mut egui::Ui, c: &mut Clip, t: Time, f: Time, detected: Option
                 slider_f32(ui, "Mix", &mut l.intensity, 0.0..=1.0, "");
             }
         });
-        corrections(ui, col, view);
+        corrections(ui, col, view, t, f);
     });
 }
 

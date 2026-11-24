@@ -157,7 +157,7 @@ pub struct Preview {
 
 /// FrameSource used by the interactive preview: frames are uploaded from the
 /// decode workers as they arrive, so the renderer never blocks here.
-struct NoBlock<'a>(&'a Project);
+pub(crate) struct NoBlock<'a>(pub(crate) &'a Project);
 
 impl FrameSource for NoBlock<'_> {
     fn frame_rate(&self, asset: AssetId) -> nle_core::FrameRate {
@@ -257,6 +257,8 @@ pub struct App {
     pub source: crate::source::SourceView,
     /// Angle viewer and the New Multicam Clip window.
     pub multicam: crate::multicam_ui::MulticamUi,
+    /// Copy / paste grade, Paste Attributes and the stills gallery.
+    pub grade: crate::grade_ui::GradeUi,
     /// Source clip whose audio the engine is set up to play (None = timeline).
     audio_source: Option<AssetId>,
     /// Relink search / consolidate copy in progress.
@@ -268,7 +270,7 @@ pub struct App {
     #[cfg(windows)]
     ctrl_v_was_down: bool,
     /// Clips on the editor's own clipboard.
-    copied: Vec<nle_core::edit_ops::CopiedClip>,
+    pub(crate) copied: Vec<nle_core::edit_ops::CopiedClip>,
 }
 
 static COALESCE: AtomicU64 = AtomicU64::new(1);
@@ -400,6 +402,7 @@ impl App {
             timeline_rename: None,
             source: Default::default(),
             multicam: Default::default(),
+            grade: Default::default(),
             audio_source: None,
             media_job: None,
             pending_switch: None,
@@ -1305,7 +1308,7 @@ impl App {
         self.exec_selecting_copies(Command::Duplicate { ids: self.selection.clone() }, count);
     }
 
-    fn action_targets(&self) -> Vec<ClipId> {
+    pub(crate) fn action_targets(&self) -> Vec<ClipId> {
         if self.selection.is_empty() {
             self.target_clip().into_iter().collect()
         } else {
@@ -1875,7 +1878,7 @@ impl App {
         };
         let key = (self.history.revision(), t, self.viewer.wipe, proxy, src, highlight, grid);
         if p.last != Some(key) || p.pending_uploads {
-            let opts = RenderOptions { wipe: self.viewer.wipe, color: true, highlight, transparent: false };
+            let opts = RenderOptions { wipe: self.viewer.wipe, highlight, ..Default::default() };
             p.renderer.render(&comp, &mut NoBlock(&self.project), opts);
             p.last = Some(key);
             p.pending_uploads = false;
@@ -2263,6 +2266,12 @@ impl App {
             Action::SyncClipsAudio => self.sync_selected(false),
             Action::SyncClipsTimecode => self.sync_selected(true),
             Action::NewMulticamClip => self.open_new_multicam(),
+            Action::CopyGrade => self.copy_grade(),
+            Action::PasteGrade => self.paste_grade(),
+            Action::PasteAttributes => self.open_paste_attributes(),
+            Action::GradeFromPrevious => self.grade_from_previous(),
+            Action::GrabStill => self.grab_still(),
+            Action::ToggleStillCompare => self.toggle_still_compare(),
             Action::ToggleAngleViewer => self.toggle_angle_viewer(),
             Action::SwitchAngle1 => self.switch_angle(0, true),
             Action::SwitchAngle2 => self.switch_angle(1, true),
@@ -2435,6 +2444,7 @@ impl App {
                     ("Cut", Action::Cut, selected),
                     ("Copy", Action::Copy, selected),
                     ("Paste at Playhead", Action::Paste, self.can_paste()),
+                    ("Paste Attributes\u{2026}", Action::PasteAttributes, self.can_paste() && selected),
                     ("Duplicate", Action::Duplicate, selected),
                 ] {
                     if ui.add_enabled(enabled, egui::Button::new(self.menu_label(label, action))).clicked() {
@@ -2591,6 +2601,34 @@ impl App {
                     }
                 });
                 ui.menu_button("Retime", |ui| self.retime_menu(ui));
+            });
+            ui.menu_button("Color", |ui| {
+                let copied = self.grade.copied.is_some();
+                let still = !self.project.stills.is_empty();
+                for (label, action, enabled) in [
+                    ("Copy Grade", Action::CopyGrade, true),
+                    ("Paste Grade", Action::PasteGrade, copied),
+                    ("Paste Attributes\u{2026}", Action::PasteAttributes, self.can_paste()),
+                    ("Apply Grade from Previous Clip", Action::GradeFromPrevious, true),
+                    ("Grab Still", Action::GrabStill, self.preview.is_some()),
+                    ("Compare with Still in Viewer", Action::ToggleStillCompare, still),
+                ] {
+                    if ui.add_enabled(enabled, egui::Button::new(self.menu_label(label, action))).clicked() {
+                        self.dispatch_action(action);
+                        ui.close_menu();
+                    }
+                }
+                if still {
+                    ui.menu_button("Shot Match to Still", |ui| {
+                        let stills: Vec<(u64, String)> = self.project.stills.iter().rev().map(|s| (s.id, s.name.clone())).collect();
+                        for (id, name) in stills {
+                            if ui.button(name).clicked() {
+                                self.match_to_still(id);
+                                ui.close_menu();
+                            }
+                        }
+                    });
+                }
             });
             ui.menu_button("Markers", |ui| {
                 if ui.button(self.menu_label("Add Marker", Action::AddMarker)).clicked() {
@@ -3066,6 +3104,7 @@ impl eframe::App for App {
         crate::about_ui::show(&mut self.about, ctx);
         self.marker_edit_window(ctx);
         self.multicam_window(ctx);
+        self.paste_attributes_window(ctx);
         self.recovery_window(ctx);
         self.crash_notice(ctx);
         // closing the window with unsaved changes asks first

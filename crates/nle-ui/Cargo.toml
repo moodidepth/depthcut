@@ -34,6 +34,8 @@ rfd.workspace = true
 rayon.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# gallery stills (already in the tree through eframe / image)
+png = "0.18"
 
 [target.'cfg(windows)'.dependencies]
 # Ctrl+V reaches egui only as a paste event (and not at all when the clipboard

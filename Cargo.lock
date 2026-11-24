@@ -2759,6 +2759,7 @@ dependencies = [
  "nle-media",
  "nle-render",
  "parking_lot",
+ "png",
  "rayon",
  "rfd",
  "serde",

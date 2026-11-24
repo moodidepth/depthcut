@@ -138,7 +138,10 @@ mod tests {
         assert_eq!(frame(CTRL, vec![Event::Cut]), [Action::Cut]);
         assert_eq!(pasting(CTRL, vec![], true), [Action::Paste]);
         assert_eq!(pasting(SHIFT, vec![], true), [Action::Paste]); // Shift+Insert
-        assert!(pasting(CTRL_SHIFT, vec![], true).is_empty());
+        assert_eq!(pasting(CTRL_SHIFT, vec![], true), [Action::PasteAttributes]);
+        const CTRL_ALT: Modifiers = Modifiers { alt: true, ctrl: true, shift: false, mac_cmd: false, command: true };
+        assert_eq!(frame(CTRL_ALT, vec![Event::Copy]), [Action::CopyGrade]);
+        assert_eq!(pasting(CTRL_ALT, vec![], true), [Action::PasteGrade]);
     }
 
     #[test]

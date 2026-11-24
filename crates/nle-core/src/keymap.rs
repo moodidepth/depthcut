@@ -146,6 +146,12 @@ actions! {
     SwitchAngle7 => "Cut and Switch to Angle 7", "Multicam";
     SwitchAngle8 => "Cut and Switch to Angle 8", "Multicam";
     SwitchAngle9 => "Cut and Switch to Angle 9", "Multicam";
+    CopyGrade => "Copy Grade", "Color";
+    PasteGrade => "Paste Grade", "Color";
+    PasteAttributes => "Paste Attributes...", "Color";
+    GradeFromPrevious => "Apply Grade from Previous Clip", "Color";
+    GrabStill => "Grab Still", "Color";
+    ToggleStillCompare => "Compare with Still in Viewer", "Color";
 }
 
 macro_rules! keys {
@@ -231,6 +237,9 @@ impl KeyBinding {
     }
     pub const fn ctrl_shift(key: KeyCode) -> Self {
         KeyBinding { mods: Modifiers { ctrl: true, shift: true, alt: false }, key: Some(key), mouse: None }
+    }
+    pub const fn ctrl_alt(key: KeyCode) -> Self {
+        KeyBinding { mods: Modifiers { ctrl: true, shift: false, alt: true }, key: Some(key), mouse: None }
     }
     pub const fn shift_alt(key: KeyCode) -> Self {
         KeyBinding { mods: Modifiers { ctrl: false, shift: true, alt: true }, key: Some(key), mouse: None }
@@ -490,6 +499,12 @@ impl ActionMap {
                 (SwitchAngle7, &[B::key(K::Num7)]),
                 (SwitchAngle8, &[B::key(K::Num8)]),
                 (SwitchAngle9, &[B::key(K::Num9)]),
+                (CopyGrade, &[B::ctrl_alt(K::C)]),
+                (PasteGrade, &[B::ctrl_alt(K::V)]),
+                (PasteAttributes, &[B::ctrl_shift(K::V)]),
+                (GradeFromPrevious, &[B::ctrl_alt(K::P)]),
+                (GrabStill, &[B::ctrl_alt(K::G)]),
+                (ToggleStillCompare, &[B::ctrl_alt(K::W)]),
             ],
         )
     }
@@ -607,6 +622,12 @@ impl ActionMap {
                 (SwitchAngle7, &[B::key(K::Num7)]),
                 (SwitchAngle8, &[B::key(K::Num8)]),
                 (SwitchAngle9, &[B::key(K::Num9)]),
+                (CopyGrade, &[B::ctrl_alt(K::C)]),
+                (PasteGrade, &[B::ctrl_alt(K::V)]),
+                (PasteAttributes, &[B::ctrl_shift(K::V)]),
+                (GradeFromPrevious, &[B::ctrl_alt(K::P)]),
+                (GrabStill, &[B::ctrl_alt(K::G)]),
+                (ToggleStillCompare, &[B::ctrl_alt(K::W)]),
             ],
         )
     }
@@ -724,6 +745,12 @@ impl ActionMap {
                 (SwitchAngle7, &[B::key(K::Num7)]),
                 (SwitchAngle8, &[B::key(K::Num8)]),
                 (SwitchAngle9, &[B::key(K::Num9)]),
+                (CopyGrade, &[B::ctrl_alt(K::C)]),
+                (PasteGrade, &[B::ctrl_alt(K::V)]),
+                (PasteAttributes, &[B::ctrl_shift(K::V)]),
+                (GradeFromPrevious, &[B::ctrl_alt(K::P)]),
+                (GrabStill, &[B::ctrl_alt(K::G)]),
+                (ToggleStillCompare, &[B::ctrl_alt(K::W)]),
             ],
         )
     }

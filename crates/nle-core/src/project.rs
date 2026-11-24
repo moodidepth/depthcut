@@ -7,6 +7,7 @@
 //! at `active_timeline`.
 
 use crate::asset::MediaAsset;
+use crate::clip::ColorParams;
 use crate::ids::{AssetId, ClipId};
 use crate::library::Library;
 use crate::time::Time;
@@ -31,6 +32,39 @@ pub struct Project {
     /// Bins and smart collections.
     #[serde(default, skip_serializing_if = "Library::is_empty")]
     pub library: Library,
+    /// The colour page's gallery: grabbed stills and their grades.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stills: Vec<Still>,
+}
+
+/// A gallery still: a frame grabbed from the viewer and the grade of the clip
+/// it came from. The image itself lives in [`Still::file_name`] under the
+/// app's data folder, so a project moved to another machine keeps its grades
+/// but shows no thumbnails until stills are grabbed again.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Still {
+    pub id: u64,
+    pub name: String,
+    /// The grade of the clip under the playhead when it was grabbed.
+    pub grade: ColorParams,
+    /// That clip's duration (for stretching keyframed grades onto others).
+    pub clip_duration: Time,
+    /// Timeline timecode it was grabbed at, for the label.
+    #[serde(default)]
+    pub timecode: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl Still {
+    pub fn new(name: impl Into<String>, grade: ColorParams, clip_duration: Time, timecode: String, width: u32, height: u32) -> Still {
+        Still { id: crate::color::new_node_id(), name: name.into(), grade, clip_duration, timecode, width, height }
+    }
+
+    /// The PNG's file name (in the stills folder).
+    pub fn file_name(&self) -> String {
+        format!("{:016x}.png", self.id)
+    }
 }
 
 impl Default for Project {
@@ -50,6 +84,7 @@ impl Project {
             timelines: Vec::new(),
             active_timeline: 0,
             library: Library::default(),
+            stills: Vec::new(),
         }
     }
 

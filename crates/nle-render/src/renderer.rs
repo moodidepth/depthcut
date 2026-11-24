@@ -54,6 +54,49 @@ pub struct RenderOptions {
     /// Start from transparent black instead of opaque black, so the result
     /// carries the layers' coverage in alpha (ProRes 4444 / PNG exports).
     pub transparent: bool,
+    /// HDR output for 10/16-bit exports: the grade keeps highlights up to
+    /// this transfer's headroom and the packers encode PQ / HLG.
+    pub hdr: HdrOutput,
+}
+
+/// The transfer an export is mastered in.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum HdrOutput {
+    /// BT.709 SDR.
+    #[default]
+    Sdr,
+    /// HDR10: BT.2020, SMPTE ST 2084, graded up to `peak_nits`.
+    Pq { peak_nits: f32 },
+    /// HLG (ARIB STD-B67), BT.2020; nominal 1000-nit display.
+    Hlg,
+}
+
+impl HdrOutput {
+    /// SDR reference white for HDR (ITU-R BT.2408).
+    pub const REFERENCE_WHITE_NITS: f32 = 203.0;
+
+    pub fn is_hdr(self) -> bool {
+        self != HdrOutput::Sdr
+    }
+
+    /// Highest working value kept (1.0 = SDR reference white).
+    pub fn headroom(self) -> f32 {
+        match self {
+            HdrOutput::Sdr => 1.0,
+            HdrOutput::Pq { peak_nits } => (peak_nits / Self::REFERENCE_WHITE_NITS).max(1.0),
+            // HLG signal 1.0 over the 75 % reference white
+            HdrOutput::Hlg => 1.0 / 0.264_962_56,
+        }
+    }
+
+    /// `pack.wgsl` flag bits.
+    pub(crate) fn pack_flags(self) -> u32 {
+        match self {
+            HdrOutput::Sdr => 0,
+            HdrOutput::Pq { .. } => 4,
+            HdrOutput::Hlg => 8,
+        }
+    }
 }
 
 /// Pixel layout [`Renderer::render_packed`] reads back for the encoder.
@@ -99,7 +142,7 @@ pub struct Highlight {
 
 impl Default for RenderOptions {
     fn default() -> Self {
-        RenderOptions { wipe: None, color: true, highlight: None, transparent: false }
+        RenderOptions { wipe: None, color: true, highlight: None, transparent: false, hdr: HdrOutput::Sdr }
     }
 }
 
@@ -274,7 +317,8 @@ struct GradeU {
     in_lut_size: f32,
     tonemap: u32,
     brightness: f32,
-    _pad: [f32; 3],
+    headroom: f32,
+    _pad: [f32; 2],
 }
 
 /// `Mask` in mask_common.wgsl.
@@ -1089,9 +1133,9 @@ impl Renderer {
         let hl = opts.highlight.filter(|h| h.clip == clip);
         let run: Vec<&ColorCorrection> = c.nodes.iter().filter(|n| !n.is_identity() || hl.is_some_and(|h| h.node == n.id)).collect();
         if run.is_empty() {
-            return self.grade(enc, src, size, c, opts.wipe);
+            return self.grade(enc, src, size, c, opts.wipe, opts.hdr.headroom());
         }
-        let mut cur = self.grade(enc, src, size, c, None);
+        let mut cur = self.grade(enc, src, size, c, None, opts.hdr.headroom());
         for n in run {
             let mode = match hl {
                 Some(h) if h.node == n.id => 1 + h.matte as u32,
@@ -1181,7 +1225,7 @@ impl Renderer {
         out
     }
 
-    fn grade(&mut self, enc: &mut wgpu::CommandEncoder, src: &wgpu::TextureView, size: (u32, u32), c: &ResolvedColor, wipe: Option<f32>) -> Target {
+    fn grade(&mut self, enc: &mut wgpu::CommandEncoder, src: &wgpu::TextureView, size: (u32, u32), c: &ResolvedColor, wipe: Option<f32>, headroom: f32) -> Target {
         let out = self.pool.get(&self.gpu.device, size.0, size.1);
         let (lut, mix) = match &c.lut {
             Some(l) if l.intensity > 0.0 => (self.lut(&l.path), l.intensity),
@@ -1209,7 +1253,8 @@ impl Renderer {
             in_lut_size: in_lut.as_ref().map_or(0.0, |l| l.size as f32),
             tonemap: (in_lut.is_none() && c.input_space.is_scene_or_hdr()) as u32,
             brightness: c.brightness,
-            _pad: [0.0; 3],
+            headroom,
+            _pad: [0.0; 2],
         });
         let in_view = &in_lut.as_ref().unwrap_or(&self.identity_lut).view;
         self.dispatch(
@@ -2220,8 +2265,8 @@ impl Renderer {
         let out = self.render_comp(&mut enc, comp, src, opts, 0);
         let (pipe, flags, groups) = match fmt {
             PackFormat::Nv12 => (&self.p.nv12, 0, ((w / 4).div_ceil(8), (h / 2).div_ceil(8))),
-            PackFormat::P010 => (&self.p.pack_p010, 0, ((w / 2).div_ceil(8), (h / 2).div_ceil(8))),
-            PackFormat::Rgba64 { alpha, linear } => (&self.p.pack_rgba64, linear as u32 | (alpha as u32) << 1, (w.div_ceil(8), h.div_ceil(8))),
+            PackFormat::P010 => (&self.p.pack_p010, opts.hdr.pack_flags(), ((w / 2).div_ceil(8), (h / 2).div_ceil(8))),
+            PackFormat::Rgba64 { alpha, linear } => (&self.p.pack_rgba64, linear as u32 | (alpha as u32) << 1 | opts.hdr.pack_flags(), (w.div_ceil(8), h.div_ceil(8))),
         };
         let u = self.uniform(&SizeU { width: w, height: h, _pad: [flags, 0] });
         self.dispatch(&mut enc, pipe, &[entry(0, tv(&out.view)), entry(1, u.as_entire_binding()), entry(2, storage.as_entire_binding())], groups.0, groups.1);

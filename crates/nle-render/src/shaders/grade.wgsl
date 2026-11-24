@@ -27,7 +27,7 @@ struct Grade {
     in_lut_size: f32, // 0: no input LUT
     tonemap: u32,
     brightness: f32,
-    _pad0: f32,
+    headroom: f32,    // highest value kept by the tone map (1 = SDR)
     _pad1: f32,
     _pad2: f32,
 };
@@ -68,7 +68,8 @@ fn grade(c_in: vec3<f32>) -> vec3<f32> {
     if (g.working != WS_GAMMA || g.tonemap != 0u) {
         var out_lin = from_working(c, g.working);
         if (g.tonemap != 0u) {
-            out_lin = tonemap(out_lin);
+            let h = max(g.headroom, 1.0);
+            out_lin = tonemap(out_lin / h) * h;
         }
         c = display_encode(out_lin);
     }

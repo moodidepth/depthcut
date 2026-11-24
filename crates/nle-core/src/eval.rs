@@ -295,7 +295,7 @@ fn resolve_color(c: &Clip, t: Time) -> ResolvedColor {
         input_space: k.input_space,
         working: k.working,
         input_lut: k.input_lut.clone(),
-        nodes: if k.enabled { k.corrections.iter().filter(|n| n.enabled && n.mix > 0.0).cloned().collect() } else { Vec::new() },
+        nodes: if k.enabled { k.corrections.iter().filter(|n| n.enabled).map(|n| n.at(t)).filter(|n| n.mix > 0.0).collect() } else { Vec::new() },
     }
 }
 

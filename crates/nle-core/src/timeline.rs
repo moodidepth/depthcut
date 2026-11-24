@@ -583,7 +583,7 @@ impl Timeline {
             }
         }
         c.duration -= d;
-        c.for_each_param_mut(|p| p.shift(-d));
+        c.shift_keys(-d);
         for cc in &mut c.connected {
             cc.offset -= d;
         }

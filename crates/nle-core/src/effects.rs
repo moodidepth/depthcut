@@ -409,6 +409,11 @@ impl Effect {
         Effect { id: new_effect_id(), kind, enabled: true, params: kind.params().iter().map(|d| Param::new(d.default)).collect(), from_preset: false, mask: None, track: None }
     }
 
+    /// A copy with its own id (pasting, duplicating).
+    pub fn duplicate(&self) -> Effect {
+        Effect { id: new_effect_id(), ..self.clone() }
+    }
+
     /// Repair the parameter list after loading an older project (missing
     /// trailing parameters get their defaults, extra ones are dropped).
     pub fn normalize(&mut self) {

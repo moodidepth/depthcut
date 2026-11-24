@@ -196,6 +196,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         }
     }
 
+    let compare_drag = crate::grade_ui::viewer_compare(app, ui, &clip_painter, img);
+
     if app.punch.picking {
         pick_punch_anchor(app, ui, &resp, img, (fw, fh));
     } else if crate::multicam_ui::overlay(app, ui, &resp, img) {
@@ -206,6 +208,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         && !source
         && !app.playback.playing
         && !wipe_drag
+        && !compare_drag
         && !crate::motion_ui::overlay(app, ui, img)
         && !crate::color_ui::mask_gizmo(app, ui, img, (fw, fh))
     {

@@ -6,8 +6,8 @@ use crate::app::{drag_key, App};
 use crate::theme;
 use crate::widgets::color_wheel;
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Vec2};
-use nle_core::color::{ColorCorrection, ColorSpace, Curve, HueCurve, MaskShape, Qualifier, ShapeMask, WorkingSpace};
-use nle_core::{ClipKind, ColorParams, Command, LutRef};
+use nle_core::color::{ColorCorrection, ColorSpace, Curve, HueCurve, MaskShape, NodeValues, Qualifier, ShapeMask, WorkingSpace};
+use nle_core::{ClipKind, ColorParams, Command, LutRef, Time};
 
 /// Which mask the viewer gizmo edits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -22,6 +22,8 @@ pub struct ColorView {
     /// Qualifier / window preview: (node id, show the black / white matte).
     pub highlight: Option<(u64, bool)>,
     pub mask_focus: Option<MaskFocus>,
+    /// A node keyframe button asked to move the playhead here (clip-local).
+    pub seek_local: Option<Time>,
 }
 
 const MASK_GIZMO_TAG: u64 = 0x6d;
@@ -113,7 +115,7 @@ pub fn color_management(ui: &mut egui::Ui, col: &mut ColorParams, detected: Opti
 }
 
 /// The stacked correction nodes after the primary grade.
-pub fn corrections(ui: &mut egui::Ui, col: &mut ColorParams, view: &mut ColorView) {
+pub fn corrections(ui: &mut egui::Ui, col: &mut ColorParams, view: &mut ColorView, t: Time, frame: Time) {
     let sel_id = ui.id().with("rcp-node-selected");
     let mut selected: Option<u64> = ui.data(|d| d.get_temp(sel_id));
     if !col.corrections.iter().any(|n| Some(n.id) == selected) {
@@ -150,6 +152,9 @@ pub fn corrections(ui: &mut egui::Ui, col: &mut ColorParams, view: &mut ColorVie
                 }
                 if node.mask.is_some() {
                     tags.push_str(" ◯");
+                }
+                if !node.keys.is_empty() {
+                    tags.push_str(" ◆");
                 }
                 if ui.selectable_label(selected == Some(node.id), format!("{}. {name}{tags}", i + 1)).clicked() {
                     selected = Some(node.id);
@@ -189,7 +194,7 @@ pub fn corrections(ui: &mut egui::Ui, col: &mut ColorParams, view: &mut ColorVie
         }
         if let Some(node) = col.corrections.iter_mut().find(|c| Some(c.id) == selected) {
             ui.separator();
-            node_editor(ui, node, col.working, view);
+            node_editor(ui, node, col.working, view, t, frame);
         } else if col.corrections.is_empty() {
             ui.label(egui::RichText::new("Add a correction to grade on top of the primary: qualify a colour, draw a window, or shape curves.").small().color(theme::TEXT_DIM));
         }
@@ -200,16 +205,70 @@ pub fn corrections(ui: &mut egui::Ui, col: &mut ColorParams, view: &mut ColorVie
     });
 }
 
-fn node_editor(ui: &mut egui::Ui, n: &mut ColorCorrection, working: WorkingSpace, view: &mut ColorView) {
-    let id = n.id;
+/// Edits one node. With keyframes the controls show (and edit) the values at
+/// the playhead: a change there sets a key, like Resolve's dynamic keyframes.
+fn node_editor(ui: &mut egui::Ui, n: &mut ColorCorrection, working: WorkingSpace, view: &mut ColorView, t: Time, frame: Time) {
+    let tol = Time(frame.0 / 2);
+    let base = NodeValues::of(n);
+    let keyed = !n.keys.is_empty();
+    if keyed {
+        n.values_at(t).apply(n);
+    }
+    let shown = NodeValues::of(n);
+    let mut reset = false;
     ui.horizontal(|ui| {
         label(ui, "Name");
         ui.add(egui::TextEdit::singleline(&mut n.name).desired_width(140.0));
-        if ui.small_button("Reset").on_hover_text("Reset this correction (keeps qualifier and window)").clicked() {
+        if ui.small_button("Reset").on_hover_text("Reset this correction and its keyframes (keeps qualifier and window)").clicked() {
             let keep = (n.id, n.name.clone(), n.qualifier, n.mask.clone());
             *n = ColorCorrection { id: keep.0, name: keep.1, qualifier: keep.2, mask: keep.3, ..Default::default() };
+            reset = true;
         }
     });
+    if !reset {
+        node_keys(ui, n, t, tol, view);
+    }
+    node_controls(ui, n, working, view);
+    if keyed && !reset && !n.keys.is_empty() {
+        if NodeValues::of(n) != shown {
+            n.set_key(t, tol);
+        }
+        base.apply(n);
+    }
+}
+
+/// Keyframe buttons: set / remove the key at the playhead, jump to the
+/// previous / next one, clear them all.
+fn node_keys(ui: &mut egui::Ui, n: &mut ColorCorrection, t: Time, tol: Time, view: &mut ColorView) {
+    ui.horizontal(|ui| {
+        label(ui, "Keyframes");
+        let here = n.key_near(t, tol).is_some();
+        let prev = n.keys.iter().map(|k| k.time).filter(|k| *k < t - tol).max();
+        let next = n.keys.iter().map(|k| k.time).filter(|k| *k > t + tol).min();
+        if ui.add_enabled(prev.is_some(), egui::Button::new("◀").small()).on_hover_text("Previous keyframe").clicked() {
+            view.seek_local = prev;
+        }
+        let (icon, tip) = if here { ("◆", "Update the keyframe at the playhead") } else { ("◇", "Add a keyframe at the playhead (later changes here key automatically)") };
+        if ui.small_button(icon).on_hover_text(tip).clicked() {
+            n.set_key(t, tol);
+        }
+        if ui.add_enabled(next.is_some(), egui::Button::new("▶").small()).on_hover_text("Next keyframe").clicked() {
+            view.seek_local = next;
+        }
+        if here && ui.small_button("✕").on_hover_text("Remove the keyframe at the playhead").clicked() {
+            n.remove_key_near(t, tol);
+        }
+        if !n.keys.is_empty() {
+            if ui.small_button("Clear").on_hover_text("Remove all keyframes, keeping the values at the playhead").clicked() {
+                n.clear_keys(t);
+            }
+            ui.label(egui::RichText::new(format!("{}", n.keys.len())).small().color(theme::TEXT_DIM));
+        }
+    });
+}
+
+fn node_controls(ui: &mut egui::Ui, n: &mut ColorCorrection, working: WorkingSpace, view: &mut ColorView) {
+    let id = n.id;
     ui.horizontal(|ui| {
         label(ui, "Mix");
         ui.add(egui::Slider::new(&mut n.mix, 0.0..=1.0));
@@ -550,6 +609,17 @@ pub fn mask_gizmo(app: &mut App, ui: &mut egui::Ui, img: Rect, frame: (f32, f32)
         return false;
     }
     let mut edited = clip.clone();
+    // a keyframed window: edit it where it is at the playhead, then key it
+    let local = app.local_time(id);
+    let keyed = match focus {
+        MaskFocus::Node(nid) => edited.color.corrections.iter_mut().find(|n| n.id == nid && !n.keys.is_empty()).map(|n| {
+            let base = NodeValues::of(n);
+            n.values_at(local).apply(n);
+            (nid, base)
+        }),
+        MaskFocus::Effect(_) => None,
+    };
+    let tol = Time(app.project.timeline.frame().0 / 2);
     let Some(m) = mask_of(&mut edited, focus) else {
         app.color_view.mask_focus = None;
         return false;
@@ -692,6 +762,12 @@ pub fn mask_gizmo(app: &mut App, ui: &mut egui::Ui, img: Rect, frame: (f32, f32)
         app.color_view.mask_focus = None;
     }
     if changed {
+        if let Some((nid, base)) = keyed {
+            if let Some(n) = edited.color.corrections.iter_mut().find(|n| n.id == nid) {
+                n.set_key(local, tol);
+                base.apply(n);
+            }
+        }
         app.exec_key(Command::UpdateClip { clip: Box::new(edited) }, Some(drag_key(MASK_GIZMO_TAG, id)));
     }
     true

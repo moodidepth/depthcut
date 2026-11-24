@@ -12,7 +12,7 @@
 //! 4:2:2 / 4:4:4 conversion. HEVC and AV1 can also be exported 10-bit (P010).
 
 use crate::gpu::GpuContext;
-use crate::renderer::{FrameSource, RenderOptions, Renderer};
+use crate::renderer::{FrameSource, HdrOutput, RenderOptions, Renderer};
 use nle_core::{eval, AssetId, FrameRate, MediaAsset, Project, Time};
 use nle_media::audio::TimelineMixer;
 use nle_media::encoder_probe::EncoderProbe;
@@ -178,6 +178,11 @@ impl ExportPreset {
     /// Can carry an alpha channel.
     pub fn supports_alpha(self) -> bool {
         matches!(self, ExportPreset::ProRes4444 | ExportPreset::PngSequence | ExportPreset::TiffSequence | ExportPreset::ExrSequence)
+    }
+    /// Can be mastered in HDR (PQ / HLG): 10-bit HEVC / AV1 (with
+    /// `ten_bit`), 10-bit ProRes and DNxHR.
+    pub fn supports_hdr(self) -> bool {
+        self.supports_ten_bit() || matches!(self, ExportPreset::ProRes422 | ExportPreset::ProRes422Hq | ExportPreset::ProRes4444 | ExportPreset::DnxhrHqx | ExportPreset::Dnxhr444)
     }
     /// Has a 10-bit (Main10 / P010) option.
     pub fn supports_ten_bit(self) -> bool {
@@ -428,6 +433,9 @@ pub struct ExportSettings {
     pub ten_bit: bool,
     /// Keep alpha (transparent background) for formats that carry it.
     pub alpha: bool,
+    /// HDR mastering (needs a preset that [`ExportPreset::supports_hdr`];
+    /// HEVC / AV1 also need `ten_bit`). See [`ExportSettings::hdr_output`].
+    pub hdr: HdrOutput,
 }
 
 impl ExportSettings {
@@ -447,6 +455,40 @@ impl ExportSettings {
             loudness_target: None,
             ten_bit: false,
             alpha: false,
+            hdr: HdrOutput::Sdr,
+        }
+    }
+
+    /// The transfer actually written: `hdr` when this preset and bit depth
+    /// can carry it, otherwise SDR.
+    pub fn hdr_output(&self) -> HdrOutput {
+        let ok = self.preset.supports_hdr() && (self.preset.is_mastering() || self.ten_bit);
+        if ok {
+            self.hdr
+        } else {
+            HdrOutput::Sdr
+        }
+    }
+
+    /// `setparams` colour tags of the frames.
+    fn color_tags(&self) -> &'static str {
+        match self.hdr_output() {
+            HdrOutput::Sdr => "setparams=range=tv:color_primaries=bt709:color_trc=bt709:colorspace=bt709",
+            HdrOutput::Pq { .. } => "setparams=range=tv:color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc",
+            HdrOutput::Hlg => "setparams=range=tv:color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc",
+        }
+    }
+
+    /// x265 parameters (HDR10 static metadata for PQ).
+    fn x265_params(&self) -> String {
+        match self.hdr_output() {
+            HdrOutput::Pq { peak_nits } => {
+                let peak = peak_nits.round().max(203.0) as u32;
+                // mastering display: P3 primaries, D65 (0.00002 units), luminance in 0.0001 nits
+                format!("log-level=error:hdr10=1:repeat-headers=1:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:master-display=G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L({},1):max-cll={peak},400", peak * 10_000)
+            }
+            HdrOutput::Hlg => "log-level=error:repeat-headers=1:colorprim=bt2020:transfer=arib-std-b67:colormatrix=bt2020nc".into(),
+            HdrOutput::Sdr => "log-level=error".into(),
         }
     }
 
@@ -512,7 +554,7 @@ impl ExportSettings {
         // Tag BT.709 limited range on the frames *before* any hardware upload.
         // Output-side -colorspace/-color_range options make FFmpeg insert an
         // auto-scaler after hwupload, which cannot take QSV/VA-API surfaces.
-        let tags = "setparams=range=tv:color_primaries=bt709:color_trc=bt709:colorspace=bt709";
+        let tags = self.color_tags();
         let vf = match self.preset {
             p if p.is_qsv() => format!("{tags},{}", hwaccel::qsv_upload_filter(platform)),
             ExportPreset::H264Vaapi => format!("{tags},format=nv12,hwupload"),
@@ -562,7 +604,7 @@ impl ExportSettings {
         }
         if self.preset == ExportPreset::HevcSoftware {
             // stderr is only read at the end: x265's chatter could fill the pipe
-            a.extend(["-x265-params", "log-level=error"].map(String::from));
+            a.extend(["-x265-params".to_string(), self.x265_params()]);
         }
         if self.preset.codec() == ExportCodec::Hevc {
             a.extend(["-tag:v", "hvc1"].map(String::from));
@@ -603,7 +645,9 @@ impl ExportSettings {
         if has_audio {
             a.extend(["-map", "1:a:0"].map(String::from));
         }
-        let yuv = |fmt: &str| format!("scale=out_color_matrix=bt709:out_range=tv,format={fmt},setparams=range=tv:color_primaries=bt709:color_trc=bt709:colorspace=bt709");
+        let matrix = if self.hdr_output().is_hdr() { "bt2020" } else { "bt709" };
+        let tags = self.color_tags();
+        let yuv = |fmt: &str| format!("scale=out_color_matrix={matrix}:out_range=tv,format={fmt},{tags}");
         let (vf, codec_args): (String, Vec<&str>) = match self.preset {
             ExportPreset::ProRes422 => (yuv("yuv422p10le"), vec!["-profile:v", "2", "-vendor", "apl0"]),
             ExportPreset::ProRes422Hq => (yuv("yuv422p10le"), vec!["-profile:v", "3", "-vendor", "apl0"]),
@@ -842,7 +886,8 @@ pub fn run_export(
         }
         let t = settings.start + Time::from_frames(n as i64, settings.frame_rate);
         let comp = eval::evaluate(&project.timeline, t);
-        let frame = renderer.render_packed(&comp, &mut source, RenderOptions::default(), pack);
+        let opts = RenderOptions { hdr: settings.hdr_output(), ..Default::default() };
+        let frame = renderer.render_packed(&comp, &mut source, opts, pack);
         if let Some(e) = source.error.take() {
             result = Err(ExportError::Media(e));
             break;
@@ -968,6 +1013,32 @@ mod tests {
         let mut s = settings(ExportPreset::H264Software, RateControl::Quality(20));
         s.ten_bit = true;
         assert_eq!(s.pack_format(), crate::PackFormat::Nv12);
+    }
+
+    #[test]
+    fn hdr_exports_tag_bt2020_and_write_hdr10_metadata() {
+        let mut s = settings(ExportPreset::HevcSoftware, RateControl::Quality(20));
+        s.hdr = HdrOutput::Pq { peak_nits: 1000.0 };
+        // 8-bit can't carry it
+        assert_eq!(s.hdr_output(), HdrOutput::Sdr);
+        assert!(s.ffmpeg_args(Platform::Windows, None).join(" ").contains("color_trc=bt709"));
+        s.ten_bit = true;
+        let a = s.ffmpeg_args(Platform::Windows, None).join(" ");
+        assert!(a.contains("color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc,format=yuv420p10le"), "{a}");
+        assert!(a.contains("hdr10=1") && a.contains("max-cll=1000,400") && a.contains("L(10000000,1)"), "{a}");
+        s.hdr = HdrOutput::Hlg;
+        let a = s.ffmpeg_args(Platform::Windows, None).join(" ");
+        assert!(a.contains("color_trc=arib-std-b67") && !a.contains("hdr10"), "{a}");
+        let mut m = settings(ExportPreset::ProRes422Hq, RateControl::Quality(0));
+        m.path = PathBuf::from("master.mov");
+        m.hdr = HdrOutput::Pq { peak_nits: 1000.0 };
+        let a = m.ffmpeg_args(Platform::Windows, None).join(" ");
+        assert!(a.contains("scale=out_color_matrix=bt2020:out_range=tv,format=yuv422p10le,setparams=range=tv:color_primaries=bt2020:color_trc=smpte2084"), "{a}");
+        // 8-bit DNxHR HQ and image sequences stay SDR
+        m.preset = ExportPreset::DnxhrHq;
+        assert_eq!(m.hdr_output(), HdrOutput::Sdr);
+        assert!((HdrOutput::Pq { peak_nits: 1000.0 }.headroom() - 4.926).abs() < 0.01);
+        assert!((HdrOutput::Hlg.headroom() - 3.774).abs() < 0.01);
     }
 
     #[test]

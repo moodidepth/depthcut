@@ -20,6 +20,7 @@
 //! * [`keymap`] — customisable keyboard shortcuts with FCP / Resolve presets (TOML).
 
 pub mod asset;
+pub mod attributes;
 pub mod audio_fx;
 pub mod audio_polish;
 pub mod autosave;
@@ -76,6 +77,7 @@ pub use keymap::{Action, ActionMap, KeyBinding, KeyCode};
 pub use library::{AssetMetadata, Bin, Collection, KindFilter, Library, Rating, SmartCollection, SmartRule};
 pub use presets::{ColorPreset, MontagePreset, PresetCategory};
 pub use project::Project;
+pub use project::Still;
 pub use speed::{FrameBlendMode, Retime, RetimeSegment};
 pub use text_anim::{TextAnimation, TitleAnim};
 pub use time::{format_timecode, format_timecode_df, parse_timecode, parse_timecode_df, FrameRate, Time, TICKS_PER_SECOND};

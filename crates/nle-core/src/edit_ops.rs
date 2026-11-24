@@ -156,7 +156,7 @@ impl Timeline {
         a.audio.audio_tail = Time::ZERO;
         a.source_in -= lead;
         a.duration += lead + tail;
-        a.for_each_param_mut(|p| p.shift(lead));
+        a.shift_keys(lead);
         a.anchor = lead;
         let lane = self.free_lane(-1, start - lead, a.duration);
         self.connect(a, start - lead, lane)

@@ -13,9 +13,12 @@
 //!   HSL [`Qualifier`], a [`ShapeMask`] and a mix amount. Nodes apply in
 //!   order, and each one keys on the output of the node before it.
 //!
-//! Node values are not keyframable; the primary's sliders still are.
+//! A node's numeric values (wheels, sliders, mix, window geometry) can be
+//! keyframed as a whole ([`NodeKey`], like Resolve's dynamic keyframes);
+//! curves, qualifier ranges and the window's shape stay fixed.
 
 use crate::clip::ColorWheel;
+use crate::time::Time;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -520,7 +523,7 @@ static NEXT_NODE_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Unique within a session and, being time-seeded, practically never equal
 /// to the ids of nodes loaded from a project.
-fn new_node_id() -> u64 {
+pub fn new_node_id() -> u64 {
     static BASE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     let base = *BASE.get_or_init(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| (d.as_nanos() as u64) << 12).unwrap_or(1 << 40));
     base.wrapping_add(NEXT_NODE_ID.fetch_add(1, Ordering::Relaxed))
@@ -583,6 +586,125 @@ pub struct ColorCorrection {
     // isolation
     pub qualifier: Option<Qualifier>,
     pub mask: Option<ShapeMask>,
+    /// Keyframes (clip-local times, sorted). Empty = the values above.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub keys: Vec<NodeKey>,
+}
+
+/// The keyframable values of a node.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NodeValues {
+    pub mix: f32,
+    pub exposure: f32,
+    pub temperature: f32,
+    pub tint: f32,
+    pub lift: ColorWheel,
+    pub gamma: ColorWheel,
+    pub gain: ColorWheel,
+    pub offset: ColorWheel,
+    pub contrast: f32,
+    pub pivot: f32,
+    pub saturation: f32,
+    pub log_shadows: ColorWheel,
+    pub log_midtones: ColorWheel,
+    pub log_highlights: ColorWheel,
+    pub low_range: f32,
+    pub high_range: f32,
+    /// Window centre x / y, size x / y, rotation, feather.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<[f32; 6]>,
+}
+
+/// A node's values at one time.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NodeKey {
+    pub time: Time,
+    pub values: NodeValues,
+}
+
+fn lerp(a: f32, b: f32, u: f32) -> f32 {
+    a + (b - a) * u
+}
+
+fn lerp_wheel(a: ColorWheel, b: ColorWheel, u: f32) -> ColorWheel {
+    ColorWheel { r: lerp(a.r, b.r, u), g: lerp(a.g, b.g, u), b: lerp(a.b, b.b, u), master: lerp(a.master, b.master, u) }
+}
+
+impl NodeValues {
+    pub fn of(n: &ColorCorrection) -> NodeValues {
+        NodeValues {
+            mix: n.mix,
+            exposure: n.exposure,
+            temperature: n.temperature,
+            tint: n.tint,
+            lift: n.lift,
+            gamma: n.gamma,
+            gain: n.gain,
+            offset: n.offset,
+            contrast: n.contrast,
+            pivot: n.pivot,
+            saturation: n.saturation,
+            log_shadows: n.log_shadows,
+            log_midtones: n.log_midtones,
+            log_highlights: n.log_highlights,
+            low_range: n.low_range,
+            high_range: n.high_range,
+            window: n.mask.as_ref().map(|m| [m.center[0], m.center[1], m.size[0], m.size[1], m.rotation, m.feather]),
+        }
+    }
+
+    pub fn apply(&self, n: &mut ColorCorrection) {
+        n.mix = self.mix;
+        n.exposure = self.exposure;
+        n.temperature = self.temperature;
+        n.tint = self.tint;
+        n.lift = self.lift;
+        n.gamma = self.gamma;
+        n.gain = self.gain;
+        n.offset = self.offset;
+        n.contrast = self.contrast;
+        n.pivot = self.pivot;
+        n.saturation = self.saturation;
+        n.log_shadows = self.log_shadows;
+        n.log_midtones = self.log_midtones;
+        n.log_highlights = self.log_highlights;
+        n.low_range = self.low_range;
+        n.high_range = self.high_range;
+        if let (Some(m), Some(w)) = (n.mask.as_mut(), self.window) {
+            m.center = [w[0], w[1]];
+            m.size = [w[2], w[3]];
+            m.rotation = w[4];
+            m.feather = w[5];
+        }
+    }
+
+    /// Linear blend from `a` (u = 0) to `b` (u = 1).
+    pub fn lerp(a: &NodeValues, b: &NodeValues, u: f32) -> NodeValues {
+        let f = |x: f32, y: f32| lerp(x, y, u);
+        let w = |x: ColorWheel, y: ColorWheel| lerp_wheel(x, y, u);
+        NodeValues {
+            mix: f(a.mix, b.mix),
+            exposure: f(a.exposure, b.exposure),
+            temperature: f(a.temperature, b.temperature),
+            tint: f(a.tint, b.tint),
+            lift: w(a.lift, b.lift),
+            gamma: w(a.gamma, b.gamma),
+            gain: w(a.gain, b.gain),
+            offset: w(a.offset, b.offset),
+            contrast: f(a.contrast, b.contrast),
+            pivot: f(a.pivot, b.pivot),
+            saturation: f(a.saturation, b.saturation),
+            log_shadows: w(a.log_shadows, b.log_shadows),
+            log_midtones: w(a.log_midtones, b.log_midtones),
+            log_highlights: w(a.log_highlights, b.log_highlights),
+            low_range: f(a.low_range, b.low_range),
+            high_range: f(a.high_range, b.high_range),
+            window: match (a.window, b.window) {
+                (Some(x), Some(y)) => Some(std::array::from_fn(|i| lerp(x[i], y[i], u))),
+                (x, y) => x.or(y),
+            },
+        }
+    }
 }
 
 impl Default for ColorCorrection {
@@ -616,6 +738,7 @@ impl Default for ColorCorrection {
             hue_vs_lum: HueCurve::default(),
             qualifier: None,
             mask: None,
+            keys: Vec::new(),
         }
     }
 }
@@ -625,8 +748,105 @@ impl ColorCorrection {
         ColorCorrection { name: name.into(), ..Default::default() }
     }
 
+    /// A copy with its own id (pasting, duplicating).
+    pub fn duplicate(&self) -> ColorCorrection {
+        ColorCorrection { id: new_node_id(), ..self.clone() }
+    }
+
+    /// The values at clip-local time `t` (between keys: a linear blend;
+    /// before the first / after the last: that key).
+    pub fn values_at(&self, t: Time) -> NodeValues {
+        let k = &self.keys;
+        match k.iter().position(|x| x.time > t) {
+            _ if k.is_empty() => NodeValues::of(self),
+            Some(0) => k[0].values,
+            None => k[k.len() - 1].values,
+            Some(i) => {
+                let (a, b) = (&k[i - 1], &k[i]);
+                let span = (b.time - a.time).as_secs_f64();
+                let u = if span > 0.0 { ((t - a.time).as_secs_f64() / span) as f32 } else { 1.0 };
+                NodeValues::lerp(&a.values, &b.values, u.clamp(0.0, 1.0))
+            }
+        }
+    }
+
+    /// This node as it renders at `t`.
+    pub fn at(&self, t: Time) -> ColorCorrection {
+        let mut n = self.clone();
+        if !self.keys.is_empty() {
+            self.values_at(t).apply(&mut n);
+        }
+        n
+    }
+
+    pub fn key_near(&self, t: Time, tolerance: Time) -> Option<usize> {
+        self.keys.iter().position(|k| (k.time - t).abs() <= tolerance)
+    }
+
+    /// Store the node's current values as the key at `t` (replacing one
+    /// within `tolerance`).
+    pub fn set_key(&mut self, t: Time, tolerance: Time) {
+        let values = NodeValues::of(self);
+        match self.key_near(t, tolerance) {
+            Some(i) => self.keys[i].values = values,
+            None => {
+                let at = self.keys.partition_point(|k| k.time < t);
+                self.keys.insert(at, NodeKey { time: t, values });
+            }
+        }
+    }
+
+    pub fn remove_key_near(&mut self, t: Time, tolerance: Time) -> bool {
+        match self.key_near(t, tolerance) {
+            Some(i) => {
+                self.keys.remove(i);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Drop the keys, keeping the values at `t`.
+    pub fn clear_keys(&mut self, t: Time) {
+        let v = self.values_at(t);
+        v.apply(self);
+        self.keys.clear();
+    }
+
+    /// The part before `at` (blade).
+    pub fn keep_left(&mut self, at: Time) {
+        if !self.keys.is_empty() {
+            let v = self.values_at(at);
+            self.keys.retain(|k| k.time <= at);
+            if self.keys.last().map(|k| k.time) != Some(at) {
+                self.keys.push(NodeKey { time: at, values: v });
+            }
+        }
+    }
+
+    /// The part after `at`, re-based to start at zero (blade).
+    pub fn keep_right(&mut self, at: Time) {
+        if !self.keys.is_empty() {
+            let v = self.values_at(at);
+            self.keys.retain(|k| k.time >= at);
+            if self.keys.first().map(|k| k.time) != Some(at) {
+                self.keys.insert(0, NodeKey { time: at, values: v });
+            }
+            self.shift_keys(Time::ZERO - at);
+        }
+    }
+
+    pub fn shift_keys(&mut self, dt: Time) {
+        for k in &mut self.keys {
+            k.time += dt;
+        }
+    }
+
     /// True when the node leaves every pixel unchanged.
     pub fn is_identity(&self) -> bool {
+        if !self.keys.is_empty() {
+            return !self.enabled || self.keys.iter().all(|k| self.at(k.time).without_keys().is_identity());
+        }
         !self.enabled
             || self.mix <= 0.0
             || (self.exposure == 0.0
@@ -636,6 +856,11 @@ impl ColorCorrection {
                 && self.contrast == 0.0
                 && self.saturation == 1.0
                 && self.curves_identity())
+    }
+
+    fn without_keys(mut self) -> ColorCorrection {
+        self.keys.clear();
+        self
     }
 
     pub fn curves_identity(&self) -> bool {
@@ -767,6 +992,44 @@ mod tests {
         assert_eq!(old.mix, 1.0);
         assert_eq!(old.saturation, 1.0);
         assert!(old.is_identity());
+    }
+
+    #[test]
+    fn node_keys_blend_and_survive_a_blade() {
+        let s = Time::from_secs;
+        let tol = Time::from_millis(1);
+        let mut n = ColorCorrection { mask: Some(ShapeMask::default()), ..Default::default() };
+        n.set_key(s(0), tol);
+        n.exposure = 2.0;
+        n.lift.r = 0.4;
+        n.mask.as_mut().unwrap().center = [0.9, 0.5];
+        n.set_key(s(4), tol);
+        assert_eq!(n.keys.len(), 2);
+        let mid = n.at(s(1));
+        assert!((mid.exposure - 0.5).abs() < 1e-5 && (mid.lift.r - 0.1).abs() < 1e-5);
+        assert!((mid.mask.as_ref().unwrap().center[0] - 0.6).abs() < 1e-5, "the window moves");
+        assert_eq!(n.at(s(9)).exposure, 2.0, "held after the last key");
+        assert_eq!(n.at(Time::ZERO - s(1)).exposure, 0.0, "held before the first key");
+        assert!(!n.is_identity());
+        // re-keying near an existing key replaces it
+        n.exposure = 3.0;
+        n.set_key(s(4) + Time(1), tol);
+        assert_eq!(n.keys.len(), 2);
+        assert_eq!(n.at(s(4)).exposure, 3.0);
+        // blade at 2 s: both halves hold the value there
+        let (mut l, mut r) = (n.clone(), n.clone());
+        l.keep_left(s(2));
+        r.keep_right(s(2));
+        assert!((l.at(s(2)).exposure - 1.5).abs() < 1e-5);
+        assert!((r.at(Time::ZERO).exposure - 1.5).abs() < 1e-5);
+        assert!((r.at(s(2)).exposure - 3.0).abs() < 1e-5);
+        // keys round-trip through JSON; nodes without keys don't write any
+        let j = serde_json::to_string(&n).unwrap();
+        let back: ColorCorrection = serde_json::from_str(&j).unwrap();
+        assert_eq!(back.keys, n.keys);
+        assert!(!serde_json::to_string(&ColorCorrection::default()).unwrap().contains("keys"));
+        n.clear_keys(s(1));
+        assert!(n.keys.is_empty() && (n.exposure - 0.75).abs() < 1e-5);
     }
 
     #[test]

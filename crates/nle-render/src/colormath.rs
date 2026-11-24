@@ -87,6 +87,30 @@ pub fn to_linear709(c: Rgb, space: ColorSpace) -> Rgb {
     }
 }
 
+/// PQ (SMPTE ST 2084) inverse EOTF: linear (1.0 = 10 000 nits) → signal.
+pub fn pq_encode(l: f32) -> f32 {
+    let (m1, m2, c1, c2, c3) = (0.159_301_76, 78.843_75, 0.835_937_5, 18.851_563, 18.6875);
+    let y = l.clamp(0.0, 1.0).powf(m1);
+    ((c1 + c2 * y) / (1.0 + c3 * y)).powf(m2)
+}
+
+/// HLG (ARIB STD-B67) OETF: scene linear 0..1 → signal.
+pub fn hlg_encode(e: f32) -> f32 {
+    let (a, b, c) = (0.178_832_77, 0.284_668_92, 0.559_910_7);
+    let x = e.clamp(0.0, 1.0);
+    if x <= 1.0 / 12.0 {
+        (3.0 * x).sqrt()
+    } else {
+        a * (12.0 * x - b).ln() + c
+    }
+}
+
+/// [`tonemap`] rolling off towards `headroom` instead of 1.
+pub fn tonemap_to(lin: Rgb, headroom: f32) -> Rgb {
+    let h = headroom.max(1.0);
+    tonemap(lin.map(|v| v / h)).map(|v| v * h)
+}
+
 pub fn tonemap(lin: Rgb) -> Rgb {
     let c = lin.map(|v| v.max(0.0));
     let m = c[0].max(c[1]).max(c[2]);
@@ -278,6 +302,20 @@ pub fn correct_node(px: Rgb, n: &ColorCorrection, ws: WorkingSpace) -> Rgb {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hdr_encoders_round_trip_the_decoders() {
+        // 203-nit reference white ≈ PQ 0.5807; HLG reference white 0.75
+        assert!((pq_encode(203.0 / 10_000.0) - 0.5807).abs() < 0.001);
+        assert!((hlg_encode(0.264_962_56) - 0.75).abs() < 0.001);
+        for v in [0.05f32, 0.3, 0.58, 0.75, 0.9] {
+            assert!((pq_encode(pq_decode(v) * 203.0 / 10_000.0) - v).abs() < 1e-3, "pq {v}");
+            assert!((hlg_encode(hlg_decode(v) * 0.264_962_56) - v).abs() < 1e-3, "hlg {v}");
+        }
+        assert_eq!(tonemap_to([0.5, 0.2, 0.1], 4.9), [0.5, 0.2, 0.1]);
+        assert!(tonemap_to([9.0, 1.0, 1.0], 4.9)[0] < 4.9);
+        assert_eq!(tonemap_to([2.0, 0.0, 0.0], 1.0), tonemap([2.0, 0.0, 0.0]));
+    }
 
     #[test]
     fn camera_log_grey_cards_decode_to_18_percent() {

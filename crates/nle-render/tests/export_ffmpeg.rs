@@ -229,3 +229,75 @@ fn export_mastering_and_ten_bit() {
     assert!(failures.is_empty(), "{failures:#?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// HDR mastering through real encoders: HEVC (x265 and any 10-bit hardware
+/// HEVC) in PQ, ProRes in HLG and DNxHR in PQ. The files must be tagged
+/// BT.2020 with the right transfer, and x265 must write the HDR10 mastering
+/// display / content light level metadata.
+#[test]
+fn export_hdr_is_tagged_and_carries_hdr10_metadata() {
+    use nle_render::HdrOutput;
+    if !ffmpeg_cli::available() {
+        eprintln!("skipping: ffmpeg not found");
+        return;
+    }
+    let gpu = match GpuContext::new_headless() {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("skipping: {e}");
+            return;
+        }
+    };
+    let dir = std::env::temp_dir().join(format!("rcp-hdr-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = make_clip_from(&dir, "a.mp4", "testsrc2=size=640x360:rate=30:duration=2");
+    let mut project = Project::new("HDR Test");
+    project.timeline.format.width = 640;
+    project.timeline.format.height = 360;
+    let a = project.add_asset(probe::probe(&src).expect("probe a"));
+    let a = project.asset(a).cloned().unwrap();
+    project.timeline.append(Clip::from_asset_range(&a, Time::ZERO, Time::from_millis(500))).unwrap();
+    let pq = HdrOutput::Pq { peak_nits: 1000.0 };
+    let mut jobs = vec![(ExportPreset::HevcSoftware, pq), (ExportPreset::ProRes422Hq, HdrOutput::Hlg), (ExportPreset::DnxhrHqx, pq)];
+    let probe = encoder_probe::probe_blocking();
+    jobs.extend(
+        working_presets(probe)
+            .into_iter()
+            .filter(|p| p.supports_ten_bit() && p.codec() == nle_render::export::ExportCodec::Hevc && *p != ExportPreset::HevcSoftware)
+            .map(|p| (p, pq)),
+    );
+
+    let mut failures = Vec::new();
+    for (preset, hdr) in jobs {
+        let path = dir.join(format!("{preset:?}.{}", preset.extension()));
+        let mut s = ExportSettings::new(&path, preset, &project);
+        s.audio = AudioExport::None;
+        s.ten_bit = true;
+        s.hdr = hdr;
+        if let Err(e) = run_export(&project, &s, gpu.clone(), &HashMap::new(), &AtomicBool::new(false), |_| {}) {
+            failures.push(format!("{preset:?}: export failed: {e}"));
+            continue;
+        }
+        let out = probe::probe(&path).expect("probe export");
+        let v = out.video.expect("video stream");
+        let trc = if hdr == HdrOutput::Hlg { "arib-std-b67" } else { "smpte2084" };
+        if v.color_primaries != "bt2020" || v.color_transfer != trc || v.color_space != "bt2020nc" {
+            failures.push(format!("{preset:?}: tagged {} / {} / {}, want bt2020 / {trc} / bt2020nc", v.color_primaries, v.color_transfer, v.color_space));
+        }
+        if preset == ExportPreset::HevcSoftware {
+            let p = path.to_string_lossy();
+            let side = ffmpeg_cli::run_capture(
+                &ffmpeg_cli::ffprobe_path(),
+                &["-v", "error", "-select_streams", "v:0", "-read_intervals", "%+#1", "-show_frames", "-show_entries", "frame=side_data_list", &p],
+            )
+            .unwrap_or_default();
+            if !side.contains("Mastering display metadata") || !side.contains("Content light level metadata") {
+                failures.push(format!("{preset:?}: no HDR10 side data: {side}"));
+            }
+        }
+        eprintln!("{preset:?}: {} / {} / {}", v.color_primaries, v.color_transfer, v.color_space);
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
