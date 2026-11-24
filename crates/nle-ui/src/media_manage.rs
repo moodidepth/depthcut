@@ -4,7 +4,7 @@
 use crate::app::{App, ProjectSwitch};
 use eframe::egui;
 use nle_core::media_mgmt::{self, ConsolidatePlan, CopyJob, RelinkReport};
-use nle_core::{edl, fcpxml, otio, AssetId, MediaAsset, Project};
+use nle_core::{aaf, edl, fcpxml, otio, AssetId, MediaAsset, Project};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver};
@@ -178,6 +178,19 @@ impl App {
         match nle_core::autosave::write_atomic(&path, otio::export(&project).as_bytes()) {
             Ok(()) => self.status(format!("Exported {}", path.display())),
             Err(e) => self.status(format!("OTIO export failed: {e}")),
+        }
+    }
+
+    pub fn export_aaf(&mut self) {
+        let project = self.full_project().into_owned();
+        let Some(path) = rfd::FileDialog::new().add_filter("AAF", &["aaf"]).set_file_name(format!("{}.aaf", project.name)).save_file() else {
+            return;
+        };
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+        let result = aaf::export(&project, now.as_nanos() as u64, now.as_secs()).map_err(|e| e.to_string());
+        match result.and_then(|(bytes, report)| nle_core::autosave::write_atomic(&path, &bytes).map(|()| report).map_err(|e| e.to_string())) {
+            Ok(report) => self.status(format!("Exported {}: {}", path.display(), report.summary())),
+            Err(e) => self.status(format!("AAF export failed: {e}")),
         }
     }
 

@@ -19,6 +19,7 @@
 //! * [`captions`] — word-timed captions track with SRT import/export.
 //! * [`keymap`] — customisable keyboard shortcuts with FCP / Resolve presets (TOML).
 
+pub mod aaf;
 pub mod asset;
 pub mod attributes;
 pub mod audio_fx;

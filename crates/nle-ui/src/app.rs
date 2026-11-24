@@ -2447,6 +2447,14 @@ impl App {
                         ui.close_menu();
                         self.export_otio();
                     }
+                    if ui
+                        .button("AAF (.aaf)…")
+                        .on_hover_text("For Avid Media Composer and Pro Tools: all tracks as cuts, linked to the original media files. Dissolves, speed changes, titles, effects and colour are not carried.")
+                        .clicked()
+                    {
+                        ui.close_menu();
+                        self.export_aaf();
+                    }
                 });
                 ui.separator();
                 let missing = nle_core::media_mgmt::missing_assets(&self.project).len();
