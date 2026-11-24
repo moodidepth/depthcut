@@ -288,17 +288,7 @@ fn gpu_pipeline_end_to_end() {
     assert!(y_at(2, 2) <= 20 && y_at(W / 2, 2) <= 20, "outside the shape stays black");
     // 9. Rolling credits through the real path: the mask is frame-tall and moves up
     if nle_render::text::FontBook::system().has_fonts() {
-        let credits = TitleParams {
-            text: "HI
-HI
-HI
-HI"
-            .into(),
-            font_size: 600.0,
-            roll: nle_core::RollMode::Up,
-            shadow_enabled: false,
-            ..Default::default()
-        };
+        let credits = TitleParams { text: "HI\nHI\nHI\nHI".into(), font_size: 600.0, roll: nle_core::RollMode::Up, shadow_enabled: false, ..Default::default() };
         let mut first_lit = |roll: f32| {
             let l = Layer { source: LayerSource::Title(Box::new(credits.clone()), TitleAnim { roll, ..Default::default() }), ..media_layer(a) };
             let out = r.render_nv12(&Composition::new(Time::ZERO, vec![RenderNode::Layer(l)]), &mut src, RenderOptions::default());
