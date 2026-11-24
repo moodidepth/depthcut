@@ -21,20 +21,54 @@ pub const QUICK_PROMPTS: [(&str, &str); 5] = [
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "tool", rename_all = "snake_case")]
 pub enum CopilotToolCall {
-    JumpToTimecode { time_secs: f64 },
-    ApplyVelocityPreset { clip_id: Option<u64>, preset_name: String },
-    AddEffectPreset { clip_id: Option<u64>, preset_name: String },
-    CutAndRipple { clip_id: Option<u64>, time_secs: f64, trim_mode: String },
-    SyncToBeatMarkers { clip_ids: Vec<u64> },
-    DropMarker { time_secs: f64, label: String, kind: String },
-    AddTransition { clip_id: Option<u64>, transition_kind: String, duration_frames: i64 },
+    JumpToTimecode {
+        time_secs: f64,
+    },
+    ApplyVelocityPreset {
+        clip_id: Option<u64>,
+        preset_name: String,
+    },
+    AddEffectPreset {
+        clip_id: Option<u64>,
+        preset_name: String,
+    },
+    CutAndRipple {
+        clip_id: Option<u64>,
+        time_secs: f64,
+        trim_mode: String,
+    },
+    SyncToBeatMarkers {
+        clip_ids: Vec<u64>,
+    },
+    DropMarker {
+        time_secs: f64,
+        label: String,
+        kind: String,
+    },
+    AddTransition {
+        clip_id: Option<u64>,
+        transition_kind: String,
+        duration_frames: i64,
+    },
     ColorGrade(ColorGradeArgs),
     AddMask(MaskArgs),
-    GenerateCaptions { language: Option<String> },
+    GenerateCaptions {
+        language: Option<String>,
+    },
     StyleCaptions(CaptionStyleArgs),
+    /// Text-based cleanup from the transcript: ripple-delete filler words
+    /// and/or shorten pauses longer than `pause_ms` to `keep_ms`.
+    TightenSpeech {
+        fillers: bool,
+        pause_ms: Option<i64>,
+        keep_ms: i64,
+    },
     PolishAudio,
     AdjustAudio(AudioArgs),
-    SetExportPreset { delivery: String, codec: Option<String> },
+    SetExportPreset {
+        delivery: String,
+        codec: Option<String>,
+    },
 }
 
 /// What the app knows that the timeline doesn't, for tools that need it.
@@ -63,6 +97,7 @@ impl CopilotToolCall {
             Self::AddMask(_) => "add_mask",
             Self::GenerateCaptions { .. } => "generate_captions",
             Self::StyleCaptions(_) => "style_captions",
+            Self::TightenSpeech { .. } => "tighten_speech",
             Self::PolishAudio => "polish_audio",
             Self::AdjustAudio(_) => "adjust_audio",
             Self::SetExportPreset { .. } => "set_export_preset",
@@ -128,6 +163,7 @@ impl CopilotToolCall {
             "add_mask" => Ok(Self::AddMask(post::parse_mask(&a)?)),
             "generate_captions" => Ok(Self::GenerateCaptions { language: post::parse_language(&a)? }),
             "style_captions" => Ok(Self::StyleCaptions(post::parse_caption_style(&a)?)),
+            "tighten_speech" => post::parse_tighten_speech(&a),
             "polish_audio" => Ok(Self::PolishAudio),
             "adjust_audio" => Ok(Self::AdjustAudio(post::parse_audio(&a)?)),
             "set_export_preset" => Ok(Self::SetExportPreset { delivery: post::parse_delivery(&a)?, codec: post::parse_codec(&a)? }),
@@ -594,6 +630,10 @@ fn plan_tool_call(call: &CopilotToolCall, tl: &Timeline, playhead: Time, selecti
         }
         CopilotToolCall::StyleCaptions(a) => {
             let (cmd, s) = post::plan_caption_style(tl, a)?;
+            one(cmd, s)
+        }
+        CopilotToolCall::TightenSpeech { fillers, pause_ms, keep_ms } => {
+            let (cmd, s) = post::plan_tighten_speech(tl, *fillers, *pause_ms, *keep_ms)?;
             one(cmd, s)
         }
         CopilotToolCall::PolishAudio => {

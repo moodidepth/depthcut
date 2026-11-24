@@ -50,6 +50,7 @@ pub mod project;
 pub mod speed;
 pub mod sync;
 pub mod text_anim;
+pub mod text_edit;
 pub mod three_point;
 pub mod time;
 pub mod timeline;

@@ -226,6 +226,7 @@ pub struct App {
     pub copilot: copilot_ui::CopilotState,
     pub marker_dialog: Option<(usize, String, [u8; 3])>,
     pub captions: captions_ui::CaptionsState,
+    pub transcript: crate::transcript_ui::TranscriptState,
     pub online: online_ui::OnlineState,
     pub discord: DiscordPresence,
     pub show_shortcuts: bool,
@@ -385,6 +386,7 @@ impl App {
             copilot: copilot_ui::CopilotState::default(),
             marker_dialog: None,
             captions: captions_ui::CaptionsState::default(),
+            transcript: Default::default(),
             online: online_ui::OnlineState::default(),
             discord: DiscordPresence::start(),
             show_shortcuts: false,
@@ -2266,6 +2268,7 @@ impl App {
             Action::ToggleScopes => self.set_scopes(!self.viewer.scopes),
             Action::ToggleAudioMixer => self.mixer_view.open = !self.mixer_view.open,
             Action::AutoCaptions => self.show_captions = !self.show_captions,
+            Action::ToggleTranscript => self.transcript.open = !self.transcript.open,
             Action::Import => self.import_dialog(),
             Action::ImportFcpxml => self.request_switch(ProjectSwitch::ImportFcpxml),
             Action::Open => self.request_switch(ProjectSwitch::Open),
@@ -2708,6 +2711,10 @@ impl App {
                     self.show_captions = true;
                     ui.close_menu();
                 }
+                if ui.button(self.menu_label("Transcript (Text-Based Editing)…", Action::ToggleTranscript)).clicked() {
+                    self.transcript.open = true;
+                    ui.close_menu();
+                }
                 let has_caps = !self.project.timeline.captions.is_empty();
                 let mut enabled = self.project.timeline.captions.enabled;
                 if ui.add_enabled(has_caps, egui::Checkbox::new(&mut enabled, "Show Captions Track")).changed() {
@@ -3056,6 +3063,7 @@ impl App {
             }
         }
         captions_ui::poll(self, ctx);
+        crate::transcript_ui::poll(self, ctx);
         online_ui::poll(self, ctx);
         copilot_ui::poll(self, ctx);
     }
@@ -3153,6 +3161,7 @@ impl eframe::App for App {
             None => {}
         }
         captions_ui::show(self, ctx);
+        crate::transcript_ui::show(self, ctx);
         self.discord.show_dialog(ctx);
         shortcuts_ui::show(self, ctx);
         crate::about_ui::show(&mut self.about, ctx);

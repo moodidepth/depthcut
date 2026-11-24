@@ -510,6 +510,54 @@ pub fn plan_generate_captions(tl: &Timeline, language: &Option<String>) -> Resul
     Ok((UiRequest::GenerateCaptions { language: language.clone() }, format!("Transcribing captions ({lang})")))
 }
 
+pub(crate) fn parse_tighten_speech(a: &ArgReader) -> Result<crate::tools::CopilotToolCall, String> {
+    let fillers = a.flag("fillers")?.unwrap_or(true);
+    let int = |k: &str, lo: f64, hi: f64| -> Result<Option<i64>, String> {
+        match a.num(k)? {
+            Some(v) if v.fract() != 0.0 || !(lo..=hi).contains(&v) => Err(format!("`{k}` = {v} must be an integer in {lo}..={hi}")),
+            v => Ok(v.map(|v| v as i64)),
+        }
+    };
+    let pause_ms = int("pause_ms", 200.0, 10_000.0)?;
+    let keep_ms = int("keep_ms", 0.0, 2_000.0)?.unwrap_or(250);
+    if !fillers && pause_ms.is_none() {
+        return Err("nothing to do: set fillers and/or pause_ms".into());
+    }
+    if pause_ms.is_some_and(|p| p <= keep_ms) {
+        return Err("pause_ms must be longer than keep_ms".into());
+    }
+    Ok(crate::tools::CopilotToolCall::TightenSpeech { fillers, pause_ms, keep_ms })
+}
+
+/// Ripple-delete filler words and/or shorten long pauses, from the caption transcript.
+pub fn plan_tighten_speech(tl: &Timeline, fillers: bool, pause_ms: Option<i64>, keep_ms: i64) -> Result<(Command, String), String> {
+    use nle_core::text_edit;
+    if tl.captions.is_empty() {
+        return Err("there is no transcript yet — call generate_captions first (it runs in the background; ask again when it is done)".into());
+    }
+    let words = text_edit::timeline_words(&tl.captions);
+    let rate = tl.format.rate;
+    let mut ranges = Vec::new();
+    let mut parts = Vec::new();
+    if fillers {
+        let f = text_edit::filler_indices(&words);
+        if !f.is_empty() {
+            parts.push(format!("{} filler word(s)", f.len()));
+        }
+        ranges.extend(text_edit::word_ranges(&words, &f, rate));
+    }
+    if let Some(p) = pause_ms {
+        let r = text_edit::pause_ranges(&words, Time::from_millis(p), Time::from_millis(keep_ms), rate);
+        if !r.is_empty() {
+            parts.push(format!("{} pause(s) over {p} ms (leaving {keep_ms} ms)", r.len()));
+        }
+        ranges.extend(r);
+    }
+    let ranges = text_edit::merge_ranges(ranges);
+    let cmd = text_edit::cut_command(&tl.captions, &ranges, "Tighten Speech").ok_or("no filler words or long pauses found in the transcript")?;
+    Ok((cmd, format!("Removed {} — {:.1} s shorter", parts.join(" and "), text_edit::total(&ranges).as_secs_f64())))
+}
+
 pub fn plan_export(delivery: &str, codec: Option<&str>) -> (UiRequest, String) {
     let with = codec.map(|c| format!(" and codec '{c}'")).unwrap_or_default();
     (UiRequest::OpenExport { delivery: delivery.into(), codec: codec.map(Into::into) }, format!("Render dialog opened with '{delivery}'{with} — choose a file and press Export"))
@@ -568,6 +616,15 @@ pub fn declarations() -> Vec<Value> {
                 "highlight_color": { "type": "STRING", "description": CAPTION_COLORS.join(" | ") },
                 "sync_offset_ms": { "type": "INTEGER", "description": "-300..300, + = later" },
                 "enabled": { "type": "BOOLEAN" }
+            }}
+        }),
+        json!({
+            "name": "tighten_speech",
+            "description": "Edit by transcript (needs captions): ripple-delete filler words (um, uh, erm…) and/or shorten silences between words longer than pause_ms down to keep_ms. One undo step; captions follow.",
+            "parameters": { "type": "OBJECT", "properties": {
+                "fillers": { "type": "BOOLEAN", "description": "remove filler words (default true)" },
+                "pause_ms": { "type": "INTEGER", "description": "shorten pauses longer than this, 200..10000" },
+                "keep_ms": { "type": "INTEGER", "description": "silence left in a shortened pause, 0..2000 (default 250)" }
             }}
         }),
         json!({
@@ -765,10 +822,36 @@ mod tests {
     }
 
     #[test]
+    fn tighten_speech_cuts_fillers_and_pauses() {
+        assert!(call("tighten_speech", json!({ "fillers": false })).is_err(), "nothing to do");
+        assert!(call("tighten_speech", json!({ "pause_ms": 100 })).is_err());
+        assert!(call("tighten_speech", json!({ "pause_ms": 300, "keep_ms": 400 })).is_err());
+        assert_eq!(call("tighten_speech", json!({})).unwrap(), CopilotToolCall::TightenSpeech { fillers: true, pause_ms: None, keep_ms: 250 });
+
+        let (mut tl, _, _) = timeline();
+        let out = run(&mut tl, &[call("tighten_speech", json!({})).unwrap()]);
+        assert!(!out[0].applied && out[0].detail.contains("generate_captions"));
+
+        let w = |t: &str, a: i64, b: i64| nle_core::CaptionWord { start: Time::from_millis(a), end: Time::from_millis(b), text: t.into() };
+        let words = vec![w("well", 1000, 1300), w("um", 1400, 1800), w("hello", 4000, 4500)];
+        tl.captions.segments = nle_core::CaptionTrack::phrases(&words);
+        let mut h = History::default();
+        let out = run_with(&mut tl, &mut h, &[call("tighten_speech", json!({ "pause_ms": 1000, "keep_ms": 200 })).unwrap()], &CopilotEnv::default());
+        assert!(out[0].applied, "{out:?}");
+        let left: Vec<String> = nle_core::text_edit::timeline_words(&tl.captions).into_iter().map(|w| w.text).collect();
+        assert_eq!(left, ["well", "hello"]);
+        // 0.4 s filler + (2.2 s pause - 0.2 s kept), frame-rounded
+        let cut = Time::from_secs(10) - tl.extent();
+        assert!((cut.as_secs_f64() - 2.4).abs() < 0.05, "{cut:?}");
+        assert!(h.undo(&mut tl));
+        assert_eq!(tl.extent(), Time::from_secs(10));
+    }
+
+    #[test]
     fn schemas_cover_every_tool() {
         let decls = crate::tools::gemini_tool_declarations();
         let names: Vec<&str> = decls["functionDeclarations"].as_array().unwrap().iter().filter_map(|d| d["name"].as_str()).collect();
-        for t in ["color_grade", "add_mask", "generate_captions", "style_captions", "polish_audio", "adjust_audio", "set_export_preset", "drop_marker"] {
+        for t in ["color_grade", "add_mask", "generate_captions", "style_captions", "tighten_speech", "polish_audio", "adjust_audio", "set_export_preset", "drop_marker"] {
             assert!(names.contains(&t), "{t} missing from schema");
         }
         let oa = crate::tools::openai_tool_declarations();

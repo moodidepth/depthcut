@@ -33,6 +33,7 @@ mod source;
 mod theme;
 mod timeline_ui;
 mod track_headers;
+mod transcript_ui;
 mod viewer;
 mod voiceover_ui;
 mod whisper_runtime;

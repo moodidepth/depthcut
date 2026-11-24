@@ -151,6 +151,10 @@ pub struct MediaAsset {
     /// Whether frames are deinterlaced on decode.
     #[serde(default, skip_serializing_if = "Deinterlace::is_auto")]
     pub deinterlace: Deinterlace,
+    /// Words spoken in the clip (source time), from "Transcribe Clip"; used
+    /// to find a line and mark In / Out from the text.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transcript: Vec<crate::captions::CaptionWord>,
 }
 
 /// Scan type of a video stream.
@@ -280,6 +284,7 @@ impl MediaAsset {
             subclip: None,
             field_order: FieldOrder::Progressive,
             deinterlace: Deinterlace::Auto,
+            transcript: Vec::new(),
         }
     }
 

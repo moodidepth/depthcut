@@ -109,6 +109,7 @@ actions! {
     ToggleScopes => "Show Video Scopes", "View";
     ToggleAudioMixer => "Show Audio Mixer", "View";
     AutoCaptions => "Auto Captions", "Captions";
+    ToggleTranscript => "Transcript (Text-Based Editing)", "Captions";
     Import => "Import Media", "File";
     ImportFcpxml => "Import FCPXML", "File";
     Open => "Open Project", "File";
@@ -455,6 +456,7 @@ impl ActionMap {
                 (ZoomOut, &[B::ctrl(K::Minus), B::key(K::Minus)]),
                 (ZoomToFit, &[B::ctrl(K::Num0)]),
                 (AutoCaptions, &[B::ctrl_shift(K::C)]),
+                (ToggleTranscript, &[B::ctrl_alt(K::T)]),
                 (Import, &[B::ctrl(K::I)]),
                 (ImportFcpxml, &[B::ctrl_shift(K::I)]),
                 (Open, &[B::ctrl(K::O)]),
@@ -578,6 +580,7 @@ impl ActionMap {
                 (ZoomOut, &[B::ctrl(K::Minus), B::key(K::Minus)]),
                 (ZoomToFit, &[B::ctrl(K::Num0)]),
                 (AutoCaptions, &[B::ctrl_shift(K::C)]),
+                (ToggleTranscript, &[B::ctrl_alt(K::T)]),
                 (Import, &[B::ctrl(K::I)]),
                 (ImportFcpxml, &[B::ctrl_shift(K::I)]),
                 (Open, &[B::ctrl(K::O)]),
@@ -701,6 +704,7 @@ impl ActionMap {
                 (ZoomOut, &[B::ctrl(K::Minus), B::key(K::Minus)]),
                 (ZoomToFit, &[B::ctrl(K::Num0)]),
                 (AutoCaptions, &[B::ctrl_shift(K::C)]),
+                (ToggleTranscript, &[B::ctrl_alt(K::T)]),
                 (Import, &[B::ctrl(K::I)]),
                 (ImportFcpxml, &[B::ctrl_shift(K::I)]),
                 (Open, &[B::ctrl(K::O)]),

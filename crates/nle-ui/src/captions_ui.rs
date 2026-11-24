@@ -222,34 +222,12 @@ fn generate_ui(app: &mut App, ui: &mut egui::Ui) {
 /// Start transcribing the timeline into captions (the Generate button and
 /// the Copilot's `generate_captions`). `Err` says why it can't start.
 pub fn start_caption_generation(app: &mut App) -> Result<(), String> {
-    if !transcribe::AVAILABLE {
-        return Err("this build has no Whisper support".into());
-    }
-    if app.captions.gen_job.is_some() || app.captions.model_job.is_some() {
-        return Err("a Whisper job is already running".into());
-    }
-    let Some(model) = WhisperModel::by_id(app.captions.model_id).filter(|m| m.is_installed()) else {
-        return Err("no Whisper model downloaded yet (Captions panel ▸ Models)".into());
-    };
     if nle_core::audio_spans(&app.project.timeline).is_empty() {
         return Err("the timeline has no audible clips".into());
     }
-    if let Some(e) = model.remove_if_corrupt() {
-        // Damaged file: deleted above; fetch a clean copy instead of crashing whisper.cpp.
-        let m = model;
-        app.captions.model_job = Some(Job::spawn("whisper-model", move |jctx| {
-            jctx.set_progress(0.0, format!("Re-downloading {} (previous file was damaged)…", m.label));
-            let c = jctx.cancel_flag();
-            let p = m.download(|f| jctx.set_fraction(f), c)?;
-            Ok((m.id, p))
-        }));
-        return Err(format!("Whisper model {} was damaged ({e}); re-downloading it — generate again when it's done", m.label));
-    }
+    let model = ready_model(app)?;
     {
-        let m = model;
-        let model_path = m.path();
-        let language = (!app.captions.language.trim().is_empty()).then(|| app.captions.language.trim().to_string());
-        let use_gpu = app.captions.use_gpu;
+        let opts = whisper_options(app, model);
         let spans = nle_core::audio_spans(&app.project.timeline);
         let extent = app.project.timeline.extent();
         let sources = app.library.audio.clone();
@@ -268,11 +246,51 @@ pub fn start_caption_generation(app: &mut App) -> Result<(), String> {
             }
             jctx.set_progress(0.10, "Converting to 16 kHz mono…");
             let mono16k = to_mono_16k(&mix);
+            run_whisper(jctx, &mono16k, &opts)
+        }));
+    }
+    Ok(())
+}
 
-            let mut opts = TranscribeOptions::new(model_path);
-            opts.language = language;
-            opts.use_gpu = use_gpu;
+/// The selected Whisper model when a transcription can start now. A damaged
+/// model file is deleted and downloaded again (the `Err` says so).
+pub fn ready_model(app: &mut App) -> Result<WhisperModel, String> {
+    if !transcribe::AVAILABLE {
+        return Err("this build has no Whisper support".into());
+    }
+    if app.captions.gen_job.is_some() || app.captions.model_job.is_some() || app.transcript.busy() {
+        return Err("a Whisper job is already running".into());
+    }
+    let Some(model) = WhisperModel::by_id(app.captions.model_id).filter(|m| m.is_installed()) else {
+        return Err("no Whisper model downloaded yet (Captions panel ▸ Models)".into());
+    };
+    if let Some(e) = model.remove_if_corrupt() {
+        // Damaged file: deleted above; fetch a clean copy instead of crashing whisper.cpp.
+        let m = model;
+        app.captions.model_job = Some(Job::spawn("whisper-model", move |jctx| {
+            jctx.set_progress(0.0, format!("Re-downloading {} (previous file was damaged)…", m.label));
+            let c = jctx.cancel_flag();
+            let p = m.download(|f| jctx.set_fraction(f), c)?;
+            Ok((m.id, p))
+        }));
+        return Err(format!("Whisper model {} was damaged ({e}); re-downloading it — generate again when it's done", m.label));
+    }
+    Ok(model)
+}
 
+/// Whisper options from the Captions panel (model, language, GPU).
+pub fn whisper_options(app: &App, model: WhisperModel) -> TranscribeOptions {
+    let mut opts = TranscribeOptions::new(model.path());
+    opts.language = (!app.captions.language.trim().is_empty()).then(|| app.captions.language.trim().to_string());
+    opts.use_gpu = app.captions.use_gpu;
+    opts
+}
+
+/// Transcribe 16 kHz mono audio inside a job (progress from 15 % up,
+/// cancelled with the job).
+pub fn run_whisper<T: Send + 'static>(jctx: &nle_media::jobs::JobCtx<T>, mono16k: &[f32], opts: &TranscribeOptions) -> Result<Transcript, String> {
+    {
+        {
             let cancel = Arc::new(AtomicBool::new(false));
             let finished = Arc::new(AtomicBool::new(false));
             let cancel_flag = jctx.cancel_flag();
@@ -293,15 +311,14 @@ pub fn start_caption_generation(app: &mut App) -> Result<(), String> {
             let prog: Arc<dyn Fn(f32) + Send + Sync> = Arc::new(move |f| pfn(0.15 + 0.85 * f));
             let msg = jctx.message_fn();
             let status: Arc<dyn Fn(String) + Send + Sync> = Arc::new(msg);
-            let res = transcribe::transcribe(&mono16k, &opts, prog, status, cancel);
+            let res = transcribe::transcribe(mono16k, opts, prog, status, cancel);
             finished.store(true, Ordering::Relaxed);
             if let Ok(h) = watcher {
                 let _ = h.join();
             }
             res
-        }));
+        }
     }
-    Ok(())
 }
 
 fn track_and_style_ui(app: &mut App, ui: &mut egui::Ui) {

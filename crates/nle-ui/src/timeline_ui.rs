@@ -1194,6 +1194,7 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
                     app.skimming = !app.skimming;
                 }
                 ui.toggle_value(&mut app.show_captions, "CC Captions").on_hover_text("Auto captions & Whisper transcription");
+                ui.toggle_value(&mut app.transcript.open, "Transcript").on_hover_text(app.keymap.tip("Edit by text: delete words, fillers and pauses", Action::ToggleTranscript));
                 let lanes_tip = format!("Group the audio below the storyline into Dialogue / Music / SFX / General lanes ({})", app.keymap.hint(Action::ToggleAudioLanes));
                 ui.toggle_value(&mut app.tl.audio_lanes, "Audio Lanes").on_hover_text(lanes_tip);
                 ui.toggle_value(&mut app.tl.show_retime, "Retime").on_hover_text(app.keymap.tip("Retime editor", Action::ToggleRetime));
