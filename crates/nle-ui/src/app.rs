@@ -5,7 +5,7 @@ use crate::discord::{DiscordPresence, PresenceSnapshot};
 use crate::export_ui::ExportDialog;
 use crate::media::{data_dir, MediaEvent, MediaLibrary};
 use crate::timeline_ui::TimelineState;
-use crate::{browser, captions_ui, copilot_ui, demo, inspector, online_ui, presets_ui, shortcuts_ui, theme, timeline_ui, viewer};
+use crate::{browser, captions_ui, copilot_ui, demo, inspector, key_input, online_ui, presets_ui, shortcuts_ui, theme, timeline_ui, viewer};
 use eframe::egui;
 use eframe::egui_wgpu;
 use nle_core::autosave::Autosaver;
@@ -41,11 +41,20 @@ impl Tool {
     pub const ALL: [Tool; 5] = [Tool::Select, Tool::Trim, Tool::Position, Tool::Blade, Tool::Range];
     pub fn label(self) -> &'static str {
         match self {
-            Tool::Select => "Select (A)",
-            Tool::Trim => "Trim (T)",
-            Tool::Position => "Position (P): move without ripple, leaving gaps",
-            Tool::Blade => "Blade (B)",
-            Tool::Range => "Range (R)",
+            Tool::Select => "Select",
+            Tool::Trim => "Trim",
+            Tool::Position => "Position: move without ripple, leaving gaps",
+            Tool::Blade => "Blade",
+            Tool::Range => "Range",
+        }
+    }
+    pub fn action(self) -> Action {
+        match self {
+            Tool::Select => Action::SelectTool,
+            Tool::Trim => Action::TrimTool,
+            Tool::Position => Action::PositionTool,
+            Tool::Blade => Action::BladeTool,
+            Tool::Range => Action::RangeTool,
         }
     }
     pub fn icon(self) -> &'static str {
@@ -84,6 +93,12 @@ pub struct ViewerState {
     pub safe_zones: bool,
     pub wipe: Option<f32>,
     pub gizmo: viewer::Gizmo,
+    /// The overlay drag in progress.
+    pub drag: Option<viewer::GizmoDrag>,
+    /// How far the zoomed picture is panned, in points.
+    pub pan: egui::Vec2,
+    /// Aspect-ratio guide over the picture (`Free` = none).
+    pub aspect_guide: nle_core::clip::CropAspect,
     pub half_res: bool,
     pub editing_tc: Option<String>,
     /// Preview monitoring volume, 0..150 % (never affects export).
@@ -123,6 +138,11 @@ pub struct BrowserState {
 
 /// What the last preview frame was rendered from:
 /// (history revision, playhead, wipe, proxy, skim position).
+/// Decode workers for the viewer, which keep their own copy of each asset.
+fn preview_decoders() -> FrameServer {
+    FrameServer::new(64, Some(1080))
+}
+
 type PreviewKey = (u64, Time, Option<f32>, bool, Option<(AssetId, Time)>, Option<nle_render::Highlight>);
 
 /// GPU preview: the renderer shares eframe's wgpu device and its display
@@ -238,6 +258,8 @@ pub struct App {
     allow_close: bool,
     #[cfg(windows)]
     ctrl_v_was_down: bool,
+    /// Clips on the editor's own clipboard.
+    copied: Vec<nle_core::edit_ops::CopiedClip>,
 }
 
 static COALESCE: AtomicU64 = AtomicU64::new(1);
@@ -287,7 +309,8 @@ impl App {
                 log::info!("UI + render device: {label}");
                 let gpu = GpuContext::from_existing(Arc::new(rs.device.clone()), Arc::new(rs.queue.clone()), info).with_adapter(&rs.adapter);
                 let (w, h) = preview_size(&project, false);
-                let renderer = Renderer::new(gpu.clone(), w, h);
+                let mut renderer = Renderer::new(gpu.clone(), w, h);
+                renderer.load_luts_in_background();
                 let texture = rs.renderer.write().register_native_texture(&rs.device, renderer.display_view(), nle_render::wgpu::FilterMode::Linear);
                 (Some(Preview { renderer, texture, render_state: rs.clone(), last: None, pending_uploads: true, scope_textures: None }), Some(gpu), label)
             }
@@ -313,7 +336,7 @@ impl App {
             library: MediaLibrary::new(),
             preview,
             gpu,
-            frames: FrameServer::new(64, Some(1080)),
+            frames: preview_decoders(),
             audio: AudioEngine::new(),
             use_proxy: false,
             viewer: ViewerState {
@@ -321,6 +344,9 @@ impl App {
                 safe_zones: false,
                 wipe: None,
                 gizmo: viewer::Gizmo::Transform,
+                drag: None,
+                pan: egui::Vec2::ZERO,
+                aspect_guide: nle_core::clip::CropAspect::Free,
                 half_res: false,
                 editing_tc: None,
                 volume_pct: 100.0,
@@ -366,6 +392,7 @@ impl App {
             allow_close: false,
             #[cfg(windows)]
             ctrl_v_was_down: false,
+            copied: Vec::new(),
         };
         app.after_project_loaded();
         app
@@ -375,8 +402,15 @@ impl App {
 
     pub fn after_project_loaded(&mut self) {
         self.focus.reset();
+        // asset and clip ids restart in every project, so nothing that is
+        // stored under one, or still on its way, may outlive a project switch
         self.library.reset();
+        self.frames = preview_decoders();
+        self.audio.clear_sources();
         self.audio_sources.clear();
+        if let Some(m) = self.motion.job.take() {
+            m.job.cancel();
+        }
         self.audio_revision = u64::MAX;
         self.duck_job = None;
         self.duck_key = None;
@@ -385,6 +419,7 @@ impl App {
         }
         self.set_duck_env(None);
         self.selection.clear();
+        self.copied.clear(); // its assets belong to the project being left
         self.playhead = Time::ZERO;
         self.history.clear();
         self.mark_saved();
@@ -510,8 +545,10 @@ impl App {
     /// (continuous drags become one undo step).
     pub fn exec_key(&mut self, cmd: Command, key: Option<u64>) -> bool {
         let label = cmd.label();
-        if !self.focus.is_empty() && matches!(cmd, Command::SetMarkers { .. } | Command::SetCaptions { .. } | Command::SyncClipsToBeats { .. } | Command::SetMixer { .. }) {
-            self.status(format!("{label}: markers, captions and the mixer belong to the project timeline \u{2014} step out of the compound first"));
+        if !self.focus.is_empty()
+            && matches!(cmd, Command::SetMarkers { .. } | Command::SetCaptions { .. } | Command::SyncClipsToBeats { .. } | Command::SetMixer { .. } | Command::SetTrack { .. })
+        {
+            self.status(format!("{label}: markers, captions, track controls and the mixer belong to the project timeline \u{2014} step out of the compound first"));
             return false;
         }
         let result = self.focus.execute(&mut self.project.timeline, &mut self.history, cmd, key);
@@ -530,8 +567,12 @@ impl App {
 
     pub fn undo(&mut self) {
         let label = self.history.undo_label();
+        let named = self.project.name == self.root_timeline_name();
         if self.focus.undo(&mut self.project.timeline, &mut self.history) {
             self.after_focus_edit();
+            if named {
+                self.project.name = self.root_timeline_name().to_owned();
+            }
             self.status(format!("Undo {}", label.unwrap_or("")));
             self.prune_selection();
         }
@@ -539,8 +580,12 @@ impl App {
 
     pub fn redo(&mut self) {
         let label = self.history.redo_label();
+        let named = self.project.name == self.root_timeline_name();
         if self.focus.redo(&mut self.project.timeline, &mut self.history) {
             self.after_focus_edit();
+            if named {
+                self.project.name = self.root_timeline_name().to_owned();
+            }
             self.status(format!("Redo {}", label.unwrap_or("")));
             self.prune_selection();
         }
@@ -657,8 +702,7 @@ impl App {
     }
 
     fn free_lane_above(&self, at: Time, dur: Time) -> i32 {
-        let placed = self.project.timeline.placed_clips();
-        (1..32).find(|&lane| !placed.iter().any(|p| p.lane == lane && p.start < at + dur && p.end() > at)).unwrap_or(1)
+        self.project.timeline.free_lane(1, at, dur)
     }
 
     pub fn add_adjustment_clip(&mut self) {
@@ -796,19 +840,9 @@ impl App {
         }
     }
 
-    pub fn asset_loudness_lufs(&mut self, id: AssetId) -> Option<f32> {
-        if let Some(l) = self.project.asset(id).and_then(|a| a.loudness_lufs) {
-            return Some(l);
-        }
-        let buf = self.library.audio.get(&id)?.clone();
-        if buf.samples.iter().all(|&s| s.abs() < 1e-6) {
-            return None;
-        }
-        let lufs = analysis::integrated_lufs(&buf.samples, buf.channels as usize, buf.sample_rate);
-        if let Some(a) = self.project.asset_mut(id) {
-            a.loudness_lufs = lufs;
-        }
-        lufs
+    /// Integrated loudness, measured by the media job that decoded the audio.
+    pub fn asset_loudness_lufs(&self, id: AssetId) -> Option<f32> {
+        self.project.asset(id).and_then(|a| a.loudness_lufs)
     }
 
     pub fn analyze_selected_beats(&mut self) {
@@ -1005,13 +1039,14 @@ impl App {
             }
         } else {
             c.effects.push(Effect::new(EffectKind::GamingReframe916));
-            if self.exec(Command::UpdateClip { clip: Box::new(c) }) {
+            let key = coalesce_key();
+            if self.exec_key(Command::UpdateClip { clip: Box::new(c) }, Some(key)) {
                 // the effect renders a 9:16 layer; a landscape sequence would pillarbox it
                 let f = self.project.timeline.format;
-                if f.width > f.height {
-                    self.project.timeline.format.width = 1080;
-                    self.project.timeline.format.height = 1920;
-                    self.resize_preview();
+                let portrait = nle_core::VideoFormat { width: 1080, height: 1920, ..f };
+                let switched = f.width > f.height && self.exec_key(Command::SetFormat { format: portrait }, Some(key));
+                self.history.seal();
+                if switched {
                     self.status(format!("Enabled Gaming 9:16 Reframe — sequence switched {}×{} → 1080×1920", f.width, f.height));
                 } else {
                     self.status("Enabled Gaming 9:16 Reframe (Split Stack · aspect-locked, no stretching)");
@@ -1074,6 +1109,115 @@ impl App {
         self.tl.selected_key = None;
     }
 
+    /// Run a paste or duplicate of `count` clips, then select the copies.
+    fn exec_selecting_copies(&mut self, cmd: Command, count: usize) -> bool {
+        let before: std::collections::HashSet<ClipId> = self.project.timeline.all_ids().into_iter().collect();
+        if !self.exec(cmd) {
+            return false;
+        }
+        self.selection = self.project.timeline.pasted_ids(&before, count);
+        true
+    }
+
+    pub fn copy_selection(&mut self) -> bool {
+        let items = self.project.timeline.copy_clips(&self.selection);
+        if items.is_empty() {
+            return false;
+        }
+        self.status(format!("Copied {} clip{}", items.len(), if items.len() == 1 { "" } else { "s" }));
+        self.copied = items;
+        true
+    }
+
+    pub fn cut_selection(&mut self) {
+        if self.copy_selection() {
+            self.delete_clips(false);
+        }
+    }
+
+    pub fn can_paste(&self) -> bool {
+        !self.copied.is_empty()
+    }
+
+    pub fn paste_clips(&mut self) {
+        if !self.can_paste() {
+            self.status("No clips copied \u{2014} select clips and copy them first");
+            return;
+        }
+        let at = self.playhead.snap_to_frame(self.project.timeline.format.rate);
+        self.exec_selecting_copies(Command::Paste { items: self.copied.clone(), at }, self.copied.len());
+    }
+
+    pub fn duplicate_selection(&mut self) {
+        if self.selection.is_empty() {
+            self.status("Select clips to duplicate");
+            return;
+        }
+        let count = self.project.timeline.copy_clips(&self.selection).len();
+        self.exec_selecting_copies(Command::Duplicate { ids: self.selection.clone() }, count);
+    }
+
+    fn action_targets(&self) -> Vec<ClipId> {
+        if self.selection.is_empty() {
+            self.target_clip().into_iter().collect()
+        } else {
+            self.selection.clone()
+        }
+    }
+
+    pub fn detach_audio(&mut self) {
+        let key = coalesce_key();
+        for id in self.action_targets() {
+            self.exec_key(Command::DetachAudio { id }, Some(key));
+        }
+        self.history.seal();
+    }
+
+    pub fn unlink_audio(&mut self) {
+        let key = coalesce_key();
+        for id in self.action_targets() {
+            // the partner is already unlinked when both halves are selected
+            if self.project.timeline.clip(id).is_some_and(|c| c.link.is_some()) {
+                self.exec_key(Command::Unlink { id }, Some(key));
+            }
+        }
+        self.history.seal();
+    }
+
+    pub fn link_audio(&mut self) {
+        match self.selection[..] {
+            [a, b] => {
+                self.exec(Command::Link { a, b });
+            }
+            _ => self.status("Select one video clip and one audio clip to link"),
+        }
+    }
+
+    /// An Audio Crossfade of one second on one edge of the target clips.
+    pub fn add_audio_crossfade(&mut self, at_end: bool) {
+        let key = coalesce_key();
+        let mut added = false;
+        for id in self.action_targets() {
+            let Some(mut c) = self.project.timeline.clip(id).filter(|c| c.has_audio()).cloned() else { continue };
+            let edge = if at_end { &mut c.audio.crossfade_out } else { &mut c.audio.crossfade_in };
+            *edge = Time::from_secs(1);
+            added |= self.exec_key(Command::UpdateClip { clip: Box::new(c) }, Some(key));
+        }
+        self.history.seal();
+        if !added {
+            self.status("Select a clip with audio to crossfade");
+        }
+    }
+
+    /// A one second transition on one edge of the target clips.
+    pub fn add_transition_at(&mut self, kind: TransitionKind, at_end: bool) {
+        let key = coalesce_key();
+        for id in self.action_targets() {
+            self.exec_key(Command::SetTransition { id, at_end, transition: Some(Transition::new(kind, Time::from_secs(1))) }, Some(key));
+        }
+        self.history.seal();
+    }
+
     pub fn delete_selection(&mut self, leave_gap: bool) {
         // a selected keyframe diamond takes priority over its clip
         if let Some((id, t)) = self.tl.selected_key {
@@ -1085,11 +1229,21 @@ impl App {
             self.exec(Command::DeleteRange { start: s, end: e });
             return;
         }
+        self.delete_clips(leave_gap);
+    }
+
+    /// Delete the selected clips, whatever range or keyframe is selected.
+    pub fn delete_clips(&mut self, leave_gap: bool) {
         let ids = std::mem::take(&mut self.selection);
         let key = coalesce_key();
+        let mut refused = Vec::new();
         for id in ids {
-            let spine = nle_core::command::is_spine(&self.project.timeline, id);
-            let cmd = if leave_gap && spine {
+            let tl = &self.project.timeline;
+            let Some(clip) = tl.clip(id) else { continue }; // went with its linked or parent clip
+            let spine = nle_core::command::is_spine(tl, id);
+            // linked audio lifts the same way as its picture
+            let lifts = spine || clip.link.is_some_and(|link| tl.spine.iter().any(|c| c.link == Some(link)));
+            let cmd = if leave_gap && lifts {
                 Command::DeleteWithGap { id }
             } else if self.hold_connections && spine {
                 // ` held: the deleted clip's connected clips stay on the timeline
@@ -1097,8 +1251,12 @@ impl App {
             } else {
                 Command::DeleteRipple { id }
             };
-            self.exec_key(cmd, Some(key));
+            if !self.exec_key(cmd, Some(key)) {
+                refused.push(id);
+            }
         }
+        self.selection = refused; // e.g. on a locked track
+        self.prune_selection();
         self.history.seal();
     }
 
@@ -1386,6 +1544,15 @@ impl App {
         self.playhead = Time::from_frames((self.playhead.frames_round(rate) + frames).max(0), rate);
     }
 
+    /// Move the playhead while dragging it, sounding the audio under it.
+    pub fn scrub_to(&mut self, t: Time) {
+        let t = t.max(Time::ZERO);
+        if t != self.playhead {
+            self.playhead = t;
+            self.audio.scrub(t);
+        }
+    }
+
     pub fn seek(&mut self, t: Time) {
         let t = t.max(Time::ZERO);
         self.playhead = t;
@@ -1483,7 +1650,11 @@ impl App {
 
     /// Request decodes, upload arrived frames and re-render if anything changed.
     fn update_preview(&mut self) {
-        let t = self.view_time();
+        // the format also changes through undo, redo and Copilot edits
+        self.resize_preview();
+        // export renders whole frames: show the same ones
+        let rate = self.project.timeline.format.rate;
+        let t = Time::from_frames(self.view_time().frames_floor(rate), rate);
         let comp = match self.browser.skim {
             Some((a, st)) => self.browser_composition(a, st),
             None => eval::evaluate(&self.project.timeline, t),
@@ -1498,6 +1669,9 @@ impl App {
                 continue;
             }
             p.renderer.upload_frame(FrameKey { asset: d.asset, index: d.index }, &d.frame);
+            p.pending_uploads = true;
+        }
+        if p.renderer.poll_luts() {
             p.pending_uploads = true;
         }
         // request missing frames
@@ -1753,7 +1927,9 @@ impl App {
         use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL};
         let down = |vk: i32| unsafe { (GetAsyncKeyState(vk) as u16 & 0x8000) != 0 };
         let now = ctx.input(|i| i.focused) && down(VK_CONTROL as i32) && down(b'V' as i32);
-        let edge = now && !self.ctrl_v_was_down;
+        // the event also catches taps shorter than a frame, and Shift+Insert
+        let pasted = ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Paste(_))));
+        let edge = (now || pasted) && !self.ctrl_v_was_down;
         self.ctrl_v_was_down = now;
         edge
     }
@@ -1792,6 +1968,16 @@ impl App {
             Action::RippleDelete => self.delete_selection(false),
             Action::DeleteWithGap => self.delete_selection(true),
             Action::InsertGap => self.insert_gap(),
+            Action::Copy => {
+                self.copy_selection();
+            }
+            Action::Cut => self.cut_selection(),
+            Action::Paste => self.paste_clips(),
+            Action::Duplicate => self.duplicate_selection(),
+            Action::DetachAudio => self.detach_audio(),
+            Action::UnlinkAudio => self.unlink_audio(),
+            Action::LinkAudio => self.link_audio(),
+            Action::AddAudioCrossfade => self.add_audio_crossfade(true),
             Action::Undo => self.undo(),
             Action::Redo => self.redo(),
             Action::SelectAll => self.selection = self.project.timeline.all_ids(),
@@ -1891,47 +2077,7 @@ impl App {
             }
         }
 
-        let ctrl_v_binding = KeyBinding::ctrl(KeyCode::V);
-        let plain_ctrl_v = ctrl_v && ctx.input(|i| !i.modifiers.shift && !i.modifiers.alt);
-        let mut fired_ctrl_v = false;
-
-        let mut entries: Vec<(Action, KeyBinding)> = self.keymap.bindings.iter().flat_map(|(a, list)| list.iter().copied().map(move |b| (*a, b))).collect();
-        entries.sort_by_key(|(a, b)| {
-            let specificity = (b.mods.ctrl as u8) + (b.mods.shift as u8) + (b.mods.alt as u8);
-            (std::cmp::Reverse(specificity), *a)
-        });
-
-        let mut to_run = Vec::new();
-        for (action, kb) in entries {
-            let matched = if let Some(kc) = kb.key {
-                let ek = shortcuts_ui::to_egui_key(kc);
-                let em = shortcuts_ui::to_egui_mods(kb.mods);
-                let key_hit = ctx.input_mut(|i| {
-                    let cur = shortcuts_ui::from_egui_mods(i.modifiers);
-                    let mods_ok = cur == kb.mods || (kc == KeyCode::Plus && i.modifiers.shift && cur.ctrl == kb.mods.ctrl && cur.alt == kb.mods.alt);
-                    mods_ok && i.consume_key(em, ek)
-                });
-                if key_hit {
-                    if kb == ctrl_v_binding {
-                        fired_ctrl_v = true;
-                    }
-                    true
-                } else if plain_ctrl_v && !fired_ctrl_v && kb == ctrl_v_binding {
-                    fired_ctrl_v = true;
-                    true
-                } else {
-                    false
-                }
-            } else if let Some(mb) = kb.mouse {
-                let ep = shortcuts_ui::to_egui_pointer(mb);
-                ctx.input(|i| i.pointer.button_pressed(ep) && shortcuts_ui::from_egui_mods(i.modifiers) == kb.mods)
-            } else {
-                false
-            };
-            if matched {
-                to_run.push(action);
-            }
-        }
+        let to_run = key_input::pressed_actions(ctx, &self.keymap, ctrl_v);
 
         // K held + L / J steps one frame instead of shuttling.
         let k_held = self.keymap.get(Action::ShuttleStop).iter().filter_map(|b| b.key).any(|k| ctx.input(|i| i.key_down(shortcuts_ui::to_egui_key(k))));
@@ -2047,6 +2193,19 @@ impl App {
                     ui.close_menu();
                 }
                 ui.separator();
+                let selected = !self.selection.is_empty();
+                for (label, action, enabled) in [
+                    ("Cut", Action::Cut, selected),
+                    ("Copy", Action::Copy, selected),
+                    ("Paste at Playhead", Action::Paste, self.can_paste()),
+                    ("Duplicate", Action::Duplicate, selected),
+                ] {
+                    if ui.add_enabled(enabled, egui::Button::new(self.menu_label(label, action))).clicked() {
+                        self.dispatch_action(action);
+                        ui.close_menu();
+                    }
+                }
+                ui.separator();
                 if ui.button(self.menu_label("Delete", Action::RippleDelete)).clicked() {
                     self.delete_selection(false);
                     ui.close_menu();
@@ -2073,6 +2232,10 @@ impl App {
                     self.add_transition(TransitionKind::CrossDissolve);
                     ui.close_menu();
                 }
+                if ui.button(self.menu_label("Add Audio Crossfade", Action::AddAudioCrossfade)).clicked() {
+                    self.add_audio_crossfade(true);
+                    ui.close_menu();
+                }
                 if ui.button("Add Basic Title").clicked() {
                     self.add_title(false);
                     ui.close_menu();
@@ -2094,6 +2257,12 @@ impl App {
                 if ui.button(self.menu_label("Blade All", Action::BladeAll)).clicked() {
                     self.blade_at_playhead(true);
                     ui.close_menu();
+                }
+                for (label, action) in [("Detach Audio", Action::DetachAudio), ("Unlink Audio and Video", Action::UnlinkAudio), ("Link Audio and Video", Action::LinkAudio)] {
+                    if ui.button(self.menu_label(label, action)).clicked() {
+                        self.dispatch_action(action);
+                        ui.close_menu();
+                    }
                 }
                 if ui.button(self.menu_label("New Compound Clip", Action::NewCompound)).clicked() {
                     self.make_compound();
@@ -2642,6 +2811,9 @@ impl eframe::App for App {
         // it is restored (transport, audio and autosave keep running).
         if !ctx.input(|i| i.viewport().minimized.unwrap_or(false)) {
             self.update_preview();
+        }
+        if self.preview.as_ref().is_some_and(|p| p.renderer.luts_pending()) {
+            ctx.request_repaint_after(Duration::from_millis(30));
         }
         self.sync_discord();
 

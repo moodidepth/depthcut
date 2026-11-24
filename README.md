@@ -45,8 +45,9 @@ normal uninstaller under *Settings → Apps*.
 | RAM | 8 GB (16 GB for 1440p/4K timelines or the large Whisper model) | 32 GB |
 | Disk | 200 MB for the app, plus about 100 MB for FFmpeg, 60 MB to 550 MB per Whisper model, and space for proxies | |
 
-Hardware video encode/decode (Quick Sync) is used on Intel GPUs. Other GPUs fall
-back to software encoding (`libx264`), which works but is slower.
+On Intel GPUs export uses Quick Sync; on Windows decoding uses D3D11VA. Without a
+working hardware encoder, export falls back to software (`libx264`), which works
+but is slower.
 
 **If the app won't start:** update your graphics driver first (a missing
 `vulkan-1.dll` means no Vulkan driver is installed). The VC++ runtime DLLs are
@@ -97,7 +98,7 @@ and tells you where the log is. Please attach it to bug reports.
   - Beat detection with **Sync to Beats** (`Alt+S`), **Scan VOD for kills /
     action peaks** (`Shift+Alt+K`) and **Gaming 9:16 split-crop** (`Alt+9`).
 - **Keyframes everywhere.** Every continuous parameter has a keyframe diamond in
-  the inspector. Bézier easing; an animation lane (`Ctrl+V`) and a retime editor
+  the inspector. Bézier easing; an animation lane (`Shift+V`) and a retime editor
   (`Ctrl+R`) with speed ramps, reverse, hold frames, frame blending and optical
   flow.
 - **GPU effects and colour.** 22 effects (five blurs, glow, vignette, sharpen,
@@ -116,8 +117,8 @@ and tells you where the log is. Please attach it to bug reports.
   - **AI mattes** (optional, local ONNX models): Person Matte (cut out the
     subject or the background) and Depth Map (show depth, depth fog, keep a
     range). The person matte also builds a subject track for Smart 9:16
-    Reframe on any footage. You supply the models and the ONNX Runtime; see
-    *AI mattes* below.
+    Reframe on any footage. Support is in the default build; the models
+    and ONNX Runtime are not bundled: see *AI mattes* below.
 - **Audio.** EQ, Vocal Clarity, −14 LUFS normalize, and **look-ahead
   auto-ducking**: music ducks *before* the voice starts. Preview and export
   sound identical.
@@ -130,7 +131,15 @@ and tells you where the log is. Please attach it to bug reports.
   an automatic fallback model when the main one is overloaded.
 - **Online audio & SFX.** Search Openverse and Internet Archive CC0/CC-BY audio
   in the app, preview it, and insert it. Credits are written next to your export.
-- **Export.** AV1 / HEVC / H.264 via Quick Sync, or software x264.
+- **Transform and crop in the viewer.** Drag to move, scale, rotate or crop, with
+  snapping guides, aspect presets, flips and safe-area guides.
+- **Tracks.** Every timeline lane has show/hide, mute, solo and lock switches.
+  Solo also applies to export. Clips can be copied, pasted and duplicated, and
+  audio can be detached as a linked or unlinked clip.
+- **Export.** AV1 / HEVC / H.264 via Quick Sync, or software H.264 (x264) / H.265
+  (x265, slow). 24, 30 or 60 fps or the project's rate. A movie export that fails
+  or is cancelled leaves any existing file of that name untouched; image
+  sequences are written in place.
 - **Discord Rich Presence** (optional, *Help → Discord Rich Presence…*). Shows
   what you're editing; it does nothing if Discord isn't running. See
   [docs/DISCORD.md](docs/DISCORD.md).
@@ -160,7 +169,7 @@ presets: **Argon Montage** (the default, below), **Final Cut Pro** and
 | **↓** | Next Edit Point | Playback |
 | **Home** | Go to Start | Playback |
 | **End** | Go to End | Playback |
-| **A** | Select Tool | Tools |
+| **V / A** | Select Tool | Tools |
 | **T** | Trim Tool | Tools |
 | **Ctrl+Shift+B** | Blade Tool | Tools |
 | **R** | Range Tool | Tools |
@@ -176,7 +185,14 @@ presets: **Argon Montage** (the default, below), **Final Cut Pro** and
 | **Ctrl+Shift+Z** | Redo | Edit |
 | **Ctrl+A** | Select All | Edit |
 | **Esc** | Clear Selection | Edit |
-| **V** | Enable / Disable Clip | Edit |
+| **Shift+D** | Enable / Disable Clip | Edit |
+| **Ctrl+C** | Copy Clips | Edit |
+| **Ctrl+X** | Cut Clips | Edit |
+| **Ctrl+V** | Paste Clips at Playhead | Edit |
+| **Ctrl+D** | Duplicate Clips | Edit |
+| **Ctrl+Shift+D** | Detach Audio | Edit |
+| *(unbound)* | Unlink / Link Audio and Video | Edit |
+| **Ctrl+Shift+T** | Add Audio Crossfade | Edit |
 | **Ctrl+T** | Add Cross Dissolve | Edit |
 | **Alt+A** | Add Adjustment Clip | Edit |
 | **Alt+C** | New Compound Clip | Edit |
@@ -193,7 +209,7 @@ presets: **Argon Montage** (the default, below), **Final Cut Pro** and
 | **Alt+Q** | Connect Browser Clip | Edit |
 | **D** | Overwrite with Browser Clip | Edit |
 | **Alt+K** | Add Keyframe | Animation |
-| **Ctrl+V** | Show Video Animation | Animation |
+| **Shift+V** | Show Video Animation | Animation |
 | **Ctrl+R** | Show Retime Editor | Animation |
 | **M** | Add Marker | Markers |
 | **Alt+M** | Add Named / Colored Marker | Markers |
@@ -206,8 +222,8 @@ presets: **Argon Montage** (the default, below), **Final Cut Pro** and
 | **Ctrl+Shift+A** | AI Editor Copilot | AI |
 | **S / N** | Snapping On/Off | View |
 | **Shift+S** | Skimming On/Off | View |
-| **Ctrl+= / Ctrl++** | Zoom In | View |
-| **Ctrl+-** | Zoom Out | View |
+| **= / + / Ctrl+= / Ctrl++** | Zoom In | View |
+| **- / Ctrl+-** | Zoom Out | View |
 | **Ctrl+0** | Zoom to Fit | View |
 | **Ctrl+Shift+L** | Show Audio Lanes by Role | View |
 | **Ctrl+7** | Show Video Scopes | View |
@@ -233,7 +249,7 @@ Mouse:
 - Drag keyframe diamonds in the animation lane to retime them.
 - Double-click a colour wheel to reset it.
 
-> **Note on Ctrl+V:** egui's winit backend turns Ctrl+V into a *paste* event and drops the key. On Windows the editor reads the key state directly, so the shortcut always works. On Linux it relies on the paste event, so it only fires when the clipboard holds text. The same toggle is in the timeline toolbar (**Animation**) and in **View → Video Animation**.
+> **Note on Ctrl+V:** egui's winit backend turns Ctrl+V into a *paste* event and drops the key. On Windows the editor reads the key state directly. On Linux it relies on the paste event, so pasting clips only fires when the system clipboard holds text; the command can be given another key in **Help → Keyboard Shortcuts**.
 
 ---
 
@@ -241,7 +257,7 @@ Mouse:
 
 Everything below covers building from source and how the code is laid out.
 The editor was tuned for an **AMD Ryzen 7 5800X** with an **Intel Arc A750**, on Windows
-(DX12/Vulkan + Quick Sync over D3D11VA) and Linux (Vulkan + Quick Sync over VA-API `iHD`).
+(DX12/Vulkan, D3D11VA decode, Quick Sync encode) and Linux (Vulkan + Quick Sync over VA-API `iHD`).
 
 ### Workspace
 
@@ -273,7 +289,7 @@ There are no circular dependencies: `nle-core` ← `nle-media` ← `nle-render` 
 
 #### nle-media
 
-- **Hardware decode.** Planned per codec and bit depth, in this order: Quick Sync (`h264_qsv` / `hevc_qsv` / `av1_qsv`), then VA-API or D3D11VA, then software. On Linux the QSV child device is `vaapi=va:/dev/dri/renderD128,driver=iHD` → `qsv=hw@va`. On Windows it is `d3d11va=dx:,vendor_id=0x8086` → `qsv=hw@dx`. If any step fails, decoding falls back to software without interrupting the user.
+- **Hardware decode.** Planned per codec and bit depth. Windows: D3D11VA, then software. QSV decode is not used there, because after a seek it returns pictures 3–5 frames early (see `tests/decode_end.rs`). Linux: Quick Sync (`h264_qsv` / `hevc_qsv` / `av1_qsv`, child device `vaapi=va:/dev/dri/renderD128,driver=iHD` → `qsv=hw@va`), then VA-API, then software. If any step fails, decoding falls back to software without interrupting the user.
 - **Decoders.** Two backends:
   - the default decoder streams raw NV12/P010 from the `ffmpeg` executable;
   - the `ffmpeg` cargo feature enables in-process decoding through `ffmpeg-next`.
@@ -310,7 +326,7 @@ All pixel work runs in WGSL compute shaders on the GPU:
 - **Transitions:** Cross Dissolve, Dip to Black, Dip to White, Whip Pan (directional blur), Slide, Push and Luma Wipe.
 - Slow-motion and retimed footage **Frame Blending** and **block-matching motion-compensated interpolation** (`Optical Flow`).
 - Titles, lower thirds, animated text presets, active-word highlighted captions, outline and pill backgrounds.
-- NV12 packing for the encoders, with **export** via `av1_qsv`, `hevc_qsv`, `h264_qsv` and `h264_vaapi` (or software `libx264`). When timeline-used online media requires credit (`CC-BY`, etc.), `project_credits.txt` is written automatically beside the exported video.
+- NV12 packing for the encoders, with **export** via `av1_qsv`, `hevc_qsv`, `h264_qsv` and `h264_vaapi` (or software `libx264` / `libx265`). When timeline-used online media requires credit (`CC-BY`, etc.), `project_credits.txt` is written automatically beside the exported video.
 - Decoded frames stay in VRAM in an **LRU cache capped at 2,560 MB**.
 
 #### nle-ui
@@ -451,9 +467,11 @@ regenerate the license file with `python scripts/gen_third_party_notices.py`.
 - **Real-media tests** run automatically when `ffmpeg`/`ffprobe` are found, and are skipped otherwise:
   - `nle-media/tests/ffmpeg_pipeline.rs` generates a test clip, then checks probing, hardware/software decode (full and downscaled), 48 kHz audio decode, filmstrip thumbnails and the proxy transcode.
     It also encodes HEVC Main10 and AV1 sources with the Arc's Quick Sync encoders and checks that they decode in hardware (P010 / NV12). This runs only where those encoders work.
-  - `nle-render/tests/export_ffmpeg.rs` exports a two-clip timeline with a dissolve through **every encoder FFmpeg reports** (`av1_qsv`, `hevc_qsv`, `h264_qsv`, `h264_vaapi`, `libx264`). Each output is verified with ffprobe for size, duration and audio track.
+  - `nle-render/tests/export_ffmpeg.rs` exports a two-clip timeline with a dissolve through **every encoder FFmpeg reports** (`av1_qsv`, `hevc_qsv`, `h264_qsv`, `h264_vaapi`, `libx264`, `libx265`). Each output is verified with ffprobe for size, duration and audio track.
+  - `nle-media/tests/decode_end.rs` checks by picture content that seeks return the requested frame (open GOPs, transport streams, FLV, variable frame rate, ends of streams).
+  - `nle-render/tests/export_alignment.rs` checks that exported frames are the right source frames and match the preview, that missing media fails the export, and that cancelling keeps the previous file.
   - A hardware-encoder failure is excused only if FFmpeg also cannot use that encoder directly. Otherwise the test fails.
-- **Motion and mattes:** `nle-core/tests/motion_tests.rs` covers tracked masks, follow, reframe pan, stabilization timing, scene-cut blading and FCPXML round trips. The GPU tests `nle-render/tests/motion.rs` and `nle-render/tests/matte.rs` use synthetic moving scenes (flow, similarity / perspective fits, the region tracker, stabilizer, cut scores, Speed Warp) and a synthetic matte source (every Person Matte / Depth Map output, plus pass-through without a matte). `nle-ai` tests the ONNX pre- and post-processing; no real model runs in the tests.
+- **Motion and mattes:** `nle-core/tests/motion_tests.rs` covers tracked masks, follow, reframe pan, stabilization timing, scene-cut blading and FCPXML round trips. The GPU tests `nle-render/tests/motion.rs` and `nle-render/tests/matte.rs` use synthetic moving scenes (flow, similarity / perspective fits, the region tracker, stabilizer, cut scores, Speed Warp) and a synthetic matte source (every Person Matte / Depth Map output, plus pass-through without a matte). `nle-ai` tests the ONNX pre- and post-processing; no real model runs in the automated tests.
 - **Release smoke test** (manual, `#[ignore]`): `nle-render/tests/e2e_smoke.rs` exercises the whole pipeline on generated media. It synthesizes speech with Windows TTS, then imports → trims → applies Zoom Punch → runs Whisper auto-captions → applies look-ahead ducking → exports → validates with ffprobe, and measures the duck in the exported audio. It needs ffmpeg, a GPU and `ggml-base-q5_1.bin` in the models folder:
 
   ```powershell
@@ -462,9 +480,9 @@ regenerate the license file with `python scripts/gen_third_party_notices.py`.
 
 **Verified on** Ryzen 7 5800X + Arc A750 under Windows 11, with FFmpeg 9.0.2 (gyan.dev full build):
 - every suite passes;
-- Quick Sync decode works for H.264, HEVC Main10 and AV1;
+- D3D11VA decode works for H.264, HEVC Main10 and AV1;
 - proxies use `h264_qsv`;
-- exports work through `av1_qsv`, `hevc_qsv`, `h264_qsv` and `libx264`.
+- exports work through `av1_qsv`, `hevc_qsv`, `h264_qsv`, `libx264` and `libx265`.
 
 The `ffmpeg` feature (`ffmpeg-next` 9.1) was built and tested against the same FFmpeg 9.0.2, using the winget `Gyan.FFmpeg.Shared` package. The Windows section above has the commands.
 
@@ -473,13 +491,15 @@ The `ffmpeg` feature (`ffmpeg-next` 9.1) was built and tested against the same F
 ### Implementation notes
 
 - **Intel Arc on DX12:** creating an `Rgba8UnormSrgb` *view* of a storage-capable `Rgba8Unorm` texture loses the device. The display output is therefore copied into a separate sRGB texture for egui instead of being reinterpreted (see `Renderer::make_display`).
-- **Optional libav decoder:** the `ffmpeg` feature (`nle-media/src/decode/libav.rs`) uses FFmpeg's generic hwaccel (D3D11VA / VA-API `iHD`) and transfers frames to NV12/P010. It needs FFmpeg dev libraries and libclang to build. The default CLI decoder covers the full QSV → VA-API/D3D11VA → software chain.
+- **Optional libav decoder:** the `ffmpeg` feature (`nle-media/src/decode/libav.rs`) uses FFmpeg's generic hwaccel (D3D11VA / VA-API `iHD`) and transfers frames to NV12/P010. It needs FFmpeg dev libraries and libclang to build. The default CLI decoder covers the hardware → software plan described under *nle-media*.
 - **Quick Sync on Windows (FFmpeg 8/9):**
   - `hwupload=extra_hw_frames=N` fails on D3D11 with `E_INVALIDARG`, so Windows uses a plain `hwupload,format=qsv`.
   - Output colour flags (`-colorspace` etc.) make FFmpeg insert an auto-scale filter that cannot accept QSV frames. BT.709 tags are therefore set with `setparams` before the upload.
-  - QSV decode uses `-hwaccel_output_format qsv` with an explicit `hwdownload`. Without it, HEVC 10-bit and AV1 fail format negotiation.
-- **AI mattes (optional `onnx` feature):** build with `cargo build --release -p nle-ui --features onnx`. The app loads ONNX Runtime at run time (`ort` 2.0.0-rc.10, which targets ONNX Runtime 1.22). It looks for `onnxruntime.dll` in `ORT_DYLIB_PATH`, next to `rust-cut-pro.exe`, then in `%LOCALAPPDATA%\RustCutPro\models\`. Put the models in that same folder:
+  - QSV decode is not planned on Windows: it seeks inexactly. Decoding goes through D3D11VA.
+- **AI mattes (`onnx` feature, on by default):** the app loads ONNX Runtime at run time (`ort` 2.0.0-rc.10, which targets ONNX Runtime 1.22). It looks for `onnxruntime.dll` in `ORT_DYLIB_PATH`, next to `rust-cut-pro.exe`, then in `%LOCALAPPDATA%\RustCutPro\models\`. Put the models in that same folder:
   - `person.onnx`: a portrait matting / segmentation model with a `1×3×H×W` input normalised as `(x − 0.5) / 0.5` and a `1×1×H×W` output in 0..1 (probabilities or logits), e.g. MODNet.
   - `depth.onnx`: a relative depth model with ImageNet normalisation whose output grows towards the camera, e.g. Depth Anything V2 Small.
 
-  Fixed input sizes are read from the model; dynamic ones use 512² (person) or 518² (depth). Mattes are cached at ≤ 480 px wide (about 130 KB per frame) in `%LOCALAPPDATA%\RustCutPro\mattes\`. Inference runs on the CPU. **No model has been run against this code yet**: only the pre- and post-processing are tested.
+  Fixed input sizes are read from the model. Dynamic ones get the frame's shape at about 512² pixels (person) or 518×518 (depth). Mattes are cached at ≤ 480 px wide (about 130 KB per frame) in `%LOCALAPPDATA%\RustCutPro\mattes\`. Inference runs on the CPU, and the app switches ONNX Runtime's telemetry off.
+
+  Checked by hand on 2026-11-22 (Windows, Ryzen 7 5800X, ONNX Runtime 1.22.1, MODNet from `Xenova/modnet`, Depth Anything V2 Small from `onnx-community/depth-anything-v2-small`) on one 3-second 720p test clip made from still photos: generate, preview, a trimmed clip, and a Person Matte export. It took about 0.4 s per frame for person and 0.6 s for depth, so roughly 12 and 19 minutes per minute of 30 fps video. MODNet is a portrait model: it can miss people in wide shots and keep objects held next to a person. Depth is normalised per frame, so it may flicker on real footage; that has not been tested.

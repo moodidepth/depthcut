@@ -4,7 +4,7 @@
 //! back once and streamed to FFmpeg, which encodes on the Arc A750's media
 //! engines: **AV1 (`av1_qsv`)**, **HEVC (`hevc_qsv`)**, **H.264
 //! (`h264_qsv` / `h264_vaapi`)**, the NVIDIA NVENC / AMD AMF equivalents, or
-//! `libx264` as a software fallback (see `nle_media::encoder_probe`).
+//! `libx264` / `libx265` in software (see `nle_media::encoder_probe`).
 //! Audio is mixed offline (same mixer as playback) and muxed as AAC or PCM.
 //!
 //! Mastering formats (ProRes, DNxHR, PNG / TIFF / EXR sequences) read the
@@ -37,6 +37,9 @@ pub enum ExportError {
     Encoder(String),
     #[error("export cancelled")]
     Cancelled,
+    /// A clip's picture or sound could not be read.
+    #[error("media unreadable: {0}")]
+    Media(String),
 }
 
 /// Compressed video format of an [`ExportPreset`].
@@ -63,6 +66,7 @@ pub enum ExportPreset {
     H264Amf,
     H264Vaapi,
     H264Software,
+    HevcSoftware,
     ProRes422,
     ProRes422Hq,
     ProRes4444,
@@ -89,7 +93,7 @@ impl ExportPreset {
     ];
 
     /// Fastest first: Intel QSV → NVIDIA NVENC → AMD AMF → VA-API → CPU.
-    pub const ALL: [ExportPreset; 11] = [
+    pub const ALL: [ExportPreset; 12] = [
         ExportPreset::Av1Qsv,
         ExportPreset::HevcQsv,
         ExportPreset::H264Qsv,
@@ -101,6 +105,7 @@ impl ExportPreset {
         ExportPreset::H264Amf,
         ExportPreset::H264Vaapi,
         ExportPreset::H264Software,
+        ExportPreset::HevcSoftware,
     ];
 
     pub fn label(self) -> &'static str {
@@ -116,6 +121,7 @@ impl ExportPreset {
             ExportPreset::H264Amf => "H.264 — AMD AMF (h264_amf)",
             ExportPreset::H264Vaapi => "H.264 — VA-API (h264_vaapi)",
             ExportPreset::H264Software => "H.264 — Software (libx264)",
+            ExportPreset::HevcSoftware => "HEVC / H.265 — Software (libx265, slow)",
             ExportPreset::ProRes422 => "Apple ProRes 422 (10-bit)",
             ExportPreset::ProRes422Hq => "Apple ProRes 422 HQ (10-bit)",
             ExportPreset::ProRes4444 => "Apple ProRes 4444 (10-bit, alpha)",
@@ -140,6 +146,7 @@ impl ExportPreset {
             ExportPreset::H264Amf => "h264_amf",
             ExportPreset::H264Vaapi => "h264_vaapi",
             ExportPreset::H264Software => "libx264",
+            ExportPreset::HevcSoftware => "libx265",
             ExportPreset::ProRes422 | ExportPreset::ProRes422Hq | ExportPreset::ProRes4444 => "prores_ks",
             ExportPreset::DnxhrHq | ExportPreset::DnxhrHqx | ExportPreset::Dnxhr444 => "dnxhd",
             ExportPreset::PngSequence => "png",
@@ -154,7 +161,7 @@ impl ExportPreset {
     pub fn codec(self) -> ExportCodec {
         match self {
             ExportPreset::Av1Qsv | ExportPreset::Av1Nvenc | ExportPreset::Av1Amf => ExportCodec::Av1,
-            ExportPreset::HevcQsv | ExportPreset::HevcNvenc | ExportPreset::HevcAmf => ExportCodec::Hevc,
+            ExportPreset::HevcQsv | ExportPreset::HevcNvenc | ExportPreset::HevcAmf | ExportPreset::HevcSoftware => ExportCodec::Hevc,
             ExportPreset::ProRes422 | ExportPreset::ProRes422Hq | ExportPreset::ProRes4444 => ExportCodec::ProRes,
             ExportPreset::DnxhrHq | ExportPreset::DnxhrHqx | ExportPreset::Dnxhr444 => ExportCodec::Dnxhr,
             ExportPreset::PngSequence | ExportPreset::TiffSequence | ExportPreset::ExrSequence => ExportCodec::ImageSequence,
@@ -353,11 +360,12 @@ impl GamingDeliveryPreset {
     }
 
     /// Best encoder for this preset out of `available` (which is ordered
-    /// fastest backend first, so hardware always wins over `libx264`).
+    /// fastest backend first, so hardware always wins over `libx264`). Never
+    /// `libx265`: too slow for a one-click preset.
     pub fn preferred_codec(self, available: &[ExportPreset]) -> ExportPreset {
         self.codec_order()
             .into_iter()
-            .find_map(|codec| available.iter().copied().find(|p| p.codec() == codec))
+            .find_map(|codec| available.iter().copied().find(|p| p.codec() == codec && *p != ExportPreset::HevcSoftware))
             .or_else(|| available.first().copied())
             .unwrap_or(ExportPreset::H264Software)
     }
@@ -508,6 +516,8 @@ impl ExportSettings {
         let vf = match self.preset {
             p if p.is_qsv() => format!("{tags},{}", hwaccel::qsv_upload_filter(platform)),
             ExportPreset::H264Vaapi => format!("{tags},format=nv12,hwupload"),
+            ExportPreset::HevcSoftware if pack == crate::PackFormat::P010 => format!("{tags},format=yuv420p10le"),
+            ExportPreset::HevcSoftware => format!("{tags},format=yuv420p"),
             _ => tags.to_string(),
         };
         let ten = pack == crate::PackFormat::P010;
@@ -549,6 +559,10 @@ impl ExportSettings {
         }
         if ten && self.preset.codec() == ExportCodec::Hevc && (self.preset.is_nvenc() || self.preset.is_amf()) {
             a.extend(["-profile:v", "main10"].map(String::from));
+        }
+        if self.preset == ExportPreset::HevcSoftware {
+            // stderr is only read at the end: x265's chatter could fill the pipe
+            a.extend(["-x265-params", "log-level=error"].map(String::from));
         }
         if self.preset.codec() == ExportCodec::Hevc {
             a.extend(["-tag:v", "hvc1"].map(String::from));
@@ -689,11 +703,13 @@ pub fn mix_audio(project: &Project, sources: &HashMap<AssetId, Arc<AudioBuffer>>
 pub struct ExportSource {
     server: FrameServer,
     assets: HashMap<AssetId, MediaAsset>,
+    /// The first picture that could not be read.
+    error: Option<String>,
 }
 
 impl ExportSource {
     pub fn new(project: &Project) -> Self {
-        ExportSource { server: FrameServer::new(2, None), assets: project.assets.iter().map(|a| (a.id, a.clone())).collect() }
+        ExportSource { server: FrameServer::new(2, None), assets: project.assets.iter().map(|a| (a.id, a.clone())).collect(), error: None }
     }
 }
 
@@ -702,9 +718,21 @@ impl FrameSource for ExportSource {
         self.assets.get(&asset).map(|a| a.frame_rate()).unwrap_or_default()
     }
     fn frame(&mut self, asset: AssetId, index: i64) -> Option<VideoFrame> {
-        let a = self.assets.get(&asset)?;
+        let Some(a) = self.assets.get(&asset) else {
+            self.error.get_or_insert_with(|| "a clip's media is no longer in the project".into());
+            return None;
+        };
+        if !a.has_video() {
+            return None;
+        }
         let t = Time::from_frames(index, a.frame_rate());
-        self.server.frame_sync(a, t, false).ok()
+        match self.server.frame_sync(a, t, false) {
+            Ok(frame) => Some(frame),
+            Err(e) => {
+                self.error.get_or_insert_with(|| format!("picture of {}: {e}", a.path.display()));
+                None
+            }
+        }
     }
     fn matte(&mut self, asset: AssetId, index: i64, kind: nle_core::MatteKind) -> Option<nle_media::matte::Matte> {
         nle_media::matte::load(self.assets.get(&asset)?, kind, index)
@@ -714,7 +742,45 @@ impl FrameSource for ExportSource {
     }
 }
 
+/// `decoded`, plus the sound of any clip audible in `start..end` that is not
+/// in it yet (media still being analysed, or just relinked).
+fn export_audio(
+    project: &Project,
+    decoded: &HashMap<AssetId, Arc<AudioBuffer>>,
+    start: Time,
+    end: Time,
+    cancel: &AtomicBool,
+) -> Result<HashMap<AssetId, Arc<AudioBuffer>>, ExportError> {
+    let mut sources = decoded.clone();
+    for span in eval::audio_spans(&project.timeline) {
+        let silent = span.params.muted || span.containers.iter().any(|c| c.params.muted);
+        if silent || span.start >= end || span.end() <= start || sources.contains_key(&span.asset) {
+            continue;
+        }
+        if cancel.load(Ordering::Relaxed) {
+            return Err(ExportError::Cancelled);
+        }
+        let asset = project.asset(span.asset).ok_or_else(|| ExportError::Media("a clip's sound is no longer in the project".into()))?;
+        if !asset.has_audio() {
+            continue;
+        }
+        let sound = nle_media::audio::decode::decode_audio(asset).map_err(|e| ExportError::Media(format!("sound of {}: {e}", asset.path.display())))?;
+        sources.insert(asset.id, Arc::new(sound));
+    }
+    Ok(sources)
+}
+
+/// Where `path` is written until it is complete.
+fn partial_path(path: &Path, id: &str) -> PathBuf {
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    let ext = path.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+    path.with_file_name(format!("{stem}.part-{id}{ext}"))
+}
+
 /// Run a complete export (blocking — call from a background thread).
+///
+/// The file appears at `settings.path` only once it is complete: cancelling or
+/// failing leaves whatever was there before.
 pub fn run_export(
     project: &Project,
     settings: &ExportSettings,
@@ -734,17 +800,15 @@ pub fn run_export(
         std::fs::create_dir_all(dir)?;
     }
 
+    // unique per export: queued / Copilot exports can run side by side
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = format!("{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
+
     // sequences get the mix as a sidecar WAV next to the frames
     let wav = if settings.audio != AudioExport::None {
-        let path = if seq {
-            settings.path.with_extension("wav")
-        } else {
-            // unique per export: queued / Copilot exports can run side by side
-            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            std::env::temp_dir().join(format!("rcp-export-{}-{n}.wav", std::process::id()))
-        };
-        let mut pcm = mix_audio(project, audio_sources, settings.start, settings.end);
+        let path = if seq { settings.path.with_extension("wav") } else { std::env::temp_dir().join(format!("rcp-export-{id}.wav")) };
+        let sources = export_audio(project, audio_sources, settings.start, settings.end, cancel)?;
+        let mut pcm = mix_audio(project, &sources, settings.start, settings.end);
         if let Some(target) = settings.loudness_target {
             use nle_media::analysis::loudness::{normalize_program, CEILING_DBFS};
             match normalize_program(&mut pcm, 2, 48_000, target, CEILING_DBFS) {
@@ -758,7 +822,11 @@ pub fn run_export(
         None
     };
 
-    let args = settings.ffmpeg_args(Platform::current(), wav.as_deref());
+    let mut output = settings.clone();
+    if !seq {
+        output.path = partial_path(&settings.path, &id);
+    }
+    let args = output.ffmpeg_args(Platform::current(), wav.as_deref());
     log::info!("export: ffmpeg {}", args.join(" "));
     let mut child = ffmpeg_cli::command(&ffmpeg_cli::ffmpeg_path()).args(&args).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn()?;
     let mut stdin = child.stdin.take().ok_or_else(|| ExportError::Encoder("no stdin".into()))?;
@@ -775,6 +843,10 @@ pub fn run_export(
         let t = settings.start + Time::from_frames(n as i64, settings.frame_rate);
         let comp = eval::evaluate(&project.timeline, t);
         let frame = renderer.render_packed(&comp, &mut source, RenderOptions::default(), pack);
+        if let Some(e) = source.error.take() {
+            result = Err(ExportError::Media(e));
+            break;
+        }
         if let Err(e) = stdin.write_all(&frame) {
             result = Err(ExportError::Encoder(format!("pipe closed: {e}")));
             break;
@@ -787,14 +859,26 @@ pub fn run_export(
     if let Some(w) = wav.as_ref().filter(|_| !seq) {
         let _ = std::fs::remove_file(w);
     }
-    if matches!(result, Err(ExportError::Cancelled)) {
+    let result = match result {
+        Err(e @ (ExportError::Cancelled | ExportError::Media(_))) => Err(e),
+        _ if !out.status.success() => {
+            // FFmpeg's own diagnostics are more useful than "pipe closed"
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let msg = stderr.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("unknown error").trim().to_string();
+            Err(ExportError::Encoder(msg))
+        }
+        other => other,
+    };
+    if seq {
         return result;
     }
-    if !out.status.success() {
-        // FFmpeg's own diagnostics are more useful than "pipe closed"
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        let msg = stderr.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("unknown error").trim().to_string();
-        return Err(ExportError::Encoder(msg));
+    let result = result.and_then(|()| {
+        std::fs::rename(&output.path, &settings.path)
+            .map_err(|e| std::io::Error::new(e.kind(), format!("cannot replace {} (open in another program?): {e}", settings.path.display())).into())
+    });
+    if result.is_err() {
+        // only ever this export's own partial file
+        let _ = std::fs::remove_file(&output.path);
     }
     result
 }
@@ -919,7 +1003,7 @@ mod tests {
         use nle_media::encoder_probe::{probe_with, EncoderBackend};
         let nvidia = probe_with(&HwCaps::default(), |_, b| matches!(b, EncoderBackend::Nvenc | EncoderBackend::Cpu));
         let w = working_presets(&nvidia);
-        assert_eq!(w, [ExportPreset::Av1Nvenc, ExportPreset::HevcNvenc, ExportPreset::H264Nvenc, ExportPreset::H264Software]);
+        assert_eq!(w, [ExportPreset::Av1Nvenc, ExportPreset::HevcNvenc, ExportPreset::H264Nvenc, ExportPreset::H264Software, ExportPreset::HevcSoftware]);
         assert_eq!(GamingDeliveryPreset::YouTube4k60.preferred_codec(&w), ExportPreset::Av1Nvenc);
         assert_eq!(GamingDeliveryPreset::TikTokShorts1080x1920.preferred_codec(&w), ExportPreset::H264Nvenc);
         // CPU-only machine and "nothing works" both degrade without panicking

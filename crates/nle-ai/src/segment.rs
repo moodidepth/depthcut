@@ -15,8 +15,9 @@
 //! Inference needs the `onnx` cargo feature (the `ort` crate with
 //! `load-dynamic`): ONNX Runtime is loaded at run time from
 //! `onnxruntime.dll` next to the executable, the models folder, or
-//! `ORT_DYLIB_PATH`, so builds without it still start. Pre- and
-//! post-processing are plain functions so they are tested without a model.
+//! `ORT_DYLIB_PATH`, so builds without it still start. Its telemetry, on by
+//! default in Microsoft's builds, is switched off. Pre- and post-processing
+//! are plain functions so they are tested without a model.
 
 use nle_core::MatteKind;
 use nle_media::matte::Matte;
@@ -35,7 +36,7 @@ pub enum OutputMap {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ModelSpec {
     pub kind: MatteKind,
-    /// Input size used when the model's own input is dynamic.
+    /// Input size used when the model's own input is dynamic (see [`Self::input_for`]).
     pub size: (u32, u32),
     pub mean: [f32; 3],
     pub std: [f32; 3],
@@ -49,6 +50,19 @@ impl ModelSpec {
             MatteKind::Depth => ModelSpec { kind, size: (518, 518), mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225], output: OutputMap::Normalize },
         }
     }
+
+    /// Input size for a `w × h` frame when the model takes any size. Person
+    /// models close the gaps between bodies in a squashed frame, so they get
+    /// the frame's shape at the pixel count of `size`, in steps of 32. Depth
+    /// looks the same squashed and is quicker that way.
+    pub fn input_for(&self, w: u32, h: u32) -> (u32, u32) {
+        if self.kind != MatteKind::Person || w == 0 || h == 0 {
+            return self.size;
+        }
+        let k = ((self.size.0 * self.size.1) as f64 / (w as f64 * h as f64)).sqrt();
+        let side = |v: u32| (((v as f64 * k / 32.0).round() as u32) * 32).clamp(128, 1536);
+        (side(w), side(h))
+    }
 }
 
 /// Expected model file for `kind`.
@@ -59,6 +73,14 @@ pub fn model_path(kind: MatteKind) -> PathBuf {
 /// True when this build can run ONNX models at all.
 pub const fn onnx_supported() -> bool {
     cfg!(feature = "onnx")
+}
+
+/// True when ONNX Runtime is where this build looks for it.
+pub fn runtime_found() -> bool {
+    #[cfg(feature = "onnx")]
+    return onnx::runtime_path().is_some();
+    #[cfg(not(feature = "onnx"))]
+    return false;
 }
 
 /// Bilinear RGBA8 sample at pixel-centre coordinates.
@@ -164,8 +186,9 @@ pub struct MatteModel {
     pub spec: ModelSpec,
     #[cfg(feature = "onnx")]
     session: ort::session::Session,
+    /// The model's own input size, when it has a fixed one.
     #[cfg(feature = "onnx")]
-    input: (u32, u32),
+    input: Option<(u32, u32)>,
 }
 
 impl MatteModel {
@@ -182,13 +205,13 @@ impl MatteModel {
         if !path.is_file() {
             return Err(format!("{} model not found: put it at {}", kind.label(), path.display()));
         }
-        onnx::init_runtime()?;
         // a wrong / incompatible runtime DLL panics inside ort: report it
+        std::panic::catch_unwind(onnx::init_runtime).map_err(|_| "ONNX Runtime could not be loaded (version 1.22 or newer is needed)".to_string())??;
         let session = std::panic::catch_unwind(|| ort::session::Session::builder().and_then(|b| b.with_intra_threads(onnx::threads())).and_then(|b| b.commit_from_file(&path)))
             .map_err(|_| "ONNX Runtime failed to initialise (incompatible onnxruntime library?)".to_string())?
             .map_err(|e| format!("could not load {}: {e}", path.display()))?;
         let spec = ModelSpec::for_kind(kind);
-        let input = onnx::input_size(&session).unwrap_or(spec.size);
+        let input = onnx::input_size(&session);
         Ok(MatteModel { spec, session, input })
     }
 
@@ -200,8 +223,9 @@ impl MatteModel {
 
     #[cfg(feature = "onnx")]
     pub fn infer(&mut self, rgba: &[u8], w: u32, h: u32) -> Result<Matte, String> {
-        let input = preprocess(rgba, w, h, &self.spec, self.input);
-        let (raw, ow, oh) = onnx::run(&mut self.session, input, self.input)?;
+        let size = self.input.unwrap_or_else(|| self.spec.input_for(w, h));
+        let input = preprocess(rgba, w, h, &self.spec, size);
+        let (raw, ow, oh) = onnx::run(&mut self.session, input, size)?;
         postprocess(&raw, ow, oh, &self.spec, (w, h)).ok_or_else(|| "model returned an empty output".to_string())
     }
 }
@@ -215,29 +239,37 @@ mod onnx {
         std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 8)
     }
 
-    /// Load ONNX Runtime (once): `ORT_DYLIB_PATH`, next to the executable,
-    /// then the models folder.
+    fn library_name() -> &'static str {
+        if cfg!(windows) {
+            "onnxruntime.dll"
+        } else if cfg!(target_os = "macos") {
+            "libonnxruntime.dylib"
+        } else {
+            "libonnxruntime.so"
+        }
+    }
+
+    /// `ORT_DYLIB_PATH`, next to the executable, then the models folder.
+    pub fn runtime_path() -> Option<std::path::PathBuf> {
+        let mut candidates: Vec<std::path::PathBuf> = std::env::var_os("ORT_DYLIB_PATH").map(Into::into).into_iter().collect();
+        if let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
+            candidates.push(dir.join(library_name()));
+        }
+        candidates.push(nle_media::paths::models_dir().join(library_name()));
+        candidates.into_iter().find(|p| p.is_file())
+    }
+
+    /// Load ONNX Runtime (once), with its telemetry off: mattes are local.
     pub fn init_runtime() -> Result<(), String> {
-        static INIT: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
-        INIT.get_or_init(|| {
-            let name = if cfg!(windows) {
-                "onnxruntime.dll"
-            } else if cfg!(target_os = "macos") {
-                "libonnxruntime.dylib"
-            } else {
-                "libonnxruntime.so"
-            };
-            let mut candidates: Vec<std::path::PathBuf> = std::env::var_os("ORT_DYLIB_PATH").map(Into::into).into_iter().collect();
-            if let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
-                candidates.push(dir.join(name));
-            }
-            candidates.push(nle_media::paths::models_dir().join(name));
-            let path =
-                candidates.into_iter().find(|p| p.is_file()).ok_or_else(|| format!("ONNX Runtime ({name}) not found next to the app, in the models folder or ORT_DYLIB_PATH"))?;
-            ort::init_from(path.to_string_lossy().to_string()).commit().map_err(|e| format!("ONNX Runtime: {e}"))?;
-            Ok(())
-        })
-        .clone()
+        // only success is remembered, so a library added later works without a restart
+        static LOADED: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
+        let mut loaded = LOADED.lock().map_err(|_| "ONNX Runtime failed to load earlier: restart the app".to_string())?;
+        if !*loaded {
+            let path = runtime_path().ok_or_else(|| format!("ONNX Runtime ({}) not found next to the app, in the models folder or ORT_DYLIB_PATH", library_name()))?;
+            ort::init_from(path.to_string_lossy().to_string()).with_telemetry(false).commit().map_err(|e| format!("ONNX Runtime: {e}"))?;
+            *loaded = true;
+        }
+        Ok(())
     }
 
     /// Fixed `(width, height)` of the first input, if the model declares one.
@@ -280,6 +312,17 @@ mod tests {
         let d = preprocess(&rgba, 2, 1, &ModelSpec::for_kind(MatteKind::Depth), (4, 2));
         assert_eq!(d.len(), 4 * 2 * 3);
         assert!((d[0] - (1.0 - 0.485) / 0.229).abs() < 1e-4, "ImageNet normalisation: {}", d[0]);
+    }
+
+    #[test]
+    fn person_input_keeps_the_frame_shape() {
+        let p = ModelSpec::for_kind(MatteKind::Person);
+        assert_eq!(p.input_for(960, 540), (672, 384));
+        assert_eq!(p.input_for(540, 960), (384, 672));
+        assert_eq!(p.input_for(800, 800), (512, 512));
+        let (w, h) = p.input_for(4000, 100);
+        assert!(w % 32 == 0 && h % 32 == 0 && w <= 1536 && h >= 128, "{w}x{h}");
+        assert_eq!(ModelSpec::for_kind(MatteKind::Depth).input_for(960, 540), (518, 518));
     }
 
     #[test]

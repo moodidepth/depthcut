@@ -104,7 +104,7 @@ pub fn clip_speed(clip: &Clip) -> (f64, bool) {
 pub fn dissolve_after(items: &[TrackItem], i: usize) -> Option<Time> {
     let a = items.get(i)?;
     let b = items.get(i + 1)?;
-    let tr = a.clip.transition_out.as_ref()?;
+    let tr = a.clip.cut_transition(b.clip)?;
     (a.end() == b.start && tr.duration.is_positive()).then_some(tr.duration)
 }
 

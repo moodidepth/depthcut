@@ -125,15 +125,10 @@ impl MediaLibrary {
         }
     }
 
-    /// Forget everything (new/opened project).
+    /// Forget everything (new/opened project). Jobs still running for the old
+    /// project report to the replaced channel and proxy list, so are ignored.
     pub fn reset(&mut self) {
-        self.filmstrips.clear();
-        self.waveforms.clear();
-        self.peaks.clear();
-        self.transients.clear();
-        self.audio.clear();
-        self.failed.clear();
-        self.requested.clear();
+        *self = Self::new();
     }
 
     /// Probe files in the background; results arrive as [`MediaEvent::Imported`].

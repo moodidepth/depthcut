@@ -169,6 +169,10 @@ enum Capture {
 
 fn capture_next_binding(ctx: &egui::Context) -> Option<Capture> {
     ctx.input(|i| {
+        let paste = i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)));
+        if let Some(binding) = crate::key_input::clipboard_keys(i, paste).first() {
+            return Some(Capture::Binding(*binding));
+        }
         for ev in &i.events {
             match ev {
                 egui::Event::Key { key, pressed: true, repeat: false, modifiers, .. } => {

@@ -82,15 +82,6 @@ impl VideoStreamInfo {
             }
         }
     }
-
-    /// Lock a CFR timeline request to the exact indexed VFR PTS entry so audio stays in sync.
-    pub fn cfr_locked_source_time(&self, requested: Time) -> Time {
-        if !self.is_vfr || self.pts_table.is_empty() {
-            return requested;
-        }
-        let idx = (requested.frames_round(self.frame_rate).max(0) as usize).min(self.pts_table.len() - 1);
-        self.pts_table[idx]
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

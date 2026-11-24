@@ -388,6 +388,14 @@ impl TimelineMixer {
         self.refresh_restored();
     }
 
+    /// Drop all audio of the project being left: its ids are reused by the next.
+    pub fn clear_sources(&mut self) {
+        self.sources.clear();
+        self.restored.clear();
+        self.duck_curves.clear();
+        self.refresh_restored();
+    }
+
     pub fn has_source(&self, asset: AssetId) -> bool {
         self.sources.contains_key(&asset)
     }
@@ -415,6 +423,13 @@ impl TimelineMixer {
         self.vocals.clear();
         self.retime.clear();
         self.limiter.reset();
+    }
+
+    /// A block of scrub audio. It stays out of the loudness measurement.
+    pub(crate) fn render_scrub(&mut self, at: Time, out: &mut [f32]) {
+        let meters = self.meters.take();
+        self.render(at, 1.0, out);
+        self.meters = meters;
     }
 
     /// Render `out.len() / 2` stereo frames starting at timeline time
@@ -461,15 +476,15 @@ impl TimelineMixer {
                 let pb = span.source_time(Time::from_secs_f64(tb)).as_secs_f64() * src_rate - src_off;
                 let ga = span.gain_at(Time::from_secs_f64(ta));
                 let gb = span.gain_at(Time::from_secs_f64(tb));
-                let pan = span.pan_at(Time::from_secs_f64(ta));
+                let (pl, pr) = span.balance_at(Time::from_secs_f64(ta));
                 // Instantaneous clip speed for pitch-preservation & extreme slow-mo auto-mute.
-                let local_t = Time::from_secs_f64((ta - span.local_origin.as_secs_f64()).max(0.0));
-                let clip_speed = span.retime.as_ref().map(|r| r.speed_at(local_t).abs()).unwrap_or(1.0);
+                let local_t = span.local_time(Time::from_secs_f64(ta)).max(Time::ZERO);
+                let clip_speed = span.speed_at(Time::from_secs_f64(ta)).abs();
                 let live_target = if span.params.mute_extreme_slowmo && clip_speed < 0.30 { 0.0 } else { 1.0 };
                 // Pitch-preserved stretch fades in smoothly as speed leaves 1.0×
                 // (no hard per-block switch → no clicks at speed keyframes).
                 let stretch_target =
-                    if span.params.preserve_pitch && span.retime.is_some() && clip_speed > 0.05 { smoothstep(0.02, 0.08, (clip_speed - 1.0).abs() as f32) } else { 0.0 };
+                    if span.params.preserve_pitch && span.is_retimed() && clip_speed > 0.05 { smoothstep(0.02, 0.08, (clip_speed - 1.0).abs() as f32) } else { 0.0 };
                 let xfade = 1.0 - (-1.0 / (PATH_XFADE_SECS * sr as f32)).exp();
                 let st = self.retime.entry(span.clip).or_insert_with(|| RetimeState { stretch: stretch_target, live: live_target, grains: VecDeque::new() });
                 let grain_len = (GRAIN_SECS * sr).round().max(64.0);
@@ -477,9 +492,7 @@ impl TimelineMixer {
                 let pitch_step = src_rate / sr;
                 let tol = (WSOLA_TOL_SECS * src_rate).round() as i64;
                 let ovl = (grain_step * pitch_step).round() as usize;
-                let origin = span.local_origin.as_secs_f64();
-                // stereo balance: attenuate the opposite side
-                let (pl, pr) = (if pan > 0.0 { 1.0 - pan } else { 1.0 }, if pan < 0.0 { 1.0 + pan } else { 1.0 });
+                let origin = span.stretch_origin().as_secs_f64();
                 let mut lp = if span.params.lowpass_enabled {
                     let hz = span.params.lowpass_hz.at_f32(local_t).clamp(80.0, 22_000.0);
                     let q = span.params.lowpass_q.clamp(0.4, 8.0);
@@ -910,6 +923,17 @@ mod tests {
     }
 
     #[test]
+    fn a_project_switch_drops_the_old_audio() {
+        let mut a = MediaAsset::new("tone", "/t.wav", Time::from_secs(2));
+        a.audio = Some(nle_core::AudioStreamInfo { sample_rate: 48_000, channels: 2, codec: "pcm".into() });
+        let mut m = TimelineMixer::new(48_000);
+        m.set_source(a.id, tone(2.0, 0.3));
+        assert!(m.has_source(a.id));
+        m.clear_sources();
+        assert!(!m.has_source(a.id));
+    }
+
+    #[test]
     fn offline_mixdown_and_16k_conversion() {
         let mut a = MediaAsset::new("tone", "/t.wav", Time::from_secs(2));
         a.audio = Some(nle_core::AudioStreamInfo { sample_rate: 48_000, channels: 2, codec: "pcm".into() });
@@ -1250,6 +1274,37 @@ mod tests {
         // no metering in export
         let mut e = TimelineMixer::new(48_000);
         assert!(e.meter_readings().is_none());
+    }
+
+    #[test]
+    fn a_crossfade_plays_both_clips_handles() {
+        let info = Some(nle_core::AudioStreamInfo { sample_rate: 48_000, channels: 2, codec: "pcm".into() });
+        let asset = |name: &str| {
+            let mut a = MediaAsset::new(name, format!("/{name}.wav"), Time::from_secs(3));
+            a.audio = info.clone();
+            a
+        };
+        let (a, b) = (asset("a"), asset("b"));
+        let mut tl = Timeline::default();
+        let mut first = Clip::from_asset_range(&a, Time::ZERO, Time::from_secs(2));
+        first.audio.crossfade_out = Time::from_secs(1);
+        tl.append(first).unwrap();
+        tl.append(Clip::from_asset_range(&b, Time::from_secs(1), Time::from_secs(2))).unwrap();
+        let spans = nle_core::audio_spans(&tl);
+        // one side sounding at a time: each must carry past the cut at 2 s
+        for (a_amp, b_amp, at) in [(0.2, 0.0, 2.1), (0.0, 0.2, 1.9)] {
+            let mut m = TimelineMixer::new(48_000);
+            m.set_spans(spans.clone());
+            m.set_source(a.id, tone(3.0, a_amp));
+            m.set_source(b.id, tone(3.0, b_amp));
+            let mut out = vec![0.0f32; 3 * 48_000 * 2];
+            m.render(Time::ZERO, 1.0, &mut out);
+            let i = (at * 48_000.0) as usize * 2;
+            assert!(rms_of(&out[i..i + 2_000]) > 0.02, "no handle at {at} s");
+            let beyond = if at > 2.0 { 2.6 } else { 1.2 };
+            let i = (beyond * 48_000.0) as usize * 2;
+            assert!(rms_of(&out[i..i + 2_000]) < 0.002, "still sounding at {beyond} s");
+        }
     }
 
     #[test]

@@ -14,7 +14,7 @@ use crate::hwaccel::HwBackend;
 use crate::MediaError;
 use ff::ffi;
 use ffmpeg_next as ff;
-use nle_core::{FrameRate, MediaAsset, Time};
+use nle_core::{AssetKind, FrameRate, MediaAsset, Time};
 use std::path::PathBuf;
 use std::ptr;
 
@@ -31,6 +31,16 @@ pub struct LibavDecoder {
     scaler: Option<(ff::format::Pixel, u32, u32, ff::software::scaling::Context)>,
     /// Last decoded frame (index at the stream rate) for sequential reads.
     last: Option<(i64, VideoFrame)>,
+    /// The file's final frame, once it has been found.
+    end: Option<(i64, VideoFrame)>,
+    /// No later than this is the picture expected to end.
+    expected_end: i64,
+    /// The container's first timestamp, which is time zero, in seconds.
+    origin: f64,
+    /// Frames decoded ahead of a seek target.
+    preroll: i64,
+    /// The decoder has been sent the end of the stream.
+    drained: bool,
 }
 
 // The FFmpeg contexts are only used from the owning decode worker thread.
@@ -98,14 +108,44 @@ impl LibavDecoder {
         let (w, h) = (decoder.width(), decoder.height());
         let (out_w, out_h) = super::scaled_dims(w, h, opts.max_height);
         log::info!("libav decoder for {}: {}x{} → {}x{} via {}", asset.name, w, h, out_w, out_h, backend.label());
-        Ok(LibavDecoder { input, decoder, stream, time_base, rate, out_w, out_h, format, backend, scaler: None, last: None })
+        let start = unsafe { (*input.as_ptr()).start_time };
+        let origin = if start == ffi::AV_NOPTS_VALUE { 0.0 } else { start as f64 / ffi::AV_TIME_BASE as f64 };
+        let expected_end = if asset.kind == AssetKind::Image { 0 } else { asset.duration.frames_floor(rate).max(0) };
+        let preroll = super::preroll_frames(&path, rate);
+        Ok(LibavDecoder {
+            input,
+            decoder,
+            stream,
+            time_base,
+            rate,
+            out_w,
+            out_h,
+            format,
+            backend,
+            scaler: None,
+            last: None,
+            end: None,
+            expected_end,
+            origin,
+            preroll,
+            drained: false,
+        })
     }
 
-    fn seek(&mut self, t: Time) -> Result<(), MediaError> {
-        let ts = (t.as_secs_f64() * ffi::AV_TIME_BASE as f64) as i64;
-        self.input.seek(ts, ..ts).map_err(err)?;
+    /// Position the demuxer on a keyframe at or before frame `index`.
+    fn seek(&mut self, index: i64) -> Result<(), MediaError> {
+        let ts = ((self.origin + Time::from_frames(index, self.rate).as_secs_f64()) * ffi::AV_TIME_BASE as f64) as i64;
+        if index > 0 {
+            self.input.seek(ts, ..ts).map_err(err)?;
+        } else {
+            // The top: a transport stream needs aiming before its first
+            // timestamp, or it starts on the second keyframe; FLV refuses that.
+            let before = ts - i64::from(ffi::AV_TIME_BASE);
+            self.input.seek(before, ..).or_else(|_| self.input.seek(ts, ..)).map_err(err)?;
+        }
         self.decoder.flush();
         self.last = None;
+        self.drained = false;
         Ok(())
     }
 
@@ -157,34 +197,49 @@ impl LibavDecoder {
         Ok(VideoFrame::new(w, h, self.format, data, pts))
     }
 
-    /// Decode forward until a frame at or after `target_idx` appears.
-    fn decode_until(&mut self, target_idx: i64) -> Result<VideoFrame, MediaError> {
+    /// Decode forward to the frame at or after `target`. If the stream ends
+    /// first that is its final frame. `None`: it held nothing at all, or began
+    /// after `target` when it might have begun earlier (`may_overshoot` false).
+    fn decode_until(&mut self, target: i64, may_overshoot: bool) -> Result<Option<(i64, VideoFrame)>, MediaError> {
         let mut frame = ff::frame::Video::empty();
+        let mut passed = None;
         let fps = self.rate.fps();
         loop {
             while self.decoder.receive_frame(&mut frame).is_ok() {
-                let pts = frame.timestamp().or(frame.pts()).unwrap_or(0);
-                let idx = (pts as f64 * self.time_base * fps + 1e-6).floor() as i64;
-                if idx >= target_idx {
-                    let vf = self.convert(&frame)?;
-                    self.last = Some((idx, vf.clone()));
-                    return Ok(vf);
+                // timestamps may be rounded (to milliseconds in Matroska): nearest frame
+                let idx = match frame.timestamp().or(frame.pts()) {
+                    Some(pts) => ((pts as f64 * self.time_base - self.origin) * fps).round() as i64,
+                    None => 0,
+                };
+                if idx >= target {
+                    if idx > target && passed.is_none() && !may_overshoot {
+                        return Ok(None);
+                    }
+                    return Ok(Some((idx, self.convert(&frame)?)));
                 }
+                passed = Some((idx, std::mem::replace(&mut frame, ff::frame::Video::empty())));
+            }
+            if self.drained {
+                return match passed {
+                    Some((idx, f)) => Ok(Some((idx, self.convert(&f)?))),
+                    None => Ok(self.last.clone()),
+                };
             }
             let mut got = false;
             for (st, packet) in self.input.packets() {
                 if st.index() == self.stream {
-                    self.decoder.send_packet(&packet).map_err(err)?;
+                    // as FFmpeg itself does: after a seek, and at the cut-off
+                    // end of a stream, some packets cannot be decoded
+                    if let Err(e) = self.decoder.send_packet(&packet) {
+                        log::debug!("skipping a packet the decoder refused: {e}");
+                    }
                     got = true;
                     break;
                 }
             }
             if !got {
-                self.decoder.send_eof().ok();
-                if self.decoder.receive_frame(&mut frame).is_ok() {
-                    return self.convert(&frame);
-                }
-                return self.last.as_ref().map(|(_, f)| f.clone()).ok_or(MediaError::Eof);
+                self.decoder.send_eof().map_err(err)?;
+                self.drained = true;
             }
         }
     }
@@ -207,13 +262,35 @@ impl VideoDecoder for LibavDecoder {
         self.backend
     }
     fn frame_at(&mut self, t: Time) -> Result<VideoFrame, MediaError> {
-        let target = t.frames_floor(self.rate);
+        let target = t.max(Time::ZERO).frames_floor(self.rate);
+        if let Some((idx, f)) = &self.end {
+            if target >= *idx {
+                return Ok(f.clone());
+            }
+        }
+        let from = target.min(self.expected_end);
+        let mut back = self.preroll.max(1);
         match &self.last {
             Some((idx, f)) if *idx == target => return Ok(f.clone()),
             // short forward steps (playback) decode sequentially; anything else seeks
             Some((idx, _)) if target > *idx && target - *idx <= 30 => {}
-            _ => self.seek(t)?,
+            _ => self.seek((from - back).max(0))?,
         }
-        self.decode_until(target)
+        loop {
+            let may_overshoot = self.last.is_some() || back >= from;
+            if let Some((idx, f)) = self.decode_until(target, may_overshoot)? {
+                self.last = Some((idx, f.clone()));
+                if idx < target {
+                    self.end = self.last.clone();
+                }
+                return Ok(f);
+            }
+            if back >= from {
+                return Err(MediaError::Eof);
+            }
+            // the picture ends before the sound does, or the seek landed too late
+            back *= 4;
+            self.seek((from - back).max(0))?;
+        }
     }
 }

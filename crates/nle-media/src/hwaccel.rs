@@ -1,8 +1,8 @@
 //! Hardware-acceleration planning for the Intel Arc A750.
 //!
-//! Decode priority: Intel Quick Sync (`qsv`) with a child device derived
-//! from VA-API (`iHD` driver, Linux) or D3D11VA (Windows) → plain VA-API /
-//! D3D11VA hwaccel → multi-threaded software decode. The Arc A750 (DG2,
+//! Decode priority: D3D11VA on Windows; Intel Quick Sync (`qsv`, child device
+//! derived from VA-API `iHD`) then VA-API on Linux; then multi-threaded
+//! software decode. The Arc A750 (DG2,
 //! Alchemist) decodes H.264, HEVC Main/Main10 (8/10-bit), VP9 and AV1 in
 //! hardware and has two media engines for AV1/HEVC/H.264 encode.
 
@@ -273,6 +273,10 @@ pub struct DecoderPlan {
 /// Choose the decode path for a stream, in priority order. Returns every
 /// viable plan so callers can fall back if one fails at runtime.
 ///
+/// Windows never decodes through QSV: after a seek its decoders return
+/// pictures 3–5 frames early (H.264, HEVC, AV1; Arc A750, FFmpeg 9.0.2; see
+/// `tests/decode_end.rs`). D3D11VA drives the same media engine exactly.
+///
 /// Chroma: 4:2:2 goes to QSV only for HEVC (Arc decodes HEVC Rext 4:2:2; its
 /// H.264 4:2:2 fails with "Error querying IO surface"), and 4:4:4 never does
 /// (untested). D3D11VA / VA-API stay in the list: FFmpeg itself falls back to
@@ -286,7 +290,7 @@ pub fn plan_decode(codec: VideoCodec, bit_depth: u8, chroma: Chroma, platform: P
         Chroma::Yuv444 => false,
     };
     if hw_ok {
-        if let Some(dec) = codec.qsv_decoder().filter(|_| qsv_chroma_ok) {
+        if let Some(dec) = codec.qsv_decoder().filter(|_| qsv_chroma_ok && platform != Platform::Windows) {
             if caps.has_hwaccel("qsv") && (caps.decoders.is_empty() || caps.has_decoder(dec)) {
                 let mut args = qsv_device_args(platform);
                 args.extend(["-hwaccel", "qsv", "-hwaccel_device", "hw", "-c:v", dec].map(String::from));
@@ -329,25 +333,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn arc_prefers_qsv_for_modern_codecs() {
-        for platform in [Platform::Windows, Platform::Linux] {
-            let caps = HwCaps::assume_full(platform);
-            for (codec, depth) in [(VideoCodec::H264, 8), (VideoCodec::Hevc, 10), (VideoCodec::Av1, 10)] {
-                let plans = plan_decode(codec, depth, Chroma::Yuv420, platform, &caps, &INTEL_ARC_A750);
-                assert_eq!(plans[0].backend, HwBackend::Qsv, "{codec:?}");
-                assert_eq!(plans.last().unwrap().backend, HwBackend::Software);
-                let joined = plans[0].input_args.join(" ");
-                match platform {
-                    Platform::Windows => {
-                        assert!(joined.contains("d3d11va=dx"));
-                        assert_eq!(plans[1].backend, HwBackend::D3d11va);
-                    }
-                    _ => {
-                        assert!(joined.contains("driver=iHD"));
-                        assert_eq!(plans[1].backend, HwBackend::Vaapi);
-                    }
-                }
-            }
+    fn modern_codecs_decode_in_hardware() {
+        for (codec, depth) in [(VideoCodec::H264, 8), (VideoCodec::Hevc, 10), (VideoCodec::Av1, 10)] {
+            let plan = |platform| plan_decode(codec, depth, Chroma::Yuv420, platform, &HwCaps::assume_full(platform), &INTEL_ARC_A750);
+            let linux = plan(Platform::Linux);
+            assert_eq!(linux.iter().map(|p| p.backend).collect::<Vec<_>>(), [HwBackend::Qsv, HwBackend::Vaapi, HwBackend::Software], "{codec:?}");
+            assert!(linux[0].input_args.join(" ").contains("driver=iHD"));
+            let windows = plan(Platform::Windows);
+            assert_eq!(windows.iter().map(|p| p.backend).collect::<Vec<_>>(), [HwBackend::D3d11va, HwBackend::Software], "{codec:?}");
         }
     }
 
@@ -367,12 +360,12 @@ mod tests {
 
     #[test]
     fn four_two_two_uses_qsv_only_for_hevc() {
-        let caps = HwCaps::assume_full(Platform::Windows);
-        let plans = plan_decode(VideoCodec::Hevc, 10, Chroma::Yuv422, Platform::Windows, &caps, &INTEL_ARC_A750);
+        let caps = HwCaps::assume_full(Platform::Linux);
+        let plans = plan_decode(VideoCodec::Hevc, 10, Chroma::Yuv422, Platform::Linux, &caps, &INTEL_ARC_A750);
         assert_eq!(plans[0].backend, HwBackend::Qsv);
-        let plans = plan_decode(VideoCodec::H264, 8, Chroma::Yuv422, Platform::Windows, &caps, &INTEL_ARC_A750);
+        let plans = plan_decode(VideoCodec::H264, 8, Chroma::Yuv422, Platform::Linux, &caps, &INTEL_ARC_A750);
         assert!(plans.iter().all(|p| p.backend != HwBackend::Qsv), "{plans:?}");
-        let plans = plan_decode(VideoCodec::Hevc, 10, Chroma::Yuv444, Platform::Windows, &caps, &INTEL_ARC_A750);
+        let plans = plan_decode(VideoCodec::Hevc, 10, Chroma::Yuv444, Platform::Linux, &caps, &INTEL_ARC_A750);
         assert!(plans.iter().all(|p| p.backend != HwBackend::Qsv), "{plans:?}");
         assert_eq!(Chroma::from_pix_fmt("yuv422p10le"), Chroma::Yuv422);
         assert_eq!(Chroma::from_pix_fmt("yuvj444p"), Chroma::Yuv444);

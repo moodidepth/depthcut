@@ -273,6 +273,8 @@ struct GradeU {
     working: u32,
     in_lut_size: f32,
     tonemap: u32,
+    brightness: f32,
+    _pad: [f32; 3],
 }
 
 /// `Mask` in mask_common.wgsl.
@@ -549,6 +551,9 @@ pub struct Renderer {
     frames: LruCache<FrameKey, Arc<GpuFrame>>,
     latest: HashMap<AssetId, FrameKey>,
     luts: HashMap<String, Option<Arc<GpuLut>>>,
+    /// LUT files being parsed off this thread (see [`Renderer::load_luts_in_background`]).
+    lut_jobs: HashMap<String, std::sync::mpsc::Receiver<Result<CubeLut, crate::lut::LutError>>>,
+    luts_in_background: bool,
     identity_lut: Arc<GpuLut>,
     masks: HashMap<u64, Arc<MaskTex>>,
     /// Uploaded AI mattes by (asset, source frame, kind).
@@ -676,6 +681,8 @@ impl Renderer {
             frames: LruCache::new(VRAM_FRAME_CACHE_BUDGET),
             latest: HashMap::new(),
             luts: HashMap::new(),
+            lut_jobs: HashMap::new(),
+            luts_in_background: false,
             identity_lut,
             masks: HashMap::new(),
             mattes: HashMap::new(),
@@ -919,6 +926,7 @@ impl Renderer {
         self.frames.clear();
         self.latest.clear();
         self.masks.clear();
+        self.mattes.clear();
     }
 
     /// Drop cached frames of one asset (e.g. after toggling proxy media).
@@ -1015,20 +1023,61 @@ impl Renderer {
         out
     }
 
+    /// For the interactive preview: parse `.cube` files on their own threads
+    /// (a 65-point file takes ~70 ms) and draw without one until it arrives.
+    /// An export must not use this: every one of its frames needs the LUT.
+    pub fn load_luts_in_background(&mut self) {
+        self.luts_in_background = true;
+    }
+
+    /// LUTs are still being parsed: keep calling [`Self::poll_luts`].
+    pub fn luts_pending(&self) -> bool {
+        !self.lut_jobs.is_empty()
+    }
+
+    /// Take in finished LUTs. `true`: the picture should be rendered again.
+    pub fn poll_luts(&mut self) -> bool {
+        use std::sync::mpsc::TryRecvError;
+        let mut done = Vec::new();
+        for (path, job) in &self.lut_jobs {
+            match job.try_recv() {
+                Ok(parsed) => done.push((path.clone(), parsed)),
+                Err(TryRecvError::Disconnected) => done.push((path.clone(), Err(crate::lut::LutError::Io("the loader stopped".into())))),
+                Err(TryRecvError::Empty) => {}
+            }
+        }
+        for (path, parsed) in &done {
+            self.lut_jobs.remove(path);
+            self.store_lut(path, parsed);
+        }
+        !done.is_empty()
+    }
+
+    fn store_lut(&mut self, path: &str, parsed: &Result<CubeLut, crate::lut::LutError>) {
+        let loaded = match parsed {
+            Ok(l) => {
+                let tex = l.upload(&self.gpu.device, &self.gpu.queue);
+                let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+                Some(Arc::new(GpuLut { _texture: tex, view, size: l.size as u32 }))
+            }
+            Err(e) => {
+                log::warn!("LUT {path}: {e}");
+                None
+            }
+        };
+        self.luts.insert(path.to_string(), loaded);
+    }
+
     fn lut(&mut self, path: &str) -> Arc<GpuLut> {
-        if !self.luts.contains_key(path) {
-            let loaded = match CubeLut::load(std::path::Path::new(path)) {
-                Ok(l) => {
-                    let tex = l.upload(&self.gpu.device, &self.gpu.queue);
-                    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-                    Some(Arc::new(GpuLut { _texture: tex, view, size: l.size as u32 }))
-                }
-                Err(e) => {
-                    log::warn!("LUT {path}: {e}");
-                    None
-                }
-            };
-            self.luts.insert(path.to_string(), loaded);
+        if !self.luts.contains_key(path) && !self.lut_jobs.contains_key(path) {
+            let file = std::path::PathBuf::from(path);
+            if self.luts_in_background {
+                let (tx, rx) = std::sync::mpsc::channel();
+                self.lut_jobs.insert(path.to_string(), rx);
+                std::thread::spawn(move || tx.send(CubeLut::load(&file)));
+            } else {
+                self.store_lut(path, &CubeLut::load(&file));
+            }
         }
         self.luts.get(path).cloned().flatten().unwrap_or_else(|| self.identity_lut.clone())
     }
@@ -1139,7 +1188,7 @@ impl Renderer {
             _ => (self.identity_lut.clone(), 0.0),
         };
         let in_lut = match &c.input_lut {
-            Some(l) => Some(self.lut(&l.path)).filter(|l| l.size > 2),
+            Some(l) => Some(self.lut(&l.path)).filter(|l| !Arc::ptr_eq(l, &self.identity_lut)),
             None => None,
         };
         let u = self.uniform(&GradeU {
@@ -1148,7 +1197,8 @@ impl Renderer {
             saturation: c.saturation,
             temperature: c.temperature,
             tint: c.tint,
-            lut_mix: if lut.size > 2 || mix == 0.0 { mix } else { 0.0 },
+            // not by size: a 2-point LUT is a real one
+            lut_mix: if Arc::ptr_eq(&lut, &self.identity_lut) { 0.0 } else { mix },
             wipe: wipe.unwrap_or(-1.0),
             lut_size: lut.size as f32,
             lift: c.lift,
@@ -1158,6 +1208,8 @@ impl Renderer {
             working: c.working.shader_index(),
             in_lut_size: in_lut.as_ref().map_or(0.0, |l| l.size as f32),
             tonemap: (in_lut.is_none() && c.input_space.is_scene_or_hdr()) as u32,
+            brightness: c.brightness,
+            _pad: [0.0; 3],
         });
         let in_view = &in_lut.as_ref().unwrap_or(&self.identity_lut).view;
         self.dispatch(
@@ -1818,9 +1870,9 @@ impl Renderer {
         Some(match &layer.source {
             LayerSource::Media { asset, source_time, speed, blend } => {
                 let rate = src.frame_rate(*asset);
-                let pos = source_time.as_secs_f64() * rate.fps();
-                let idx = pos.floor() as i64;
-                let frac = (pos - idx as f64) as f32;
+                // exact, as the preview caches it: in floats, frame 123's start times 30 is 122.99999
+                let idx = source_time.frames_floor(rate);
+                let frac = (source_time.as_secs_f64() * rate.fps() - idx as f64).max(0.0) as f32;
                 let a = self.media_frame(enc, *asset, idx, src, false)?;
                 // Rate conform interpolates whenever the timeline samples between
                 // source frames — at any speed (24/30/60 fps on a 120 fps timeline).
@@ -1910,7 +1962,7 @@ impl Renderer {
             if !layer.effects.iter().any(|e| e.kind.matte() == Some(kind)) {
                 continue;
             }
-            let idx = (source_time.as_secs_f64() * src.frame_rate(*asset).fps()).floor() as i64;
+            let idx = source_time.frames_floor(src.frame_rate(*asset));
             let Some(tex) = self.matte_texture(*asset, idx, kind, src) else { continue };
             self.matte_now[kind as usize] = Some(match layer.video.stabilize {
                 Some(m) => {

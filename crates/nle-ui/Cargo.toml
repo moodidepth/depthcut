@@ -12,7 +12,7 @@ name = "rust-cut-pro"
 path = "src/main.rs"
 
 [features]
-default = ["whisper-vulkan", "neural-voice"]
+default = ["whisper-vulkan", "neural-voice", "onnx"]
 ffmpeg = ["nle-media/ffmpeg"]
 whisper = ["nle-media/whisper"]
 whisper-vulkan = ["nle-media/whisper-vulkan"]

@@ -1,7 +1,7 @@
 //! Video decoders.
 //!
 //! * [`cli::CliDecoder`] — streams raw NV12/P010 frames from the `ffmpeg`
-//!   executable using the QSV → VA-API/D3D11VA → software plan from
+//!   executable using the hardware → software plan from
 //!   [`crate::hwaccel`]. Works with any FFmpeg install, no dev libraries.
 //! * `libav::LibavDecoder` (feature `ffmpeg`) — in-process decoding through
 //!   `ffmpeg-next` with a QSV hardware device context.
@@ -62,6 +62,19 @@ pub fn open(asset: &MediaAsset, opts: DecodeOptions) -> Result<Box<dyn VideoDeco
         return Ok(Box::new(synthetic::SyntheticDecoder::new(asset, opts.max_height)));
     }
     Ok(Box::new(cli::CliDecoder::open(asset, opts)?))
+}
+
+/// Frames decoded ahead of a seek target and thrown away. A seek straight to
+/// the target skips the pictures leading an open-GOP keyframe (at most 16
+/// B-frames and their anchor); in MPEG transport/program streams it lands on
+/// the keyframe *after* the time asked for, so those start a long GOP earlier.
+/// No more than needed: each one can cost a whole extra GOP of decoding.
+fn preroll_frames(path: &std::path::Path, rate: FrameRate) -> i64 {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+    match ext.as_str() {
+        "ts" | "mts" | "m2ts" | "m2t" | "trp" | "tp" | "mpg" | "mpeg" | "vob" => 10 * rate.nominal(),
+        _ => 20,
+    }
 }
 
 /// Output dimensions after optional downscale (even, aspect-preserving).

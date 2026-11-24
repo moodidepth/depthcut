@@ -19,6 +19,10 @@ use std::time::{Duration, Instant};
 
 const RENDER_BLOCK: usize = 256;
 const LOOKAHEAD_SECS: f64 = 0.06;
+/// Queue kept while scrubbing: short, so the sound follows the playhead.
+const SCRUB_LOOKAHEAD_SECS: f64 = 0.025;
+/// Blocks in one scrub grain (~43 ms at 48 kHz).
+const SCRUB_BLOCKS: usize = 8;
 /// No callback since the last (re)start.
 const NO_CALLBACK: u64 = u64::MAX;
 /// Upper bound for the reported device latency (bogus driver timestamps).
@@ -32,6 +36,8 @@ struct Transport {
     /// Timeline position of the next sample the mixer will render.
     render_pos: Time,
     started_at: Instant,
+    /// Where the next scrub grain starts; only used while paused.
+    scrub: Option<Time>,
 }
 
 struct Shared {
@@ -120,6 +126,11 @@ impl AudioEngine {
         self.shared.mixer.lock().set_source(asset, buf);
     }
 
+    /// Forget every asset's audio (project switch).
+    pub fn clear_sources(&self) {
+        self.shared.mixer.lock().clear_sources();
+    }
+
     pub fn has_source(&self, asset: AssetId) -> bool {
         self.shared.mixer.lock().has_source(asset)
     }
@@ -184,6 +195,7 @@ impl AudioEngine {
         t.base = at;
         t.render_pos = at;
         t.started_at = Instant::now();
+        t.scrub = None;
         self.shared.consumed.store(0, Ordering::SeqCst);
         self.shared.cb_nanos.store(NO_CALLBACK, Ordering::SeqCst);
         self.shared.last_pos.store(i64::MIN, Ordering::SeqCst);
@@ -200,8 +212,19 @@ impl AudioEngine {
         t.playing = false;
         t.base = pos;
         t.render_pos = pos;
+        t.scrub = None;
         self.shared.flush_gen.fetch_add(1, Ordering::SeqCst);
         pos
+    }
+
+    /// Sound a short grain at `at` while paused. Grains follow each other
+    /// without cutting one another off; only the newest position is kept.
+    pub fn scrub(&self, at: Time) {
+        let mut t = self.shared.transport.lock();
+        if !t.playing {
+            t.base = at;
+            t.scrub = Some(at);
+        }
     }
 
     /// The audible position — the master clock for video during playback.
@@ -411,7 +434,7 @@ fn make_shared(rate: u32, has_device: bool) -> Arc<Shared> {
             m.set_metering(true);
             m
         }),
-        transport: Mutex::new(Transport { playing: false, speed: 1.0, base: Time::ZERO, render_pos: Time::ZERO, started_at: Instant::now() }),
+        transport: Mutex::new(Transport { playing: false, speed: 1.0, base: Time::ZERO, render_pos: Time::ZERO, started_at: Instant::now(), scrub: None }),
         consumed: AtomicU64::new(0),
         cb_seq: AtomicU64::new(0),
         cb_start_frames: AtomicU64::new(0),
@@ -428,15 +451,28 @@ fn make_shared(rate: u32, has_device: bool) -> Arc<Shared> {
     })
 }
 
+/// Fade block `index` of a scrub grain so grains start and end at zero.
+fn grain_envelope(block: &mut [f32], index: usize) {
+    let frames = block.len() / 2;
+    for (n, frame) in block.as_chunks_mut::<2>().0.iter_mut().enumerate() {
+        let up = if index == 0 { n as f32 / frames as f32 } else { 1.0 };
+        let down = if index + 1 == SCRUB_BLOCKS { (frames - 1 - n) as f32 / frames as f32 } else { 1.0 };
+        frame.iter_mut().for_each(|s| *s *= up * down);
+    }
+}
+
 fn mixer_loop(shared: Arc<Shared>, mut producer: Option<rtrb::Producer<f32>>) {
     let sr = shared.sample_rate as f64;
     let mut block = vec![0.0f32; RENDER_BLOCK * 2];
     let target = (sr * LOOKAHEAD_SECS) as usize * 2;
     let mut seen_gen = shared.flush_gen.load(Ordering::SeqCst);
+    let scrub_target = (sr * SCRUB_LOOKAHEAD_SECS) as usize * 2;
+    let mut grain: Option<(Time, usize)> = None; // start, blocks rendered
     while !shared.quit.load(Ordering::Relaxed) {
         let gen = shared.flush_gen.load(Ordering::SeqCst);
         if gen != seen_gen {
             seen_gen = gen;
+            grain = None;
         }
         let (playing, speed, pos) = {
             let t = shared.transport.lock();
@@ -446,12 +482,41 @@ fn mixer_loop(shared: Arc<Shared>, mut producer: Option<rtrb::Producer<f32>>) {
             std::thread::sleep(Duration::from_millis(10));
             continue;
         };
-        if !playing {
-            std::thread::sleep(Duration::from_millis(4));
-            continue;
-        }
         let capacity = prod.buffer().capacity();
         let queued = capacity - prod.slots();
+        if !playing {
+            let starting = grain.is_none();
+            if starting {
+                grain = shared.transport.lock().scrub.take().map(|at| (at, 0));
+            }
+            let Some((at, done)) = grain else {
+                std::thread::sleep(Duration::from_millis(4));
+                continue;
+            };
+            if queued >= scrub_target || prod.slots() < block.len() {
+                std::thread::sleep(Duration::from_millis(2));
+                continue;
+            }
+            {
+                let mut m = shared.mixer.lock();
+                if starting {
+                    m.reset_state();
+                }
+                m.render_scrub(at + Time::from_secs_f64((done * RENDER_BLOCK) as f64 / sr), &mut block);
+                grain = (done + 1 < SCRUB_BLOCKS).then_some((at, done + 1));
+                if grain.is_none() {
+                    m.peaks = [0.0; 2];
+                }
+            }
+            grain_envelope(&mut block, done);
+            if shared.flush_gen.load(Ordering::SeqCst) == seen_gen {
+                for s in &block {
+                    let _ = prod.push(*s);
+                }
+            }
+            continue;
+        }
+        grain = None;
         if queued >= target || prod.slots() < block.len() {
             std::thread::sleep(Duration::from_millis(2));
             continue;
@@ -541,6 +606,50 @@ fn open_device() -> Result<(cpal::Stream, rtrb::Producer<f32>, Arc<Shared>, Stri
     stream.play().map_err(|e| e.to_string())?;
     log::info!("audio output: {name} @ {rate} Hz, {channels} ch");
     Ok((stream, producer, shared, name))
+}
+
+#[cfg(test)]
+mod scrub_tests {
+    use super::*;
+
+    #[test]
+    fn a_scrub_grain_is_short_and_leaves_the_transport_paused() {
+        let shared = make_shared(48_000, true);
+        let (producer, mut consumer) = rtrb::RingBuffer::<f32>::new(48_000);
+        let engine_side = shared.clone();
+        let thread = std::thread::spawn(move || mixer_loop(engine_side, Some(producer)));
+        shared.transport.lock().scrub = Some(Time::from_secs(3));
+        let want = RENDER_BLOCK * SCRUB_BLOCKS * 2;
+        let mut got = 0;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while got < want && Instant::now() < deadline {
+            while consumer.pop().is_ok() {
+                got += 1;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        std::thread::sleep(Duration::from_millis(40));
+        while consumer.pop().is_ok() {
+            got += 1;
+        }
+        let playing = shared.transport.lock().playing;
+        shared.quit.store(true, Ordering::SeqCst);
+        thread.join().unwrap();
+        assert_eq!(got, want, "one grain, then silence");
+        assert!(!playing);
+    }
+
+    #[test]
+    fn grains_start_and_end_at_zero() {
+        let shaped = |index| {
+            let mut block = [1.0f32; RENDER_BLOCK * 2];
+            grain_envelope(&mut block, index);
+            block
+        };
+        assert_eq!(shaped(0)[0], 0.0);
+        assert_eq!(shaped(SCRUB_BLOCKS - 1)[RENDER_BLOCK * 2 - 1], 0.0);
+        assert!(shaped(1).iter().all(|s| *s == 1.0));
+    }
 }
 
 /// Top of the preview volume slider, percent.

@@ -147,7 +147,7 @@ fn encoder_works(enc: &str) -> bool {
 /// AV1. The sources are produced with the Arc's own Quick Sync encoders, so
 /// this test only runs where those work.
 #[test]
-fn quick_sync_decodes_hevc_10bit_and_av1() {
+fn hardware_decodes_hevc_10bit_and_av1() {
     if !have_ffmpeg() {
         return;
     }
@@ -174,14 +174,12 @@ fn quick_sync_decodes_hevc_10bit_and_av1() {
         let mut dec = decode::open(&asset, DecodeOptions::default()).expect("open decoder");
         let f = dec.frame_at(Time::from_millis(500)).expect("decode");
         eprintln!("{name}: backend {:?}, {:?} {}x{}", dec.backend(), f.format, f.width, f.height);
-        // CLI decoder: Quick Sync. In-process libav decoder (feature `ffmpeg`):
-        // FFmpeg's generic hwaccel (D3D11VA / VA-API) on the same media engine.
-        let expected = if cfg!(feature = "ffmpeg") {
-            if cfg!(windows) {
-                nle_media::HwBackend::D3d11va
-            } else {
-                nle_media::HwBackend::Vaapi
-            }
+        // Windows: D3D11VA. Linux: Quick Sync from the CLI decoder, VA-API from
+        // the in-process libav decoder (feature `ffmpeg`).
+        let expected = if cfg!(windows) {
+            nle_media::HwBackend::D3d11va
+        } else if cfg!(feature = "ffmpeg") {
+            nle_media::HwBackend::Vaapi
         } else {
             nle_media::HwBackend::Qsv
         };
@@ -202,8 +200,8 @@ fn quick_sync_decodes_hevc_10bit_and_av1() {
 }
 
 /// 4:2:2 sources (camera / ProRes-style HEVC and H.264): every one must
-/// decode, 10-bit to P010. On Intel Arc, HEVC 4:2:2 must stay on QSV (packed
-/// Y210 / YUY2 download) and H.264 4:2:2 must not try QSV at all.
+/// decode, 10-bit to P010. QSV seeks inexactly on Windows, so none may use it
+/// there; on Linux H.264 4:2:2 must not try it either.
 #[test]
 fn four_two_two_sources_decode() {
     if !have_ffmpeg() {
@@ -237,10 +235,8 @@ fn four_two_two_sources_decode() {
         assert!(mean > 20, "{name}: mean {mean}");
         let backend = dec.backend();
         eprintln!("{name}: {} {}-bit -> {backend:?}", v.pix_fmt, v.bit_depth);
-        if enc == "libx264" {
-            assert_ne!(backend, nle_media::hwaccel::HwBackend::Qsv, "{name}: H.264 4:2:2 must not use QSV");
-        } else if cfg!(windows) && caps.has_hwaccel("qsv") && caps.has_decoder("hevc_qsv") && nle_media::encoder_probe::probe_blocking().backend.label().contains("Intel") {
-            assert_eq!(backend, nle_media::hwaccel::HwBackend::Qsv, "{name}: HEVC 4:2:2 should stay on QSV on Arc");
+        if cfg!(windows) || enc == "libx264" {
+            assert_ne!(backend, nle_media::hwaccel::HwBackend::Qsv, "{name}: must not use QSV");
         }
     }
     let _ = std::fs::remove_dir_all(&dir);

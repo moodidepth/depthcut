@@ -231,3 +231,21 @@ fn gpu_masked_effect_only_changes_the_inside() {
     close(px(&img, W / 4, H / 2), rgb, TOL, "inverted: inside untouched");
     assert!(px(&img, W - 4, H / 2)[0] < 0.1);
 }
+
+#[test]
+fn brightness_lifts_every_channel_evenly_on_gpu_and_cpu() {
+    let Some(gpu) = gpu() else { return };
+    let mut r = Renderer::new(gpu, W, H);
+    for working in WorkingSpace::ALL {
+        for by in [-0.15, 0.2] {
+            let rgb = [0.45, 0.40, 0.30];
+            let plain = ResolvedColor { enabled: true, working, ..Default::default() };
+            let base = colormath::grade_primary(rgb, &plain);
+            let c = ResolvedColor { brightness: by, ..plain };
+            let want = base.map(|v| v + by);
+            close(colormath::grade_primary(rgb, &c), want, TOL, "CPU brightness");
+            let img = render(&mut r, vec![solid(1, 0, rgb, c)], RenderOptions::default());
+            close(px(&img, W / 2, H / 2), want, TOL, "GPU brightness");
+        }
+    }
+}

@@ -147,7 +147,7 @@ pub fn grade_primary(px: Rgb, g: &ResolvedColor) -> Rgb {
     let c = wheels(to_working(lin, g.working), g.lift, g.gamma, g.gain);
     let c = contrast_sat(c, g.working.pivot(), g.contrast, g.saturation);
     let tm = g.input_space.is_scene_or_hdr();
-    if g.working != WorkingSpace::Rec709Gamma || tm {
+    let shown = if g.working != WorkingSpace::Rec709Gamma || tm {
         let mut out = from_working(c, g.working);
         if tm {
             out = tonemap(out);
@@ -155,7 +155,8 @@ pub fn grade_primary(px: Rgb, g: &ResolvedColor) -> Rgb {
         display_encode(out)
     } else {
         c
-    }
+    };
+    shown.map(|v| v + g.brightness)
 }
 
 /// Hue (0..1, red 0), saturation (chroma / max) and luma.

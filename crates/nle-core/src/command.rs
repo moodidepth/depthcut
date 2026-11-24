@@ -7,10 +7,12 @@
 
 use crate::captions::CaptionTrack;
 use crate::clip::{Clip, Transition};
+use crate::edit_ops::CopiedClip;
 use crate::ids::ClipId;
 use crate::speed::Retime;
 use crate::time::Time;
-use crate::timeline::{ClipLoc, EditError, EditResult, Marker, Timeline};
+use crate::timeline::{ClipLoc, EditError, EditResult, Marker, Timeline, VideoFormat};
+use crate::tracks::TrackState;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
@@ -198,6 +200,40 @@ pub enum Command {
     FinalizeAudition {
         id: ClipId,
     },
+    /// The project's frame size and rate.
+    SetFormat {
+        format: VideoFormat,
+    },
+    /// The timeline's (and so the project's) name.
+    Rename {
+        name: String,
+    },
+    /// Eye / mute / solo / lock of one lane.
+    SetTrack {
+        track: TrackState,
+    },
+    Paste {
+        items: Vec<CopiedClip>,
+        at: Time,
+    },
+    Duplicate {
+        ids: Vec<ClipId>,
+    },
+    DetachAudio {
+        id: ClipId,
+    },
+    Unlink {
+        id: ClipId,
+    },
+    Link {
+        a: ClipId,
+        b: ClipId,
+    },
+    /// Constant speed over the media the clip uses (negative = reverse).
+    SetSpeed {
+        id: ClipId,
+        speed: f64,
+    },
 }
 
 impl Command {
@@ -242,6 +278,41 @@ impl Command {
             Command::AddAuditionTake { .. } => "Add to Audition",
             Command::CycleAudition { .. } => "Audition Pick",
             Command::FinalizeAudition { .. } => "Finalize Audition",
+            Command::SetFormat { .. } => "Project Format",
+            Command::Rename { .. } => "Rename Project",
+            Command::SetTrack { .. } => "Track Controls",
+            Command::Paste { .. } => "Paste",
+            Command::Duplicate { .. } => "Duplicate",
+            Command::DetachAudio { .. } => "Detach Audio",
+            Command::Unlink { .. } => "Unlink",
+            Command::Link { .. } => "Link",
+            Command::SetSpeed { .. } => "Speed",
+        }
+    }
+
+    /// Whether this always applies to the root timeline, even while stepped in.
+    pub(crate) fn is_project_wide(&self) -> bool {
+        matches!(self, Command::SetFormat { .. } | Command::Rename { .. })
+    }
+
+    /// The clip a single-clip timing edit is aimed at.
+    pub(crate) fn target(&self) -> Option<ClipId> {
+        match self {
+            Command::TrimStart { id, .. }
+            | Command::TrimEnd { id, .. }
+            | Command::RippleTrimStartTo { id, .. }
+            | Command::RippleTrimEndTo { id, .. }
+            | Command::Slip { id, .. }
+            | Command::BladeClip { id, .. }
+            | Command::DeleteRipple { id }
+            | Command::DeleteWithGap { id }
+            | Command::ToggleEnabled { id }
+            | Command::SetRetime { id, .. }
+            | Command::SetSpeed { id, .. }
+            | Command::FreezeFrame { id, .. }
+            | Command::MoveClip { id, .. }
+            | Command::PositionMove { id, .. } => Some(*id),
+            _ => None,
         }
     }
 
@@ -255,7 +326,16 @@ impl Command {
     /// Whether this command can move clips (and so the speech under captions).
     fn moves_media(&self) -> bool {
         // a Batch re-anchors around each of its sub-commands instead
-        !matches!(self, Command::SetCaptions { .. } | Command::SetMarkers { .. } | Command::SetMixer { .. } | Command::Batch { .. })
+        !matches!(
+            self,
+            Command::SetCaptions { .. }
+                | Command::SetMarkers { .. }
+                | Command::SetMixer { .. }
+                | Command::SetFormat { .. }
+                | Command::Rename { .. }
+                | Command::SetTrack { .. }
+                | Command::Batch { .. }
+        )
     }
 
     /// Apply to `tl`. On error the timeline may be partially modified; the
@@ -264,13 +344,40 @@ impl Command {
     /// Captions follow the speech they transcribe through every edit
     /// (see [`crate::caption_follow`]).
     pub fn apply(&self, tl: &mut Timeline) -> EditResult<()> {
-        if !self.moves_media() || tl.captions.segments.is_empty() {
+        if !self.moves_media() {
             return self.apply_inner(tl);
         }
+        let edit = |tl: &mut Timeline| crate::tracks::with_locks(tl, |tl| self.apply_linked(tl));
+        if tl.captions.segments.is_empty() {
+            return edit(tl);
+        }
         let anchors = crate::caption_follow::anchor_captions(tl);
-        self.apply_inner(tl)?;
+        edit(tl)?;
         crate::caption_follow::follow_edit(tl, &anchors);
         Ok(())
+    }
+
+    /// Apply, keeping linked audio/video pairs together.
+    fn apply_linked(&self, tl: &mut Timeline) -> EditResult<()> {
+        if matches!(self, Command::Batch { .. }) {
+            return self.apply_inner(tl); // each of its commands follows for itself
+        }
+        let pairs = crate::links::pairs(tl);
+        if pairs.is_empty() {
+            return self.apply_inner(tl);
+        }
+        let redirected = crate::links::redirect(self, &pairs);
+        let cmd = match &redirected {
+            Some((cmd, relane)) => {
+                if let Some((id, lane)) = *relane {
+                    tl.clip_mut(id).ok_or(EditError::NotFound(id))?.lane = lane;
+                }
+                cmd
+            }
+            None => self,
+        };
+        cmd.apply_inner(tl)?;
+        crate::links::follow(tl, cmd, &pairs)
     }
 
     fn apply_inner(&self, tl: &mut Timeline) -> EditResult<()> {
@@ -348,7 +455,7 @@ impl Command {
             Command::UpdateClip { clip } => {
                 let c = tl.clip_mut(clip.id).ok_or(EditError::NotFound(clip.id))?;
                 let connected = std::mem::take(&mut c.connected);
-                let (duration, lane, offset) = (c.duration, c.lane, c.offset);
+                let (duration, lane, offset, link) = (c.duration, c.lane, c.offset, c.link);
                 let kind_is_compound = matches!(c.kind, crate::clip::ClipKind::Compound(_));
                 let old_kind = c.kind.clone();
                 *c = (**clip).clone();
@@ -356,6 +463,7 @@ impl Command {
                 c.duration = duration;
                 c.lane = lane;
                 c.offset = offset;
+                c.link = link;
                 if kind_is_compound {
                     c.kind = old_kind;
                 }
@@ -367,12 +475,13 @@ impl Command {
                 }
                 let c = tl.clip_mut(clip.id).ok_or(EditError::NotFound(clip.id))?;
                 let connected = std::mem::take(&mut c.connected);
-                let (lane, offset) = (c.lane, c.offset);
+                let (lane, offset, link) = (c.lane, c.offset, c.link);
                 let old_kind = matches!(c.kind, crate::clip::ClipKind::Compound(_)).then(|| c.kind.clone());
                 *c = (**clip).clone();
                 c.connected = connected;
                 c.lane = lane;
                 c.offset = offset;
+                c.link = link;
                 if let Some(k) = old_kind {
                     c.kind = k;
                 }
@@ -410,9 +519,26 @@ impl Command {
                     return Err(EditError::Nothing);
                 }
                 // History snapshots `tl` first, so a failure here rolls back the whole batch
-                commands.iter().try_for_each(|c| c.apply(tl))
+                // Both halves of a linked pair are often selected together: the
+                // first one's edit already covers the second.
+                let placed = tl.placed_clips();
+                let links: std::collections::HashMap<ClipId, u64> = placed.iter().filter_map(|p| Some((p.clip.id, p.clip.link?))).collect();
+                let mut done = Vec::new();
+                for c in commands {
+                    if let Some((id, link)) = c.target().and_then(|id| Some((id, *links.get(&id)?))) {
+                        let kind = std::mem::discriminant(c);
+                        if done.iter().any(|&(k, l, other)| k == kind && l == link && other != id) {
+                            continue;
+                        }
+                        done.push((kind, link, id));
+                    }
+                    c.apply(tl)?;
+                }
+                Ok(())
             }
-            Command::InContainer { container, cmd } => tl.edit_inside(*container, |inner| cmd.apply_inner(inner)),
+            // lanes inside a container have no track controls of their own
+            Command::InContainer { cmd, .. } if matches!(**cmd, Command::SetTrack { .. }) => Err(EditError::Nothing),
+            Command::InContainer { container, cmd } => tl.edit_inside(*container, |inner| cmd.apply_linked(inner)),
             Command::MakeStoryline { ids } => tl.make_storyline(ids).map(drop),
             Command::PositionMove { id, at, lane } => tl.position_move(*id, *at, *lane).map(drop),
             Command::HoldConnections { ids, cmd } => {
@@ -424,6 +550,27 @@ impl Command {
             Command::AddAuditionTake { id, take } => tl.add_audition_take(*id, (**take).clone()),
             Command::CycleAudition { id, step } => tl.cycle_audition(*id, *step),
             Command::FinalizeAudition { id } => tl.finalize_audition(*id),
+            Command::SetFormat { format } => {
+                if format.width == 0 || format.height == 0 {
+                    return Err(EditError::OutOfRange);
+                }
+                tl.format = *format;
+                Ok(())
+            }
+            Command::Rename { name } => {
+                tl.name.clone_from(name);
+                Ok(())
+            }
+            Command::SetTrack { track } => {
+                tl.set_track(*track);
+                Ok(())
+            }
+            Command::Paste { items, at } => tl.paste_clips(items, *at).map(drop),
+            Command::Duplicate { ids } => tl.duplicate_clips(ids).map(drop),
+            Command::DetachAudio { id } => tl.detach_audio(*id).map(drop),
+            Command::Unlink { id } => tl.unlink(*id),
+            Command::Link { a, b } => tl.link_clips(*a, *b),
+            Command::SetSpeed { id, speed } => tl.set_speed(*id, *speed),
         }
     }
 }
@@ -541,7 +688,9 @@ impl History {
     pub fn undo(&mut self, tl: &mut Timeline) -> bool {
         match self.undo.pop() {
             Some(mut entry) => {
+                let snapping = tl.snapping; // a switch, not an edit
                 *tl = entry.before.clone();
+                tl.snapping = snapping;
                 entry.coalesce_key = None;
                 self.redo.push(entry);
                 self.revision += 1;
@@ -554,7 +703,9 @@ impl History {
     pub fn redo(&mut self, tl: &mut Timeline) -> bool {
         match self.redo.pop() {
             Some(entry) => {
+                let snapping = tl.snapping;
                 *tl = entry.after.clone();
+                tl.snapping = snapping;
                 self.undo.push(entry);
                 self.revision += 1;
                 true

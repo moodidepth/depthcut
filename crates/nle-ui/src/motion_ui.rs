@@ -28,6 +28,8 @@ pub enum MotionResult {
     Matte {
         kind: MatteKind,
         frames: usize,
+        /// Set when not every frame of the clip was done, with the reason.
+        stopped: Option<&'static str>,
         track: Option<Track>,
     },
 }
@@ -119,7 +121,7 @@ pub fn tab_ctx(app: &App, id: ClipId, local: nle_core::Time) -> TabCtx {
         ClipKind::Asset { asset } => app.project.asset(asset).map(|a| (c, a)),
         _ => None,
     }) {
-        let idx = (src_secs(c, local) * a.frame_rate().fps()).floor() as i64;
+        let idx = nle_core::Time::from_secs_f64(src_secs(c, local)).frames_floor(a.frame_rate());
         for kind in MatteKind::ALL {
             let frame_cached = nle_media::matte::frame_path_in(&nle_media::matte::cache_root(), a, kind, idx).is_some_and(|p| p.is_file());
             mattes.push(MatteStatus { kind, model_found: nle_ai::segment::model_path(kind).is_file(), frame_cached });
@@ -346,9 +348,12 @@ pub fn tab(ui: &mut egui::Ui, c: &mut Clip, cx: &TabCtx, motion_ui: &mut MotionU
         });
 
         section(ui, "AI Mattes", |ui| {
+            let runtime_found = nle_ai::segment::runtime_found();
             let dim = |ui: &mut egui::Ui, s: String| ui.label(egui::RichText::new(s).small().color(theme::TEXT_DIM));
             if !nle_ai::segment::onnx_supported() {
                 dim(ui, "This build has no ONNX Runtime support (build with `--features onnx`). Cached mattes still render.".into());
+            } else if !runtime_found {
+                dim(ui, format!("ONNX Runtime missing: put version 1.22 (onnxruntime.dll on Windows) in {}", nle_media::paths::models_dir().display()));
             }
             for st in &cx.mattes {
                 let effect = match st.kind {
@@ -362,7 +367,7 @@ pub fn tab(ui: &mut egui::Ui, c: &mut Clip, cx: &TabCtx, motion_ui: &mut MotionU
                         MatteKind::Person => "Runs models/person.onnx on every frame of this clip and adds a 'Subject (AI)' track for Smart 9:16 Reframe",
                         MatteKind::Depth => "Runs models/depth.onnx on every frame of this clip",
                     };
-                    if ui.add_enabled(!busy && st.model_found && nle_ai::segment::onnx_supported(), gen).on_hover_text(hover).clicked() {
+                    if ui.add_enabled(!busy && st.model_found && runtime_found, gen).on_hover_text(hover).clicked() {
                         action = Some(MotionAction::GenerateMatte(st.kind));
                     }
                     let has = c.effects.iter().any(|e| e.kind == effect);
@@ -373,7 +378,14 @@ pub fn tab(ui: &mut egui::Ui, c: &mut Clip, cx: &TabCtx, motion_ui: &mut MotionU
                 if !st.model_found {
                     dim(ui, format!("Model missing: {}", nle_ai::segment::model_path(st.kind).display()));
                 }
-                dim(ui, if st.frame_cached { "Matte cached at the playhead".into() } else { "No matte at the playhead: the effect passes through".into() });
+                dim(
+                    ui,
+                    if st.frame_cached {
+                        "Matte cached at the playhead".into()
+                    } else {
+                        format!("No matte at the playhead: the effect does nothing until you click Generate {}", st.kind.label())
+                    },
+                );
             }
         });
     }
@@ -498,26 +510,36 @@ impl App {
         let Some(asset) = self.project.asset(asset).cloned() else { return };
         let (s0, s1) = (src_secs(&clip, nle_core::Time::ZERO), src_secs(&clip, clip.duration));
         let (lo, hi) = (s0.min(s1), s0.max(s1));
+        // preview and export look mattes up by the asset's frame rate, whatever a proxy's is
+        let fps = asset.frame_rate().fps().max(1.0);
+        let frames = matte_frames(lo, hi, asset.duration.as_secs_f64(), fps);
+        let aspect = frame_aspect(self, &clip);
         let job = Job::spawn("ai-matte", move |ctx| {
             ctx.set_progress(0.0, "loading model");
             let mut model = nle_ai::segment::MatteModel::load(kind)?;
             let mut dec = nle_media::decode::open(&asset, nle_media::decode::DecodeOptions { use_proxy: true, max_height: Some(nle_render::motion::ANALYSIS_MAX.1) })
                 .map_err(|e| e.to_string())?;
-            let fps = dec.frame_rate().fps().max(1.0);
-            let times = nle_render::motion::frame_times(dec.as_ref(), lo, hi, 1);
+            let total = (frames.end() - frames.start() + 1).max(1);
             let root = nle_media::matte::cache_root();
-            let (mut written, mut subject, mut aspect): (usize, Vec<(f64, [f32; 2])>, f32) = (0, Vec::new(), 16.0 / 9.0);
-            for (i, &t) in times.iter().enumerate() {
+            let (mut written, mut stopped) = (0usize, None);
+            let mut subject: Vec<(f64, [f32; 2])> = Vec::new();
+            for (i, idx) in frames.enumerate() {
                 if ctx.cancelled() {
+                    stopped = Some("cancelled");
                     break;
                 }
-                ctx.set_progress(i as f32 / times.len().max(1) as f32, format!("{i}/{}", times.len()));
-                let idx = (t * fps).floor() as i64;
+                ctx.set_progress(i as f32 / total as f32, format!("{i}/{total}"));
+                let t = (idx as f64 + 0.25) / fps;
                 let m = match nle_media::matte::load_in(&root, &asset, kind, idx) {
                     Some(m) => m,
                     None => {
-                        let Some(f) = nle_render::motion::decode(dec.as_mut(), t) else { break };
-                        aspect = f.aspect();
+                        let Some(f) = nle_render::motion::decode(dec.as_mut(), t) else {
+                            if i == 0 {
+                                return Err("could not decode this clip's video".into());
+                            }
+                            stopped = Some("the video stopped decoding");
+                            break;
+                        };
                         let m = model.infer(&f.rgba, f.width, f.height)?;
                         // <= 480 px wide keeps the cache ~130 KB per frame
                         let m = if m.width > 480 { resize_matte(&m, 480, (m.height * 480 / m.width).max(1)) } else { m };
@@ -532,7 +554,7 @@ impl App {
                     }
                 }
             }
-            Ok(MotionResult::Matte { kind, frames: written, track: subject_track(&subject, aspect) })
+            Ok(MotionResult::Matte { kind, frames: written, stopped, track: subject_track(&subject, aspect) })
         });
         self.motion.job = Some(MotionJob { clip: id, label: "AI matte", job });
     }
@@ -546,6 +568,8 @@ impl App {
         };
         let id = j.clip;
         self.motion.job = None;
+        // new mattes are not an edit, so nothing else redraws a paused viewer
+        self.refresh_preview();
         let Some(mut c) = self.project.timeline.clip(id).cloned() else { return };
         match res {
             Ok(MotionResult::Track(t, end)) => {
@@ -582,8 +606,14 @@ impl App {
                 }
                 None => self.status("No scene cuts found in this clip"),
             },
-            Ok(MotionResult::Matte { kind, frames, track }) => {
+            Ok(MotionResult::Matte { kind, frames, stopped, track }) => {
                 let mut msg = format!("{}: {frames} new frames cached", kind.label());
+                if let Some(why) = stopped {
+                    msg += &format!(" ({why} before the end of the clip)");
+                }
+                if !c.effects.iter().any(|e| e.kind.matte() == Some(kind)) {
+                    msg += " - click Add Effect to see it";
+                }
                 if let Some(t) = track {
                     msg += " - subject track updated (use Smart 9:16 Reframe on it)";
                     match c.tracks.iter_mut().find(|x| x.name == SUBJECT_TRACK) {
@@ -670,6 +700,18 @@ pub fn overlay(app: &mut App, ui: &mut egui::Ui, img: Rect) -> bool {
     rb.dragged() || rc.dragged() || rb.hovered() || rc.hovered()
 }
 
+/// Every source frame a clip spanning `lo..hi` seconds can show: from the
+/// one it starts inside to the one at `hi` (where reversed playback starts),
+/// but none after the last frame of the media.
+fn matte_frames(lo: f64, hi: f64, media_secs: f64, fps: f64) -> std::ops::RangeInclusive<i64> {
+    let first = (lo * fps + 1e-3).floor().max(0.0) as i64;
+    let mut last = (hi * fps + 1e-3).floor() as i64;
+    if media_secs > 0.0 && (hi - media_secs).abs() * fps < 1.0 {
+        last = last.min((media_secs * fps - 1e-3).ceil() as i64 - 1);
+    }
+    first..=last.max(first)
+}
+
 /// Bilinear downscale of a matte.
 fn resize_matte(m: &nle_media::matte::Matte, w: u32, h: u32) -> nle_media::matte::Matte {
     let data = (0..h).flat_map(|y| (0..w).map(move |x| (x, y))).map(|(x, y)| (m.sample((x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32) * 255.0).round() as u8).collect();
@@ -692,6 +734,18 @@ fn subject_track(pts: &[(f64, [f32; 2])], aspect: f32) -> Option<Track> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mattes_cover_every_frame_the_clip_shows() {
+        // starts late inside frame 10: that frame is on screen first
+        assert_eq!(matte_frames(10.8 / 30.0, 20.2 / 30.0, 10.0, 30.0), 10..=20);
+        // whole media: nothing past its last frame
+        assert_eq!(matte_frames(0.0, 2.0, 2.0, 30.0), 0..=59);
+        // 123/30*30 is 122.99999 in floats
+        assert_eq!(*matte_frames(123.0 / 30.0, 5.0, 10.0, 30.0).start(), 123);
+        // a still has no length but still gets a matte
+        assert_eq!(matte_frames(0.0, 0.0, 0.0, 30.0), 0..=0);
+    }
 
     #[test]
     fn subject_track_follows_matte_centroids() {

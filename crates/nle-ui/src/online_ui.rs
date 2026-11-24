@@ -5,7 +5,7 @@
 use crate::app::App;
 use crate::theme;
 use eframe::egui::{self, Color32};
-use nle_core::{AssetId, Attribution, Clip, Command, Time, Timeline};
+use nle_core::{AssetId, Attribution, Clip, Command, MediaAsset, Time, Timeline};
 use nle_media::audio::AudioPreview;
 use nle_media::jobs::Job;
 use nle_media::online::{block_on, download, license_badge, search_blocking, ytdlp, Provider, SearchResult};
@@ -29,7 +29,7 @@ pub struct OnlineState {
     pub results: Vec<SearchResult>,
     pub warnings: Vec<String>,
     pub search_job: Option<Job<(Vec<SearchResult>, Vec<String>)>>,
-    pub download_job: Option<Job<(PathBuf, Option<Attribution>)>>,
+    pub download_job: Option<Job<MediaAsset>>,
     pub download_id: Option<String>,
     pub preview_url_job: Option<Job<(String, String)>>,
     pub preview_resolving_id: Option<String>,
@@ -102,7 +102,7 @@ pub fn poll(app: &mut App, ctx: &egui::Context) {
             app.online.download_job = None;
             app.online.download_id = None;
             match res {
-                Ok((path, attr)) => add_downloaded_audio(app, path, attr),
+                Ok(asset) => add_downloaded_media(app, asset),
                 Err(e) => app.status(format!("Download failed: {e}")),
             }
         } else {
@@ -121,32 +121,33 @@ fn free_video_lane_above(tl: &Timeline, at: Time, dur: Time) -> i32 {
     (1..=32).find(|&lane| !placed.iter().any(|p| p.lane == lane && p.start < at + dur && p.end() > at)).unwrap_or(1)
 }
 
-fn add_downloaded_audio(app: &mut App, path: PathBuf, attr: Option<Attribution>) {
-    match probe::probe(&path) {
-        Ok(mut asset) => {
-            asset.attribution = attr;
-            let name = asset.name.clone();
-            let id: AssetId = app.project.add_asset(asset);
-            app.assets_changed = true;
-            if let Some(a) = app.project.asset(id).cloned() {
-                app.library.ensure(&a);
-                app.browser.selected = Some(id);
-                let clip = Clip::from_asset(&a);
-                let cmd = if app.project.timeline.spine.is_empty() {
-                    Command::Append { clip }
-                } else {
-                    let lane = if a.has_video() {
-                        free_video_lane_above(&app.project.timeline, app.playhead, clip.duration)
-                    } else {
-                        free_audio_lane_below(&app.project.timeline, app.playhead, clip.duration)
-                    };
-                    Command::Connect { clip, at: app.playhead, lane }
-                };
-                app.exec(cmd);
-                app.status(format!("Added {name} to project & timeline"));
-            }
-        }
-        Err(e) => app.status(format!("Could not probe downloaded media: {e}")),
+/// Runs on the download's thread: probing starts ffprobe.
+fn downloaded_asset(path: PathBuf, attribution: Option<Attribution>) -> Result<MediaAsset, String> {
+    let mut asset = probe::probe(&path).map_err(|e| format!("could not probe downloaded media: {e}"))?;
+    asset.attribution = attribution;
+    Ok(asset)
+}
+
+fn add_downloaded_media(app: &mut App, asset: MediaAsset) {
+    let name = asset.name.clone();
+    let id: AssetId = app.project.add_asset(asset);
+    app.assets_changed = true;
+    let Some(a) = app.project.asset(id).cloned() else { return };
+    app.library.ensure(&a);
+    app.browser.selected = Some(id);
+    let clip = Clip::from_asset(&a);
+    let cmd = if app.project.timeline.spine.is_empty() {
+        Command::Append { clip }
+    } else {
+        let lane = if a.has_video() {
+            free_video_lane_above(&app.project.timeline, app.playhead, clip.duration)
+        } else {
+            free_audio_lane_below(&app.project.timeline, app.playhead, clip.duration)
+        };
+        Command::Connect { clip, at: app.playhead, lane }
+    };
+    if app.exec(cmd) {
+        app.status(format!("Added {name} to project & timeline"));
     }
 }
 
@@ -264,7 +265,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     jctx.set_progress(0.0, "Downloading via yt-dlp…");
                     let c = jctx.cancel_flag();
                     let p = ytdlp::download_audio(&url, &dir, |f| jctx.set_fraction(f), c)?;
-                    Ok((p, None))
+                    downloaded_asset(p, None)
                 }));
             }
         });
@@ -324,7 +325,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                                     },
                                     cancel,
                                 )?;
-                                Ok((path, attr))
+                                downloaded_asset(path, attr)
                             }));
                         }
                         let is_playing = app.online.preview.is_playing_id(&res.id);

@@ -4,9 +4,12 @@
 use crate::app::{drag_key, App};
 use crate::theme;
 use eframe::egui::{self, Color32, CornerRadius, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
+use nle_core::clip::{CropAspect, VideoParams};
 use nle_core::eval::clip_layer;
+use nle_core::eval::{Composition, Layer, RenderNode, ResolvedVideo};
 use nle_core::{format_timecode, parse_timecode, ClipId, ClipKind, Command, Time};
-use nle_render::transform::{fit_size, layer_corners, layer_to_output};
+use nle_render::manipulate::{self, Guides, Side};
+use nle_render::transform::{fit_size, layer_to_output};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Gizmo {
@@ -16,6 +19,36 @@ pub enum Gizmo {
 }
 
 const GIZMO_TAG: u64 = 0x61;
+/// How close (points) a drag has to come to a guide to snap.
+const SNAP_DISTANCE: f32 = 7.0;
+const HANDLE_HIT: f32 = 14.0;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Grab {
+    Move,
+    Scale(Side),
+    Rotate,
+    Crop(Side),
+}
+
+/// An overlay drag. It works from where it began, so clamping and snapping
+/// never drift.
+#[derive(Clone, Debug)]
+pub struct GizmoDrag {
+    id: ClipId,
+    grab: Grab,
+    /// The clip's time and settings when the drag began.
+    local: Time,
+    start: VideoParams,
+    /// The layer as it was drawn then, and its size.
+    drawn: ResolvedVideo,
+    layer: [f32; 2],
+    /// Where the pointer went down, in output pixels.
+    press: [f32; 2],
+    /// Rotation so far and the pointer's last direction, in degrees.
+    turned: f32,
+    direction: f32,
+}
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     // ----- top bar
@@ -32,13 +65,24 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 Some(z) => format!("{:.0}%", z * 100.0),
             };
             egui::ComboBox::from_id_salt("viewer-zoom").selected_text(zl).width(64.0).show_ui(ui, |ui| {
-                ui.selectable_value(&mut app.viewer.zoom, None, "Fit");
+                let mut picked = ui.selectable_value(&mut app.viewer.zoom, None, "Fit").clicked();
                 for z in [0.25f32, 0.5, 1.0, 2.0] {
-                    ui.selectable_value(&mut app.viewer.zoom, Some(z), format!("{:.0}%", z * 100.0));
+                    picked |= ui.selectable_value(&mut app.viewer.zoom, Some(z), format!("{:.0}%", z * 100.0)).clicked();
+                }
+                if picked {
+                    app.viewer.pan = Vec2::ZERO;
                 }
             });
             ui.menu_button("View ▾", |ui| {
                 ui.checkbox(&mut app.viewer.safe_zones, "Title/Action Safe Zones");
+                ui.menu_button("Aspect Guide", |ui| {
+                    for a in CropAspect::ALL {
+                        let label = if a == CropAspect::Free { "None" } else { a.label() };
+                        if ui.radio_value(&mut app.viewer.aspect_guide, a, label).clicked() {
+                            ui.close_menu();
+                        }
+                    }
+                });
                 let mut wipe = app.viewer.wipe.is_some();
                 if ui.checkbox(&mut wipe, "Before/After Wipe").changed() {
                     app.viewer.wipe = if wipe { Some(0.5) } else { None };
@@ -74,14 +118,15 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     };
     let size = match app.viewer.zoom {
         None => fit,
-        Some(z) => {
-            let ppp = ui.ctx().pixels_per_point();
-            let (pw, ph) = app.preview.as_ref().map(|p| p.renderer.size()).unwrap_or((fmt.width, fmt.height));
-            let _ = ph;
-            Vec2::new(fw, fh) * (z * pw as f32 / fw / ppp)
-        }
+        // 100 % = one project pixel per screen pixel, whatever size the preview renders at
+        Some(z) => Vec2::new(fw, fh) * (z / ui.ctx().pixels_per_point()),
     };
-    let img = Rect::from_center_size(area.center(), size);
+    if resp.dragged_by(egui::PointerButton::Middle) {
+        app.viewer.pan += resp.drag_delta();
+    }
+    let room = ((size - area.size()) * 0.5).max(Vec2::ZERO);
+    app.viewer.pan = app.viewer.pan.clamp(-room, room);
+    let img = Rect::from_center_size(area.center() + app.viewer.pan, size);
     let clip_painter = ui.painter().with_clip_rect(area);
     match &app.preview {
         Some(p) => {
@@ -93,6 +138,20 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     }
     let to_screen = |p: [f32; 2]| Pos2::new(img.left() + p[0] / fw * img.width(), img.top() + p[1] / fh * img.height());
 
+    if let Some(ratio) = app.viewer.aspect_guide.ratio() {
+        let size = if fw / fh > ratio { Vec2::new(img.height() * ratio, img.height()) } else { Vec2::new(img.width(), img.width() / ratio) };
+        let kept = Rect::from_center_size(img.center(), size);
+        let outside = [
+            Rect::from_min_max(img.min, Pos2::new(kept.left(), img.bottom())),
+            Rect::from_min_max(Pos2::new(kept.right(), img.top()), img.max),
+            Rect::from_min_max(Pos2::new(kept.left(), img.top()), Pos2::new(kept.right(), kept.top())),
+            Rect::from_min_max(Pos2::new(kept.left(), kept.bottom()), Pos2::new(kept.right(), img.bottom())),
+        ];
+        for r in outside.into_iter().filter(|r| r.is_positive()) {
+            clip_painter.rect_filled(r, CornerRadius::ZERO, Color32::from_black_alpha(120));
+        }
+        clip_painter.rect_stroke(kept, CornerRadius::ZERO, Stroke::new(1.0_f32, Color32::from_white_alpha(150)), StrokeKind::Inside);
+    }
     if app.viewer.safe_zones {
         for (frac, label) in [(0.9f32, "Action safe"), (0.8, "Title safe")] {
             let r = Rect::from_center_size(img.center(), img.size() * frac);
@@ -127,9 +186,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     } else if app.browser.skim.is_none() && !app.playback.playing && !wipe_drag && !crate::motion_ui::overlay(app, ui, img) && !crate::color_ui::mask_gizmo(app, ui, img, (fw, fh))
     {
         gizmo(app, ui, &resp, img, (fw, fh), &to_screen);
+    } else if app.viewer.drag.take().is_some() {
+        app.history.seal();
     }
     if resp.double_clicked() {
         app.viewer.zoom = None;
+        app.viewer.pan = Vec2::ZERO;
     }
 
     // ----- video scopes drawer
@@ -220,6 +282,13 @@ fn layer_size(app: &App, clip: &nle_core::Clip, layer: &nle_core::eval::Layer, f
     [rw as f32, rh as f32]
 }
 
+/// Native size of `clip`'s layer at `local`.
+pub fn clip_layer_size(app: &App, clip: &nle_core::Clip, local: Time) -> [f32; 2] {
+    let fmt = app.project.timeline.format;
+    let frame = (fmt.width as f32, fmt.height as f32);
+    clip_layer(clip, local, clip.lane).map_or([frame.0, frame.1], |layer| layer_size(app, clip, &layer, frame))
+}
+
 /// Frame size ÷ fitted layer size per axis — converts frame fractions to
 /// layer-space anchor units for the zoom punch's "Center" anchor.
 pub fn frame_per_layer(app: &App, clip: &nle_core::Clip, local: Time) -> [f64; 2] {
@@ -254,7 +323,8 @@ fn pick_punch_anchor(app: &mut App, ui: &mut egui::Ui, resp: &egui::Response, im
     let Some(layer) = clip_layer(&clip, local, clip.lane) else { return };
     let lsize = layer_size(app, &clip, &layer, frame);
     let out = [(pos.x - img.left()) / img.width() * frame.0, (pos.y - img.top()) / img.height() * frame.1];
-    let Some(inv) = layer_to_output(&layer.video, lsize, [frame.0, frame.1]).inverse() else { return };
+    let unflipped = ResolvedVideo { flip: [false; 2], ..layer.video.clone() };
+    let Some(inv) = layer_to_output(&unflipped, lsize, [frame.0, frame.1]).inverse() else { return };
     let uv = inv.apply(out);
     let (x, y) = (((uv[0] - 0.5) as f64).clamp(-0.5, 0.5), ((uv[1] - 0.5) as f64).clamp(-0.5, 0.5));
     app.punch.anchor = PunchAnchor::Custom { x, y };
@@ -265,117 +335,205 @@ fn pick_punch_anchor(app: &mut App, ui: &mut egui::Ui, resp: &egui::Response, im
     }
 }
 
+/// `id`'s layer in a composition, as it is drawn (tracks followed).
+fn drawn_layer(comp: &Composition, id: ClipId) -> Option<&Layer> {
+    comp.nodes.iter().find_map(|node| match node {
+        RenderNode::Layer(l) => (l.clip == id).then_some(l),
+        RenderNode::Transition { from, to, .. } => [from, to].into_iter().flatten().map(|l| l.as_ref()).find(|l| l.clip == id),
+    })
+}
+
+/// The resize cursor for a handle lying in direction `d` from the box's middle.
+fn resize_cursor(d: Vec2) -> egui::CursorIcon {
+    use egui::CursorIcon as C;
+    let octant = (d.angle().to_degrees().rem_euclid(180.0) / 45.0).round() as i32 % 4;
+    [C::ResizeHorizontal, C::ResizeNwSe, C::ResizeVertical, C::ResizeNeSw][octant as usize]
+}
+
 fn gizmo(app: &mut App, ui: &mut egui::Ui, resp: &egui::Response, img: Rect, frame: (f32, f32), to_screen: &dyn Fn([f32; 2]) -> Pos2) {
-    if app.viewer.gizmo == Gizmo::None {
-        return;
+    let (down, press, pointer, mods) = ui.input(|i| (i.pointer.primary_down(), i.pointer.press_origin(), i.pointer.latest_pos(), i.modifiers));
+    let mode = app.viewer.gizmo;
+    let selected = app.selection.first().copied().filter(|_| mode != Gizmo::None);
+    if app.viewer.drag.as_ref().is_some_and(|d| !down || Some(d.id) != selected) {
+        app.viewer.drag = None;
+        app.history.seal();
     }
-    let Some(id) = app.selection.first().copied() else { return };
+    let Some(id) = selected else { return };
     let Some(clip) = app.project.timeline.clip(id).cloned() else { return };
     let Some(start) = app.project.timeline.clip_start(id) else { return };
-    let t = app.view_time();
-    if t < start || t >= start + clip.duration || matches!(clip.kind, ClipKind::Gap) {
+    // adjustment layers always cover the frame
+    if matches!(clip.kind, ClipKind::Gap | ClipKind::Adjustment) {
+        return;
+    }
+    // the frame the preview shows
+    let rate = app.project.timeline.format.rate;
+    let t = Time::from_frames(app.view_time().frames_floor(rate), rate);
+    if t < start || t >= start + clip.duration {
         return;
     }
     let local = t - start;
-    let Some(layer) = clip_layer(&clip, local, clip.lane) else { return };
-    let lsize = layer_size(app, &clip, &layer, frame);
-    let corners = layer_corners(&layer.video, lsize, [frame.0, frame.1]).map(to_screen);
-    let centre = Pos2::new(corners.iter().map(|p| p.x).sum::<f32>() / 4.0, corners.iter().map(|p| p.y).sum::<f32>() / 4.0);
-    let p = ui.painter().with_clip_rect(img.expand(40.0));
-    let col = if app.viewer.gizmo == Gizmo::Crop { theme::SNAP } else { Color32::WHITE };
+    let comp = nle_core::eval::evaluate(&app.project.timeline, t);
+    let Some(layer) = drawn_layer(&comp, id) else { return };
+    if app.project.timeline.is_locked(layer.lane) {
+        return;
+    }
+    let size = [frame.0, frame.1];
+    let lsize = layer_size(app, &clip, layer, frame);
+    let v = &layer.video;
+
+    let area = resp.rect;
+    let p = ui.painter().with_clip_rect(area);
+    let col = if mode == Gizmo::Crop { theme::SNAP } else { Color32::WHITE };
+    let frame_corners = manipulate::box_corners(v, lsize, size);
+    let corners = frame_corners.map(to_screen);
     p.add(egui::Shape::closed_line(corners.to_vec(), Stroke::new(1.5_f32, col)));
+    let middle = corners[0] + (corners[2] - corners[0]) * 0.5;
+    let to_frame = |q: Pos2| [(q.x - img.left()) / img.width() * frame.0, (q.y - img.top()) / img.height() * frame.1];
 
-    let screen_per_frame = img.width() / frame.0;
-    let key = Some(drag_key(GIZMO_TAG, id));
-    let mut edited = clip.clone();
-    let mut changed = false;
-
-    match app.viewer.gizmo {
-        Gizmo::Transform => {
-            // rotation handle above the top edge
-            let top_mid = corners[0] + (corners[1] - corners[0]) * 0.5;
-            let up = (top_mid - centre).normalized();
-            let rot_handle = top_mid + up * 24.0;
-            p.line_segment([top_mid, rot_handle], Stroke::new(1.0_f32, col));
-            p.circle_filled(rot_handle, 5.0, theme::VIDEO);
-            p.circle_stroke(centre, 6.0, Stroke::new(1.5_f32, col));
-            p.line_segment([centre - Vec2::new(9.0, 0.0), centre + Vec2::new(9.0, 0.0)], Stroke::new(1.0_f32, col));
-            p.line_segment([centre - Vec2::new(0.0, 9.0), centre + Vec2::new(0.0, 9.0)], Stroke::new(1.0_f32, col));
-            for (i, c) in corners.iter().enumerate() {
-                let r = ui.interact(Rect::from_center_size(*c, Vec2::splat(14.0)), ui.id().with(("gz-corner", i)), Sense::drag());
-                p.rect_filled(Rect::from_center_size(*c, Vec2::splat(9.0)), CornerRadius::same(2), if r.hovered() { theme::VIDEO } else { Color32::WHITE });
-                if r.dragged() {
-                    if let Some(pos) = r.interact_pointer_pos() {
-                        let d0 = (pos - r.drag_delta() - centre).length().max(1.0);
-                        let d1 = (pos - centre).length().max(1.0);
-                        let k = (d1 / d0) as f64;
-                        let sx = edited.video.scale_x.at(local) * k;
-                        let sy = edited.video.scale_y.at(local) * k;
-                        edited.video.scale_x.set(local, sx.clamp(0.01, 20.0));
-                        edited.video.scale_y.set(local, sy.clamp(0.01, 20.0));
-                        changed = true;
-                    }
-                }
-                r.on_hover_cursor(egui::CursorIcon::ResizeNwSe);
-            }
-            let rr = ui.interact(Rect::from_center_size(rot_handle, Vec2::splat(14.0)), ui.id().with("gz-rot"), Sense::drag());
-            if rr.dragged() {
-                if let Some(pos) = rr.interact_pointer_pos() {
-                    let a0 = (pos - rr.drag_delta() - centre).angle();
-                    let a1 = (pos - centre).angle();
-                    let d = (a1 - a0).to_degrees() as f64;
-                    let rot = edited.video.rotation.at(local) + d;
-                    edited.video.rotation.set(local, rot);
-                    changed = true;
-                }
-            }
-            // drag inside the frame = move
-            if !changed && resp.dragged() && resp.drag_delta() != Vec2::ZERO {
-                let d = resp.drag_delta() / screen_per_frame;
-                let px = edited.video.position_x.at(local) + (d.x / frame.0) as f64;
-                let py = edited.video.position_y.at(local) + (d.y / frame.1) as f64;
-                edited.video.position_x.set(local, px);
-                edited.video.position_y.set(local, py);
-                changed = true;
-            }
+    let mut began = None;
+    let sides = [(corners[1] - corners[0]).length(), (corners[3] - corners[0]).length()];
+    // on a tiny box the edge handles would cover the corners
+    let edges = manipulate::EDGES.into_iter().filter(|s| sides[(s[0] != 0) as usize] >= HANDLE_HIT * 3.0);
+    for side in edges.chain(manipulate::CORNERS) {
+        let at = to_screen(manipulate::handle_point(v, lsize, size, side));
+        if !area.contains(at) {
+            continue;
         }
-        Gizmo::Crop => {
-            // edge handles: left, right, top, bottom
-            let mids = [
-                (corners[3] + (corners[0] - corners[3]) * 0.5, 0usize),
-                (corners[1] + (corners[2] - corners[1]) * 0.5, 1),
-                (corners[0] + (corners[1] - corners[0]) * 0.5, 2),
-                (corners[2] + (corners[3] - corners[2]) * 0.5, 3),
-            ];
-            let layer_w = (corners[1] - corners[0]).length().max(1.0) / (1.0 - layer.video.crop[0] - layer.video.crop[1]).max(0.05);
-            let layer_h = (corners[3] - corners[0]).length().max(1.0) / (1.0 - layer.video.crop[2] - layer.video.crop[3]).max(0.05);
-            for (pt, edge) in mids {
-                let r = ui.interact(Rect::from_center_size(pt, Vec2::splat(16.0)), ui.id().with(("gz-crop", edge)), Sense::drag());
-                p.rect_filled(Rect::from_center_size(pt, Vec2::new(if edge < 2 { 5.0 } else { 16.0 }, if edge < 2 { 16.0 } else { 5.0 })), CornerRadius::same(2), theme::SNAP);
-                if r.dragged() {
-                    let d = r.drag_delta();
-                    let (param, delta) = match edge {
-                        0 => (&mut edited.video.crop_left, d.x / layer_w),
-                        1 => (&mut edited.video.crop_right, -d.x / layer_w),
-                        2 => (&mut edited.video.crop_top, d.y / layer_h),
-                        _ => (&mut edited.video.crop_bottom, -d.y / layer_h),
-                    };
-                    let v = (param.at(local) + delta as f64).clamp(0.0, 0.95);
-                    param.set(local, v);
-                    changed = true;
-                }
-            }
+        let hit = Rect::from_center_size(at, Vec2::splat(HANDLE_HIT)).intersect(area);
+        let r = ui.interact(hit, ui.id().with(("gz-handle", side)), Sense::drag()).on_hover_cursor(resize_cursor(at - middle));
+        let fill = if r.hovered() || r.dragged() { theme::VIDEO } else { col };
+        let drawn = if side[0] != 0 && side[1] != 0 { 9.0 } else { 7.0 };
+        p.rect_filled(Rect::from_center_size(at, Vec2::splat(drawn)), CornerRadius::same(2), fill);
+        if r.drag_started_by(egui::PointerButton::Primary) {
+            began = Some(if mode == Gizmo::Crop { Grab::Crop(side) } else { Grab::Scale(side) });
         }
-        Gizmo::None => {}
     }
 
-    if changed {
-        app.exec_key(Command::UpdateClip { clip: Box::new(edited) }, key);
+    let pivot = to_screen(manipulate::pivot(v, lsize, size));
+    if mode == Gizmo::Transform {
+        let top = corners[0] + (corners[1] - corners[0]) * 0.5;
+        let (sin, cos) = v.rotation.to_radians().sin_cos();
+        let up = Vec2::new(sin, -cos) * 24.0;
+        // above the box, or just inside it where that is out of view
+        let knob = if area.contains(top + up) { top + up } else { top - up };
+        if area.contains(knob) {
+            p.line_segment([top, knob], Stroke::new(1.0_f32, col));
+            p.circle_filled(knob, 5.0, theme::VIDEO);
+            let r =
+                ui.interact(Rect::from_center_size(knob, Vec2::splat(HANDLE_HIT)).intersect(area), ui.id().with("gz-rot"), Sense::drag()).on_hover_cursor(egui::CursorIcon::Grab);
+            if r.drag_started_by(egui::PointerButton::Primary) {
+                began = Some(Grab::Rotate);
+            }
+        }
+        p.circle_stroke(pivot, 6.0, Stroke::new(1.5_f32, col));
+        p.line_segment([pivot - Vec2::new(9.0, 0.0), pivot + Vec2::new(9.0, 0.0)], Stroke::new(1.0_f32, col));
+        p.line_segment([pivot - Vec2::new(0.0, 9.0), pivot + Vec2::new(0.0, 9.0)], Stroke::new(1.0_f32, col));
+
+        let over = |q: Pos2| manipulate::inside(&frame_corners, to_frame(q));
+        if resp.hovered() && pointer.is_some_and(over) {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Move);
+        }
+        if resp.drag_started_by(egui::PointerButton::Primary) && press.is_some_and(over) {
+            began = Some(Grab::Move);
+        }
     }
-    if !ui.ctx().input(|i| i.pointer.any_down()) {
+
+    if let (Some(grab), Some(from)) = (began, press) {
         app.history.seal();
+        app.viewer.drag = Some(GizmoDrag {
+            id,
+            grab,
+            local,
+            start: clip.video.clone(),
+            drawn: v.clone(),
+            layer: lsize,
+            press: to_frame(from),
+            turned: 0.0,
+            direction: (from - pivot).angle().to_degrees(),
+        });
     }
-    let _: ClipId = id;
+
+    let (Some(mut drag), Some(pos)) = (app.viewer.drag.clone(), pointer) else { return };
+    let (guides, edited) = drag_edit(&mut drag, &clip.video, to_frame(pos), size, frame.0 / img.width().max(1.0), mods);
+    app.viewer.drag = Some(drag);
+    let line = Stroke::new(1.0_f32, theme::SNAP);
+    if let Some(x) = guides[0] {
+        let x = to_screen([x, 0.0]).x;
+        p.line_segment([Pos2::new(x, img.top()), Pos2::new(x, img.bottom())], line);
+    }
+    if let Some(y) = guides[1] {
+        let y = to_screen([0.0, y]).y;
+        p.line_segment([Pos2::new(img.left(), y), Pos2::new(img.right(), y)], line);
+    }
+    if edited != clip.video {
+        let mut changed = clip;
+        changed.video = edited;
+        app.exec_key(Command::UpdateClip { clip: Box::new(changed) }, Some(drag_key(GIZMO_TAG, id)));
+    }
+}
+
+/// The settings with the pointer at `at` (output pixels). Shift keeps the
+/// aspect ratio and rotates in 15° steps; Ctrl drags without snapping.
+fn drag_edit(drag: &mut GizmoDrag, now: &VideoParams, at: [f32; 2], frame: [f32; 2], per_point: f32, mods: egui::Modifiers) -> (Guides, VideoParams) {
+    let (t, s, v, layer) = (drag.local, &drag.start, &drag.drawn, drag.layer);
+    let tolerance = if mods.command { 0.0 } else { SNAP_DISTANCE * per_point };
+    let moved = [at[0] - drag.press[0], at[1] - drag.press[1]];
+    let handle = |side: Side| {
+        let from = manipulate::handle_point(v, layer, frame, side);
+        [from[0] + moved[0], from[1] + moved[1]]
+    };
+    let mut out = now.clone();
+    // setting an animated parameter writes a key, so only set what changes
+    let put = |param: &mut nle_core::Param, to: f64| {
+        if (param.at(t) - to).abs() > 1e-6 {
+            param.set(t, to);
+        }
+    };
+    let mut guides: Guides = [None; 2];
+    match drag.grab {
+        Grab::Move => {
+            let mut by = moved;
+            if tolerance > 0.0 {
+                let corners = manipulate::box_corners(v, layer, frame).map(|c| [c[0] + by[0], c[1] + by[1]]);
+                let (shift, lines) = manipulate::snap_move(&corners, frame, tolerance);
+                by = [by[0] + shift[0], by[1] + shift[1]];
+                guides = lines;
+            }
+            put(&mut out.position_x, s.position_x.at(t) + (by[0] / frame[0]) as f64);
+            put(&mut out.position_y, s.position_y.at(t) + (by[1] / frame[1]) as f64);
+        }
+        Grab::Scale(side) => {
+            let (scale, lines) = manipulate::resize(v, layer, frame, side, handle(side), s.scale_lock || mods.shift, tolerance);
+            guides = lines;
+            // by ratio, as what is drawn can carry a followed track's scale
+            let scaled = |from: &nle_core::Param, i: usize| if v.scale[i].abs() > 1e-6 { from.at(t) * (scale[i] / v.scale[i]) as f64 } else { scale[i] as f64 };
+            put(&mut out.scale_x, scaled(&s.scale_x, 0));
+            put(&mut out.scale_y, scaled(&s.scale_y, 1));
+        }
+        Grab::Rotate => {
+            let pivot = manipulate::pivot(v, layer, frame);
+            let direction = (at[1] - pivot[1]).atan2(at[0] - pivot[0]).to_degrees();
+            drag.turned += manipulate::turn(drag.direction, direction);
+            drag.direction = direction;
+            let mut to = s.rotation.at(t) + drag.turned as f64;
+            if mods.shift {
+                to = (to / 15.0).round() * 15.0;
+            }
+            put(&mut out.rotation, to);
+        }
+        Grab::Crop(side) => {
+            let (crop, position, lines) = manipulate::crop_drag(v, layer, frame, side, handle(side), s.crop_lock || mods.shift, tolerance);
+            guides = lines;
+            let params = [(&mut out.crop_left, &s.crop_left), (&mut out.crop_right, &s.crop_right), (&mut out.crop_top, &s.crop_top), (&mut out.crop_bottom, &s.crop_bottom)];
+            for (i, (param, from)) in params.into_iter().enumerate() {
+                let to = if (crop[i] - v.crop[i]).abs() > 1e-6 { crop[i] as f64 } else { from.at(t) };
+                put(param, to);
+            }
+            put(&mut out.position_x, s.position_x.at(t) + (position[0] - v.position[0]) as f64);
+            put(&mut out.position_y, s.position_y.at(t) + (position[1] - v.position[1]) as f64);
+        }
+    }
+    (guides, out)
 }
 
 /// Speaker mute toggle + 0–150 % slider (laid out right-to-left). Drives
@@ -429,14 +587,14 @@ fn transport(app: &mut App, ui: &mut egui::Ui) {
         if ui.button(big("⏮")).on_hover_text("Go to start (Home)").clicked() {
             app.seek(Time::ZERO);
         }
-        if ui.button(big("⏪")).on_hover_text("Play reverse (J)").clicked() {
+        if ui.button(big("⏪")).on_hover_text(app.keymap.tip("Play reverse", nle_core::Action::ShuttleLeft)).clicked() {
             app.shuttle(-1.0);
         }
         let play = if app.playback.playing { "⏸" } else { "▶" };
         if ui.button(big(play)).on_hover_text("Play / Pause (Space)").clicked() {
             app.toggle_play();
         }
-        if ui.button(big("⏩")).on_hover_text("Play forward (L)").clicked() {
+        if ui.button(big("⏩")).on_hover_text(app.keymap.tip("Play forward", nle_core::Action::ShuttleRight)).clicked() {
             app.shuttle(1.0);
         }
         if ui.button(big("⏭")).on_hover_text("Go to end (End)").clicked() {
@@ -497,4 +655,69 @@ fn transport(app: &mut App, ui: &mut egui::Ui) {
             }
         });
     });
+}
+
+#[cfg(test)]
+mod drag_tests {
+    use super::*;
+    use nle_core::Param;
+
+    const FRAME: [f32; 2] = [1920.0, 1080.0];
+
+    fn drag(start: &VideoParams, grab: Grab, press: [f32; 2]) -> GizmoDrag {
+        let drawn =
+            ResolvedVideo { scale: [start.scale_x.at_f32(Time::ZERO), start.scale_y.at_f32(Time::ZERO)], flip: [start.flip_horizontal, start.flip_vertical], ..Default::default() };
+        GizmoDrag { id: ClipId(1), grab, local: Time::ZERO, start: start.clone(), drawn, layer: FRAME, press, turned: 0.0, direction: 0.0 }
+    }
+
+    fn animated(value: f64) -> Param {
+        let mut p = Param::new(value);
+        p.add_keyframe(Time::from_secs(5));
+        p
+    }
+
+    #[test]
+    fn a_drag_only_keys_what_it_changes() {
+        let start = VideoParams { position_x: animated(0.0), position_y: animated(0.0), rotation: animated(0.0), scale_lock: false, ..Default::default() };
+        let mut d = drag(&start, Grab::Move, [500.0, 500.0]);
+        let (_, out) = drag_edit(&mut d, &start, [700.0, 500.0], FRAME, 1.0, egui::Modifiers::COMMAND);
+        assert!((out.position_x.at(Time::ZERO) - 200.0 / 1920.0).abs() < 1e-5);
+        assert_eq!((&out.position_y, &out.rotation, &out.scale_x), (&start.position_y, &start.rotation, &start.scale_x));
+    }
+
+    #[test]
+    fn shift_keeps_the_shape_of_an_unlocked_resize() {
+        let start = VideoParams { scale_lock: false, ..Default::default() };
+        let shape = |mods| {
+            let mut d = drag(&start, Grab::Scale([1, 1]), [1920.0, 1080.0]);
+            let (_, out) = drag_edit(&mut d, &start, [1500.0, 1000.0], FRAME, 1.0, mods);
+            out.scale_x.at(Time::ZERO) / out.scale_y.at(Time::ZERO)
+        };
+        assert!((shape(egui::Modifiers::NONE) - 1.0).abs() > 0.1);
+        assert!((shape(egui::Modifiers::SHIFT) - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn rotation_crosses_half_a_turn_without_jumping() {
+        let start = VideoParams::default();
+        let mut d = drag(&start, Grab::Rotate, [1160.0, 540.0]);
+        let mut last = 0.0;
+        for deg in (10..=370).step_by(10) {
+            let a = (deg as f32).to_radians();
+            let (_, out) = drag_edit(&mut d, &start, [960.0 + 200.0 * a.cos(), 540.0 + 200.0 * a.sin()], FRAME, 1.0, egui::Modifiers::NONE);
+            last = out.rotation.at(Time::ZERO);
+        }
+        assert!((last - 370.0).abs() < 0.01, "{last}");
+    }
+
+    #[test]
+    fn a_flipped_crop_keeps_the_picture_still() {
+        let start = VideoParams { flip_horizontal: true, ..Default::default() };
+        let mut d = drag(&start, Grab::Crop([-1, 0]), [0.0, 540.0]);
+        let (_, out) = drag_edit(&mut d, &start, [480.0, 540.0], FRAME, 1.0, egui::Modifiers::COMMAND);
+        let t = Time::ZERO;
+        // the left of a mirrored picture is its own right side
+        assert!((out.crop_right.at(t) - 0.25).abs() < 1e-4 && out.crop_left.at(t).abs() < 1e-4);
+        assert!((out.position_x.at(t) - 0.25).abs() < 1e-4);
+    }
 }

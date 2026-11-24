@@ -100,7 +100,8 @@ impl Focus {
             return history.execute_coalesced(shown, cmd, key);
         };
         root.snapping = shown.snapping;
-        let r = history.execute_coalesced(root, Command::in_path(&path, cmd), key);
+        let cmd = if cmd.is_project_wide() { cmd } else { Command::in_path(&path, cmd) };
+        let r = history.execute_coalesced(root, cmd, key);
         self.refresh(shown);
         r
     }

@@ -51,7 +51,7 @@ pub struct ExportDialog {
     audio: usize,
     /// 0 = project / delivery size, otherwise `OUTPUT_SIZES[resolution - 1]`.
     resolution: usize,
-    /// 0 = project / delivery rate, 1 = 30 fps, 2 = 60 fps.
+    /// 0 = project / delivery rate, else 1 + an index into `OUTPUT_RATES`.
     fps: usize,
     tier: QualityTier,
     /// Render the caption track into the picture.
@@ -193,6 +193,8 @@ impl ExportDialog {
                     }
                     msg
                 }
+                // stopping an export on purpose is not a failure
+                Err(e) if e == nle_render::export::ExportError::Cancelled.to_string() => format!("Export of {} cancelled", path.display()),
                 Err(e) => format!("Export of {} failed: {e}", path.display()),
             };
             if self.queue_running {
@@ -295,10 +297,8 @@ impl ExportDialog {
             }
             let auto_size = (target_w, target_h);
             let auto_rate = target_rate;
-            match self.fps {
-                1 => target_rate = nle_core::FrameRate::FPS_30,
-                2 => target_rate = nle_core::FrameRate::FPS_60,
-                _ => {}
+            if let Some(rate) = chosen_rate(self.fps) {
+                target_rate = rate;
             }
             egui::Grid::new("export").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
                 ui.label("Gaming Delivery");
@@ -391,8 +391,9 @@ impl ExportDialog {
                 ui.label("Frame rate");
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut self.fps, 0, format!("Project ({})", auto_rate.label()));
-                    ui.selectable_value(&mut self.fps, 1, "30 fps");
-                    ui.selectable_value(&mut self.fps, 2, "60 fps");
+                    for (i, (_, label)) in OUTPUT_RATES.iter().enumerate() {
+                        ui.selectable_value(&mut self.fps, i + 1, *label);
+                    }
                 });
                 ui.end_row();
                 ui.label("Captions");
@@ -576,10 +577,8 @@ impl ExportDialog {
             settings.width = w;
             settings.height = h;
         }
-        match self.fps {
-            1 => settings.frame_rate = nle_core::FrameRate::FPS_30,
-            2 => settings.frame_rate = nle_core::FrameRate::FPS_60,
-            _ => {}
+        if let Some(rate) = chosen_rate(self.fps) {
+            settings.frame_rate = rate;
         }
         settings.ten_bit = self.ten_bit;
         settings.alpha = self.alpha;
@@ -631,6 +630,13 @@ fn next_free_path(path: &Path, queue: &[Queued]) -> PathBuf {
 /// Output sizes offered in the Render dialog (width, height, label).
 pub const OUTPUT_SIZES: [(u32, u32, &str); 4] =
     [(1080, 1920, "1080×1920 (9:16 Shorts / TikTok)"), (1920, 1080, "1920×1080 (1080p)"), (2560, 1440, "2560×1440 (1440p)"), (3840, 2160, "3840×2160 (4K)")];
+
+const OUTPUT_RATES: [(nle_core::FrameRate, &str); 3] = [(nle_core::FrameRate::FPS_24, "24 fps"), (nle_core::FrameRate::FPS_30, "30 fps"), (nle_core::FrameRate::FPS_60, "60 fps")];
+
+/// The dialog's frame-rate choice; `None` keeps the project's or delivery's.
+fn chosen_rate(choice: usize) -> Option<nle_core::FrameRate> {
+    choice.checked_sub(1).and_then(|i| OUTPUT_RATES.get(i)).map(|(rate, _)| *rate)
+}
 
 /// Encoder quality tiers: an offset on the codec's default quality value
 /// (lower = better), so each tier means the same thing on every encoder.

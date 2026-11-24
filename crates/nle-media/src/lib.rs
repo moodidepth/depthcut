@@ -2,8 +2,8 @@
 //!
 //! Media I/O for Rust Cut Pro, tuned for an Intel Arc A750 + Ryzen 7 5800X:
 //!
-//! * [`hwaccel`] — Quick Sync first (QSV over VA-API `iHD` on Linux, over
-//!   D3D11VA on Windows) for H.264 / HEVC 8+10-bit / AV1, with silent
+//! * [`hwaccel`] — hardware decode first (D3D11VA on Windows, QSV over
+//!   VA-API `iHD` on Linux) for H.264 / HEVC 8+10-bit / AV1, with silent
 //!   fallback to multi-threaded software decode.
 //! * [`decode`] — decoders producing NV12/P010 frames for the GPU.
 //! * [`queue`] / [`frame_server`] — bounded ring-buffer frame queues and the

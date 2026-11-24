@@ -9,12 +9,14 @@ use crate::theme;
 use crate::widgets::{color_wheel, param_row, slider_f32, ParamSpec};
 use eframe::egui::{self, Color32, Stroke};
 use nle_core::{
-    AudioRole, BlendMode, Clip, ClipKind, Command, CropMode, Direction, Effect, EffectKind, FadeShape, FrameBlendMode, FrameRate, Interpolation, LutRef, ParamKind, Retime,
-    TextAnimation, Time, TitleStyle, Transition, TransitionKind, VideoFormat,
+    AudioRole, BlendMode, Clip, ClipKind, Command, CropAspect, CropMode, Direction, Effect, EffectKind, FadeShape, FrameBlendMode, FrameRate, Interpolation, LutRef, ParamKind,
+    Retime, TextAnimation, Time, TitleStyle, Transition, TransitionKind, VideoFormat,
 };
 use nle_media::analysis::{normalize_gain_db, TARGET_LUFS};
 
 const INSPECTOR_TAG: u64 = 0x1f;
+const SPEED_TAG: u64 = 0x2f;
+const RENAME_KEY: u64 = 0x3f;
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
@@ -38,6 +40,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let local = app.local_time(id);
     let frame = app.project.timeline.frame();
     let mut c = original.clone();
+    let layer = crate::viewer::clip_layer_size(app, &original, local);
+    // a new press starts a new undo step, even if a field still has the keyboard
+    if ui.ctx().input(|i| i.pointer.any_pressed()) {
+        app.history.seal();
+    }
 
     ui.horizontal(|ui| {
         let accent = clip_accent(&c);
@@ -73,7 +80,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let motion_ui = &mut app.motion;
     let color_view = &mut app.color_view;
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match app.inspector_tab {
-        InspectorTab::Video => video_tab(ui, &mut c, local, frame, &mut retime_action, &mut toggle_reframe_916, &mut app.punch, &mut punch_request, color_view),
+        InspectorTab::Video => video_tab(ui, &mut c, local, frame, layer, &mut retime_action, &mut toggle_reframe_916, &mut app.punch, &mut punch_request, color_view),
         InspectorTab::Color => color_tab(ui, &mut c, local, frame, detected_space, color_view),
         InspectorTab::Audio => audio_tab(
             ui,
@@ -122,6 +129,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         Some(RetimeAction::Preset(s)) => app.retime_preset(s),
         Some(RetimeAction::VelocityPreset(name)) => app.apply_velocity_preset(name),
         Some(RetimeAction::Reverse) => app.retime_reverse(),
+        Some(RetimeAction::Speed(speed)) => {
+            app.exec_key(Command::SetSpeed { id, speed }, Some(drag_key(SPEED_TAG, id)));
+        }
         Some(RetimeAction::Ramp(up)) => app.retime_ramp(up),
         Some(RetimeAction::Hold) => app.freeze_frame(),
         Some(RetimeAction::Blend(m)) => app.set_retime_blend(m),
@@ -186,6 +196,8 @@ fn learn_noise_at_playhead(app: &mut App, id: nle_core::ClipId) {
 
 enum RetimeAction {
     Preset(f64),
+    /// A constant speed; negative plays backwards.
+    Speed(f64),
     VelocityPreset(&'static str),
     Reverse,
     Ramp(bool),
@@ -213,6 +225,24 @@ fn kind_label(c: &Clip) -> &'static str {
     }
 }
 
+/// A section with a Reset button in its header. True when that was clicked.
+fn resettable(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui)) -> bool {
+    let id = ui.make_persistent_id(("section", title));
+    let mut reset = false;
+    let mut toggle = false;
+    let mut header = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true).show_header(ui, |ui| {
+        toggle = ui.add(egui::Label::new(egui::RichText::new(title).strong()).sense(egui::Sense::click())).clicked();
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            reset = ui.small_button("Reset").on_hover_text(format!("Reset {title} to its defaults")).clicked();
+        });
+    });
+    if toggle {
+        header.toggle();
+    }
+    header.body(body);
+    reset
+}
+
 fn section(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui)) {
     egui::CollapsingHeader::new(egui::RichText::new(title).strong()).default_open(true).show(ui, body);
 }
@@ -225,6 +255,7 @@ fn video_tab(
     c: &mut Clip,
     t: Time,
     f: Time,
+    layer: [f32; 2],
     retime: &mut Option<RetimeAction>,
     toggle_reframe_916: &mut bool,
     punch: &mut PunchState,
@@ -233,9 +264,12 @@ fn video_tab(
 ) {
     if matches!(c.kind, ClipKind::Gap) || (!c.has_video() && !matches!(c.kind, ClipKind::Title(_))) {
         ui.label(egui::RichText::new("No video in this clip.").color(theme::TEXT_DIM));
+        if matches!(c.kind, ClipKind::Asset { .. } | ClipKind::Compound(_)) {
+            speed_section(ui, c, t, retime);
+        }
         return;
     }
-    section(ui, "Compositing", |ui| {
+    let reset = resettable(ui, "Compositing", |ui| {
         ui.horizontal(|ui| {
             ui.add_sized([96.0, 20.0], egui::Label::new(egui::RichText::new("Blend Mode").color(theme::TEXT_DIM)));
             egui::ComboBox::from_id_salt("blend").selected_text(c.video.blend_mode.label()).show_ui(ui, |ui| {
@@ -264,92 +298,223 @@ fn video_tab(
         }
         param_row(ui, &ParamSpec::new("Opacity", 0.0, 1.0, 1.0).scaled(100.0, " %").decimals(0), &mut c.video.opacity, t, f);
     });
+    if reset {
+        let d = nle_core::VideoParams::default();
+        c.video.opacity = d.opacity;
+        c.video.blend_mode = d.blend_mode;
+    }
     if !matches!(c.kind, ClipKind::Adjustment) {
-        section(ui, "Transform", |ui| {
-            let v = &mut c.video;
-            param_row(ui, &ParamSpec::new("Position X", -2.0, 2.0, 0.0).scaled(100.0, " %").decimals(1), &mut v.position_x, t, f);
-            param_row(ui, &ParamSpec::new("Position Y", -2.0, 2.0, 0.0).scaled(100.0, " %").decimals(1), &mut v.position_y, t, f);
-            param_row(ui, &ParamSpec::new("Rotation", -3600.0, 3600.0, 0.0).scaled(1.0, "°").speed(0.5).decimals(1), &mut v.rotation, t, f);
-            param_row(ui, &ParamSpec::new("Scale X", 0.0, 20.0, 1.0).scaled(100.0, " %").decimals(1), &mut v.scale_x, t, f);
-            param_row(ui, &ParamSpec::new("Scale Y", 0.0, 20.0, 1.0).scaled(100.0, " %").decimals(1), &mut v.scale_y, t, f);
-            param_row(ui, &ParamSpec::new("Anchor X", -1.0, 1.0, 0.0).scaled(100.0, " %").decimals(1), &mut v.anchor_x, t, f);
-            param_row(ui, &ParamSpec::new("Anchor Y", -1.0, 1.0, 0.0).scaled(100.0, " %").decimals(1), &mut v.anchor_y, t, f);
-        });
+        transform_section(ui, &mut c.video, t, f);
         zoom_punch_section(ui, punch, punch_request);
-        section(ui, "Crop", |ui| {
-            let v = &mut c.video;
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut v.crop_mode, CropMode::Trim, "Trim");
-                ui.selectable_value(&mut v.crop_mode, CropMode::KenBurns, "Ken Burns");
-            });
-            match v.crop_mode {
-                CropMode::Trim => {
-                    param_row(ui, &ParamSpec::new("Left", 0.0, 0.95, 0.0).scaled(100.0, " %").decimals(1), &mut v.crop_left, t, f);
-                    param_row(ui, &ParamSpec::new("Right", 0.0, 0.95, 0.0).scaled(100.0, " %").decimals(1), &mut v.crop_right, t, f);
-                    param_row(ui, &ParamSpec::new("Top", 0.0, 0.95, 0.0).scaled(100.0, " %").decimals(1), &mut v.crop_top, t, f);
-                    param_row(ui, &ParamSpec::new("Bottom", 0.0, 0.95, 0.0).scaled(100.0, " %").decimals(1), &mut v.crop_bottom, t, f);
-                }
-                CropMode::KenBurns => {
-                    for (label, r) in [("Start", &mut v.ken_burns_start), ("End", &mut v.ken_burns_end)] {
-                        ui.horizontal(|ui| {
-                            ui.add_sized([60.0, 20.0], egui::Label::new(egui::RichText::new(label).color(theme::TEXT_DIM)));
-                            for (i, n) in ["x", "y", "w", "h"].iter().enumerate() {
-                                ui.add(egui::DragValue::new(&mut r[i]).range(0.0..=1.0).speed(0.005).prefix(format!("{n} ")).max_decimals(3));
-                            }
-                        });
-                    }
-                }
-            }
-        });
+        crop_section(ui, &mut c.video, t, f, layer);
     }
     effects_section(ui, &mut c.effects, t, f, view);
     if matches!(c.kind, ClipKind::Asset { .. } | ClipKind::Compound(_)) {
-        section(ui, "Speed (Retime)", |ui| {
-            let cur = c.retime.as_ref().map(|r| r.speed_at(t)).unwrap_or(1.0);
-            ui.label(egui::RichText::new(format!("Current speed {:.0}%", cur * 100.0)).color(theme::TEXT_DIM));
-            ui.horizontal_wrapped(|ui| {
-                for (l, s) in [("25%", 0.25), ("50%", 0.5), ("100%", 1.0), ("200%", 2.0), ("400%", 4.0)] {
-                    if ui.button(l).clicked() {
-                        *retime = Some(RetimeAction::Preset(s));
+        speed_section(ui, c, t, retime);
+    }
+}
+
+fn transform_section(ui: &mut egui::Ui, v: &mut nle_core::VideoParams, t: Time, f: Time) {
+    let reset = resettable(ui, "Transform", |ui| {
+        param_row(ui, &ParamSpec::new("Position X", -2.0, 2.0, 0.0).scaled(100.0, " %").decimals(1), &mut v.position_x, t, f);
+        param_row(ui, &ParamSpec::new("Position Y", -2.0, 2.0, 0.0).scaled(100.0, " %").decimals(1), &mut v.position_y, t, f);
+        param_row(ui, &ParamSpec::new("Rotation", -3600.0, 3600.0, 0.0).scaled(1.0, "°").speed(0.5).decimals(1), &mut v.rotation, t, f);
+
+        let (x0, y0) = (v.scale_x.clone(), v.scale_y.clone());
+        param_row(ui, &ParamSpec::new("Scale X", 0.0, 20.0, 1.0).scaled(100.0, " %").decimals(1), &mut v.scale_x, t, f);
+        param_row(ui, &ParamSpec::new("Scale Y", 0.0, 20.0, 1.0).scaled(100.0, " %").decimals(1), &mut v.scale_y, t, f);
+        if v.scale_lock {
+            if v.scale_x != x0 {
+                follow_scale(&x0, &v.scale_x, &mut v.scale_y, t);
+            } else if v.scale_y != y0 {
+                follow_scale(&y0, &v.scale_y, &mut v.scale_x, t);
+            }
+        }
+        ui.checkbox(&mut v.scale_lock, "Lock scale aspect ratio").on_hover_text("Changing one axis scales the other by the same factor");
+
+        param_row(ui, &ParamSpec::new("Anchor X", -1.0, 1.0, 0.0).scaled(100.0, " %").decimals(1), &mut v.anchor_x, t, f);
+        param_row(ui, &ParamSpec::new("Anchor Y", -1.0, 1.0, 0.0).scaled(100.0, " %").decimals(1), &mut v.anchor_y, t, f);
+        ui.horizontal(|ui| {
+            ui.add_sized([96.0, 20.0], egui::Label::new(egui::RichText::new("Flip").color(theme::TEXT_DIM)));
+            ui.toggle_value(&mut v.flip_horizontal, "Horizontal");
+            ui.toggle_value(&mut v.flip_vertical, "Vertical");
+        });
+    });
+    if reset {
+        let d = nle_core::VideoParams::default();
+        v.position_x = d.position_x;
+        v.position_y = d.position_y;
+        v.rotation = d.rotation;
+        v.scale_x = d.scale_x;
+        v.scale_y = d.scale_y;
+        v.scale_lock = d.scale_lock;
+        v.anchor_x = d.anchor_x;
+        v.anchor_y = d.anchor_y;
+        v.flip_horizontal = d.flip_horizontal;
+        v.flip_vertical = d.flip_vertical;
+    }
+}
+
+/// With the scale locked, `other` follows what happened to the edited axis.
+fn follow_scale(before: &nle_core::Param, after: &nle_core::Param, other: &mut nle_core::Param, t: Time) {
+    if before.is_animated() && !after.is_animated() && after.value == 1.0 {
+        // the row's reset button
+        other.clear_keyframes();
+        other.value = 1.0;
+        return;
+    }
+    let (from, to) = (before.at(t), after.at(t));
+    if (to - from).abs() > 1e-9 {
+        let scaled = if from.abs() > 1e-6 { other.at(t) * to / from } else { to };
+        other.set(t, scaled.clamp(0.0, 20.0));
+    }
+}
+
+fn crop_section(ui: &mut egui::Ui, v: &mut nle_core::VideoParams, t: Time, f: Time, layer: [f32; 2]) {
+    let reset = resettable(ui, "Crop", |ui| {
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut v.crop_mode, CropMode::Trim, "Trim");
+            ui.selectable_value(&mut v.crop_mode, CropMode::KenBurns, "Ken Burns");
+        });
+        match v.crop_mode {
+            CropMode::Trim => {
+                let mut preset = None;
+                ui.horizontal_wrapped(|ui| {
+                    for a in CropAspect::ALL {
+                        if ui.selectable_label(v.crop_aspect == a, a.label()).clicked() {
+                            preset = Some(a);
+                        }
+                    }
+                });
+                let mut before = [v.crop_left.at_f32(t), v.crop_right.at_f32(t), v.crop_top.at_f32(t), v.crop_bottom.at_f32(t)];
+                if let Some(a) = preset {
+                    v.crop_aspect = a;
+                    v.crop_lock = a.ratio().is_some();
+                    if let Some(ratio) = a.ratio() {
+                        let crop = nle_render::manipulate::aspect_crop(before, layer, ratio);
+                        for (p, to) in [&mut v.crop_left, &mut v.crop_right, &mut v.crop_top, &mut v.crop_bottom].into_iter().zip(crop) {
+                            p.set(t, to as f64);
+                        }
+                        before = crop;
                     }
                 }
-            });
-            ui.horizontal_wrapped(|ui| {
-                if ui.button("⟲ Reverse").clicked() {
-                    *retime = Some(RetimeAction::Reverse);
-                }
-                if ui.button("Ramp ↓ 25%").clicked() {
-                    *retime = Some(RetimeAction::Ramp(false));
-                }
-                if ui.button("Ramp ↑ 400%").clicked() {
-                    *retime = Some(RetimeAction::Ramp(true));
-                }
-                if ui.button("Hold 2s").on_hover_text("Shift+H").clicked() {
-                    *retime = Some(RetimeAction::Hold);
-                }
-            });
-            ui.label(egui::RichText::new("Fragmovie Velocity Curves (Ctrl+R lane)").small().color(theme::TEXT_DIM));
-            ui.horizontal_wrapped(|ui| {
-                for name in Retime::PRESET_NAMES {
-                    let short = name.split('(').next().unwrap_or(name).trim();
-                    if ui.small_button(short).on_hover_text(name).clicked() {
-                        *retime = Some(RetimeAction::VelocityPreset(name));
+                let mut edited = None;
+                for (i, (label, p)) in [("Left", &mut v.crop_left), ("Right", &mut v.crop_right), ("Top", &mut v.crop_top), ("Bottom", &mut v.crop_bottom)].into_iter().enumerate()
+                {
+                    if param_row(ui, &ParamSpec::new(label, 0.0, 0.999, 0.0).scaled(100.0, " %").decimals(1), p, t, f) && (p.at_f32(t) - before[i]).abs() > 1e-6 {
+                        edited = Some((i, p.at_f32(t)));
                     }
                 }
-            });
-            if let Some(r) = &c.retime {
-                ui.horizontal(|ui| {
-                    ui.add_sized([96.0, 20.0], egui::Label::new(egui::RichText::new("Video Quality").color(theme::TEXT_DIM)));
-                    egui::ComboBox::from_id_salt("blendmode").selected_text(r.blend.label()).show_ui(ui, |ui| {
-                        for m in FrameBlendMode::ALL {
-                            if ui.selectable_label(r.blend == m, m.label()).clicked() {
-                                *retime = Some(RetimeAction::Blend(m));
-                            }
+                if let Some((edge, value)) = edited {
+                    let crop = nle_render::manipulate::set_crop_edge(before, edge, value, v.crop_lock);
+                    for (i, p) in [&mut v.crop_left, &mut v.crop_right, &mut v.crop_top, &mut v.crop_bottom].into_iter().enumerate() {
+                        let now = if i == edge { value } else { before[i] };
+                        if (crop[i] - now).abs() > 1e-6 {
+                            p.set(t, crop[i] as f64);
+                        }
+                    }
+                }
+                if ui.checkbox(&mut v.crop_lock, "Lock crop aspect ratio").changed() && !v.crop_lock {
+                    v.crop_aspect = CropAspect::Free;
+                }
+            }
+            CropMode::KenBurns => {
+                for (label, r) in [("Start", &mut v.ken_burns_start), ("End", &mut v.ken_burns_end)] {
+                    ui.horizontal(|ui| {
+                        ui.add_sized([60.0, 20.0], egui::Label::new(egui::RichText::new(label).color(theme::TEXT_DIM)));
+                        for (i, n) in ["x", "y", "w", "h"].iter().enumerate() {
+                            ui.add(egui::DragValue::new(&mut r[i]).range(0.0..=1.0).speed(0.005).prefix(format!("{n} ")).max_decimals(3));
                         }
                     });
-                });
+                }
+            }
+        }
+    });
+    if reset {
+        let d = nle_core::VideoParams::default();
+        v.crop_left = d.crop_left;
+        v.crop_right = d.crop_right;
+        v.crop_top = d.crop_top;
+        v.crop_bottom = d.crop_bottom;
+        v.crop_mode = d.crop_mode;
+        v.ken_burns_start = d.ken_burns_start;
+        v.ken_burns_end = d.ken_burns_end;
+        v.crop_aspect = d.crop_aspect;
+        v.crop_lock = d.crop_lock;
+    }
+}
+
+fn speed_section(ui: &mut egui::Ui, c: &Clip, t: Time, retime: &mut Option<RetimeAction>) {
+    let reset = resettable(ui, "Speed (Retime)", |ui| {
+        let cur = c.retime.as_ref().map(|r| r.speed_at(t)).unwrap_or(1.0);
+        ui.horizontal(|ui| {
+            ui.add_sized([96.0, 20.0], egui::Label::new(egui::RichText::new("Speed").color(theme::TEXT_DIM)));
+            let mut times = cur.abs();
+            let mut backwards = cur < 0.0;
+            let changed = ui
+                .add(
+                    egui::DragValue::new(&mut times)
+                        .range(nle_core::edit_ops::MIN_SPEED..=nle_core::edit_ops::MAX_SPEED)
+                        .clamp_existing_to_range(false)
+                        .update_while_editing(false)
+                        .speed(0.01)
+                        .suffix(" ×")
+                        .max_decimals(2),
+                )
+                .on_hover_text("0.1× to 10×. Sets one speed for the whole clip, replacing any ramp.")
+                .changed();
+            let flipped = ui.checkbox(&mut backwards, "Reverse").changed();
+            if changed {
+                *retime = Some(RetimeAction::Speed(if backwards { -times } else { times }));
+            } else if flipped {
+                *retime = Some(RetimeAction::Reverse);
             }
         });
+        ui.horizontal_wrapped(|ui| {
+            for (l, s) in [("25%", 0.25), ("50%", 0.5), ("100%", 1.0), ("200%", 2.0), ("400%", 4.0)] {
+                if ui.button(l).clicked() {
+                    *retime = Some(RetimeAction::Preset(s));
+                }
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("⟲ Reverse").clicked() {
+                *retime = Some(RetimeAction::Reverse);
+            }
+            if ui.button("Ramp ↓ 25%").clicked() {
+                *retime = Some(RetimeAction::Ramp(false));
+            }
+            if ui.button("Ramp ↑ 400%").clicked() {
+                *retime = Some(RetimeAction::Ramp(true));
+            }
+            if ui.button("Hold 2s").on_hover_text("Shift+H").clicked() {
+                *retime = Some(RetimeAction::Hold);
+            }
+        });
+        ui.label(egui::RichText::new("Fragmovie Velocity Curves (Ctrl+R lane)").small().color(theme::TEXT_DIM));
+        ui.horizontal_wrapped(|ui| {
+            for name in Retime::PRESET_NAMES {
+                let short = name.split('(').next().unwrap_or(name).trim();
+                if ui.small_button(short).on_hover_text(name).clicked() {
+                    *retime = Some(RetimeAction::VelocityPreset(name));
+                }
+            }
+        });
+        if let Some(r) = &c.retime {
+            ui.horizontal(|ui| {
+                ui.add_sized([96.0, 20.0], egui::Label::new(egui::RichText::new("Video Quality").color(theme::TEXT_DIM)));
+                egui::ComboBox::from_id_salt("blendmode").selected_text(r.blend.label()).show_ui(ui, |ui| {
+                    for m in FrameBlendMode::ALL {
+                        if ui.selectable_label(r.blend == m, m.label()).clicked() {
+                            *retime = Some(RetimeAction::Blend(m));
+                        }
+                    }
+                });
+            });
+        }
+    });
+    if reset && c.retime.is_some() {
+        *retime = Some(RetimeAction::Speed(1.0));
     }
 }
 
@@ -561,7 +726,7 @@ fn color_tab(ui: &mut egui::Ui, c: &mut Clip, t: Time, f: Time, detected: Option
     });
     ui.add_enabled_ui(col.enabled, |ui| {
         color_management(ui, col, detected);
-        section(ui, "Color Wheels", |ui| {
+        let reset = resettable(ui, "Color Wheels", |ui| {
             ui.horizontal(|ui| {
                 let size = ((ui.available_width() - 24.0) / 3.0).clamp(70.0, 110.0);
                 color_wheel(ui, "Shadows (Lift)", &mut col.shadows, size);
@@ -570,13 +735,28 @@ fn color_tab(ui: &mut egui::Ui, c: &mut Clip, t: Time, f: Time, detected: Option
             });
             ui.label(egui::RichText::new("Double-click a wheel to reset it").small().color(theme::TEXT_DIM));
         });
-        section(ui, "Primary", |ui| {
+        if reset {
+            col.shadows = Default::default();
+            col.midtones = Default::default();
+            col.highlights = Default::default();
+        }
+        let reset = resettable(ui, "Basic Color", |ui| {
+            param_row(ui, &ParamSpec::new("Brightness", -1.0, 1.0, 0.0).scaled(100.0, "").decimals(0), &mut col.brightness, t, f);
             param_row(ui, &ParamSpec::new("Exposure", -4.0, 4.0, 0.0).scaled(1.0, " st").decimals(2), &mut col.exposure, t, f);
             param_row(ui, &ParamSpec::new("Contrast", -1.0, 1.0, 0.0).scaled(100.0, "").decimals(0), &mut col.contrast, t, f);
             param_row(ui, &ParamSpec::new("Saturation", 0.0, 2.0, 1.0).scaled(100.0, " %").decimals(0), &mut col.saturation, t, f);
             param_row(ui, &ParamSpec::new("Temperature", -1.0, 1.0, 0.0).scaled(100.0, "").decimals(0), &mut col.temperature, t, f);
             param_row(ui, &ParamSpec::new("Tint", -1.0, 1.0, 0.0).scaled(100.0, "").decimals(0), &mut col.tint, t, f);
         });
+        if reset {
+            let d = nle_core::ColorParams::default();
+            col.exposure = d.exposure;
+            col.brightness = d.brightness;
+            col.contrast = d.contrast;
+            col.saturation = d.saturation;
+            col.temperature = d.temperature;
+            col.tint = d.tint;
+        }
         section(ui, "Look LUT", |ui| {
             ui.horizontal(|ui| {
                 let label = col.lut.as_ref().map(|l| std::path::Path::new(&l.path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default());
@@ -617,11 +797,12 @@ fn audio_tab(
     learn_noise: &mut bool,
 ) {
     if !c.has_audio() {
-        ui.label(egui::RichText::new("No audio in this clip.").color(theme::TEXT_DIM));
+        let why = if c.link.is_some() { "This clip's audio is on its linked audio clip." } else { "No audio in this clip." };
+        ui.label(egui::RichText::new(why).color(theme::TEXT_DIM));
         return;
     }
     let a = &mut c.audio;
-    section(ui, "Volume & Pan", |ui| {
+    let reset = resettable(ui, "Volume & Pan", |ui| {
         ui.checkbox(&mut a.muted, "Mute");
         param_row(ui, &ParamSpec::new("Volume", -60.0, 12.0, 0.0).scaled(1.0, " dB").speed(0.1).decimals(1), &mut a.volume_db, t, f);
         param_row(ui, &ParamSpec::new("Pan", -1.0, 1.0, 0.0).scaled(100.0, "").decimals(0), &mut a.pan, t, f);
@@ -632,6 +813,13 @@ fn audio_tab(
             }
         });
     });
+    if reset {
+        // the role says what the clip is, so it stays
+        let d = nle_core::AudioParams::default();
+        a.muted = d.muted;
+        a.volume_db = d.volume_db;
+        a.pan = d.pan;
+    }
     section(ui, "Loudness & Voice Clarity", |ui| {
         let norm_label = match asset_lufs {
             Some(l) => format!("-14 LUFS Normalize ({l:.1} LUFS -> {:+.1} dB)", normalize_gain_db(l, TARGET_LUFS)),
@@ -697,7 +885,7 @@ fn audio_tab(
         ui.checkbox(&mut a.preserve_pitch, "Preserve Pitch on Speed Ramps (WSOLA)");
         ui.checkbox(&mut a.mute_extreme_slowmo, "Auto-Mute Extreme Slow-Mo (< 30%)");
     });
-    section(ui, "Fades", |ui| {
+    let reset = resettable(ui, "Fades & Crossfades", |ui| {
         let mut fi = a.fade_in.as_secs_f64() as f32;
         let mut fo = a.fade_out.as_secs_f64() as f32;
         if slider_f32(ui, "Fade In", &mut fi, 0.0..=10.0, " s") {
@@ -712,7 +900,23 @@ fn audio_tab(
                 ui.selectable_value(&mut a.fade_shape, s, s.label());
             }
         });
+        ui.label(egui::RichText::new("Audio Crossfade").color(theme::TEXT_DIM))
+            .on_hover_text("Centred on the cut, using the media beyond it. Without spare media it fades out, then in; with no neighbour it fades the edge.");
+        for (label, d) in [("At Start", &mut a.crossfade_in), ("At End", &mut a.crossfade_out)] {
+            let mut secs = d.as_secs_f64() as f32;
+            if slider_f32(ui, label, &mut secs, 0.0..=5.0, " s") {
+                *d = Time::from_secs_f64(secs as f64);
+            }
+        }
     });
+    if reset {
+        let d = nle_core::AudioParams::default();
+        a.fade_in = d.fade_in;
+        a.fade_out = d.fade_out;
+        a.fade_shape = d.fade_shape;
+        a.crossfade_in = d.crossfade_in;
+        a.crossfade_out = d.crossfade_out;
+    }
     section(ui, "Restoration", |ui| {
         let nr = &mut a.noise_reduction;
         ui.checkbox(&mut nr.enabled, egui::RichText::new("Noise Reduction").strong())
@@ -883,7 +1087,7 @@ fn titles_tab(ui: &mut egui::Ui, c: &mut Clip, add_title: &mut Option<bool>) {
     section(ui, "Transitions", |ui| {
         transition_editor(ui, "Out (to next clip)", "tr-out", &mut c.transition_out);
         ui.separator();
-        transition_editor(ui, "In (from black)", "tr-in", &mut c.transition_in);
+        transition_editor(ui, "In (from previous clip, or black)", "tr-in", &mut c.transition_in);
     });
 }
 
@@ -946,8 +1150,13 @@ fn project_settings(app: &mut App, ui: &mut egui::Ui) {
     ui.add_enabled_ui(!stepped_in, |ui| {
         ui.horizontal(|ui| {
             ui.label("Name");
-            if ui.text_edit_singleline(&mut app.project.name).changed() {
-                app.project.timeline.name = app.project.name.clone();
+            let field = ui.text_edit_singleline(&mut app.project.name);
+            if field.changed() {
+                let name = app.project.name.clone();
+                app.exec_key(Command::Rename { name }, Some(RENAME_KEY));
+            }
+            if field.lost_focus() {
+                app.history.seal();
             }
         });
         ui.horizontal(|ui| {
@@ -979,8 +1188,7 @@ fn project_settings(app: &mut App, ui: &mut egui::Ui) {
         });
     });
     if changed {
-        app.project.timeline.format = nf;
-        app.resize_preview();
+        app.exec(Command::SetFormat { format: nf });
     }
     ui.add_space(8.0);
     theme::heading(ui, "TIMELINE");
@@ -997,7 +1205,7 @@ fn project_settings(app: &mut App, ui: &mut egui::Ui) {
         ui.label(format!("{} / redo {}", app.history.undo_len(), app.history.redo_len()));
         ui.end_row();
         ui.label("Autosave");
-        ui.label(app.autosaver.path().display().to_string());
+        ui.add(egui::Label::new(app.autosaver.path().display().to_string()).truncate());
         ui.end_row();
     });
 }

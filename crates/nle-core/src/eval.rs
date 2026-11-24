@@ -1,7 +1,7 @@
 //! Timeline evaluation: resolve what should be on screen (and in the
 //! speakers) at a given time into a flat, renderer-friendly description.
 
-use crate::clip::{AudioParams, BlendMode, Clip, ClipKind, Direction, LutRef, TitleParams, TransitionKind};
+use crate::clip::{AudioParams, BlendMode, Clip, ClipKind, Direction, FadeShape, LutRef, TitleParams, TransitionKind};
 use crate::effects::{EffectKind, ResolvedEffect};
 use crate::ids::{AssetId, ClipId};
 use crate::speed::{FrameBlendMode, Retime};
@@ -18,6 +18,8 @@ pub struct ResolvedVideo {
     pub opacity: f32,
     /// left, right, top, bottom (fractions of the source frame)
     pub crop: [f32; 4],
+    /// Mirrored horizontally / vertically inside the cropped box.
+    pub flip: [bool; 2],
     /// Ken Burns source rectangle `[x, y, w, h]` (full frame when unused).
     pub source_rect: [f32; 4],
     pub blend: BlendMode,
@@ -34,6 +36,7 @@ impl Default for ResolvedVideo {
             anchor: [0.0, 0.0],
             opacity: 1.0,
             crop: [0.0; 4],
+            flip: [false; 2],
             source_rect: [0.0, 0.0, 1.0, 1.0],
             blend: BlendMode::Normal,
             stabilize: None,
@@ -45,6 +48,7 @@ impl Default for ResolvedVideo {
 pub struct ResolvedColor {
     pub enabled: bool,
     pub exposure: f32,
+    pub brightness: f32,
     pub contrast: f32,
     pub saturation: f32,
     pub temperature: f32,
@@ -66,6 +70,7 @@ impl Default for ResolvedColor {
         ResolvedColor {
             enabled: false,
             exposure: 0.0,
+            brightness: 0.0,
             contrast: 0.0,
             saturation: 1.0,
             temperature: 0.0,
@@ -236,6 +241,16 @@ impl Composition {
     }
 }
 
+/// The most two opposite crop edges may remove together.
+pub const MAX_CROP_SUM: f32 = 0.999;
+
+/// An opposite pair of crop edges that always leaves part of the picture.
+fn crop_pair(a: f32, b: f32) -> (f32, f32) {
+    let (a, b) = (a.clamp(0.0, 1.0), b.clamp(0.0, 1.0));
+    let k = if a + b > MAX_CROP_SUM { MAX_CROP_SUM / (a + b) } else { 1.0 };
+    (a * k, b * k)
+}
+
 fn resolve_video(c: &Clip, t: Time) -> ResolvedVideo {
     let v = &c.video;
     let source_rect = match v.crop_mode {
@@ -247,13 +262,16 @@ fn resolve_video(c: &Clip, t: Time) -> ResolvedVideo {
             [a[0] + (b[0] - a[0]) * e, a[1] + (b[1] - a[1]) * e, a[2] + (b[2] - a[2]) * e, a[3] + (b[3] - a[3]) * e]
         }
     };
+    let (left, right) = crop_pair(v.crop_left.at_f32(t), v.crop_right.at_f32(t));
+    let (top, bottom) = crop_pair(v.crop_top.at_f32(t), v.crop_bottom.at_f32(t));
     ResolvedVideo {
         position: [v.position_x.at_f32(t), v.position_y.at_f32(t)],
         scale: [v.scale_x.at_f32(t), v.scale_y.at_f32(t)],
         rotation: v.rotation.at_f32(t),
         anchor: [v.anchor_x.at_f32(t), v.anchor_y.at_f32(t)],
         opacity: v.opacity.at_f32(t).clamp(0.0, 1.0),
-        crop: [v.crop_left.at_f32(t).clamp(0.0, 1.0), v.crop_right.at_f32(t).clamp(0.0, 1.0), v.crop_top.at_f32(t).clamp(0.0, 1.0), v.crop_bottom.at_f32(t).clamp(0.0, 1.0)],
+        crop: [left, right, top, bottom],
+        flip: [v.flip_horizontal, v.flip_vertical],
         source_rect,
         blend: v.blend_mode,
         stabilize: None,
@@ -265,6 +283,7 @@ fn resolve_color(c: &Clip, t: Time) -> ResolvedColor {
     ResolvedColor {
         enabled: !k.is_identity(),
         exposure: k.exposure.at_f32(t),
+        brightness: k.brightness.at_f32(t),
         contrast: k.contrast.at_f32(t),
         saturation: k.saturation.at_f32(t),
         temperature: k.temperature.at_f32(t),
@@ -415,12 +434,13 @@ fn spine_node(spine: &[Clip], starts: &[Time], t: Time) -> Option<RenderNode> {
     // Cut transitions (j → j+1) whose window covers t.
     for j in [i.wrapping_sub(1), i] {
         let Some(a) = spine.get(j) else { continue };
-        let Some(tr) = &a.transition_out else { continue };
         if !a.enabled || a.is_gap() {
             continue;
         }
+        let at_cut = is_real(j + 1);
+        let Some(tr) = (if at_cut { a.cut_transition(&spine[j + 1]) } else { a.transition_out.as_ref() }) else { continue };
         let end_a = starts[j] + a.duration;
-        if is_real(j + 1) {
+        if at_cut {
             let half = tr.duration.div_i64(2);
             let (w0, w1) = (end_a - half, end_a + (tr.duration - half));
             if t >= w0 && t < w1 {
@@ -525,9 +545,19 @@ fn connected_node(cc: &Clip, local: Time) -> Option<RenderNode> {
     })
 }
 
+fn node_lane(n: &RenderNode) -> i32 {
+    match n {
+        RenderNode::Layer(l) => l.lane,
+        RenderNode::Transition { from, to, .. } => from.as_ref().or(to.as_ref()).map_or(0, |l| l.lane),
+    }
+}
+
 /// The timeline at `t` with the active caption on top (no previous frame).
 fn evaluate_frame(timeline: &Timeline, t: Time) -> Composition {
     let mut comp = evaluate_spine(&timeline.spine, t);
+    if timeline.tracks.iter().any(|s| s.hidden) {
+        comp.nodes.retain(|n| crate::tracks::lane_visible(&timeline.tracks, node_lane(n)));
+    }
     apply_follows(timeline, &mut comp);
     if timeline.captions.enabled {
         let ct = timeline.captions.caption_time(t);
@@ -556,6 +586,53 @@ pub fn evaluate(timeline: &Timeline, t: Time) -> Composition {
 // Audio
 // ---------------------------------------------------------------------------
 
+/// A compound clip around an [`AudioSpan`]: its envelopes, and its time
+/// mapping when it is retimed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AudioContainer {
+    pub params: AudioParams,
+    /// The compound's start, in the time it is placed in.
+    pub origin: Time,
+    pub duration: Time,
+    pub source_in: Time,
+    pub retime: Option<Retime>,
+    /// Audible range of the contents, in the compound's inner time.
+    pub window: (Time, Time),
+}
+
+impl AudioContainer {
+    /// `t` in the time the contents are placed in (the same unless retimed).
+    fn enter(&self, t: Time) -> Time {
+        match &self.retime {
+            Some(r) => self.source_in + r.map(t - self.origin),
+            None => t,
+        }
+    }
+}
+
+/// One side of an Audio Crossfade, in the clip's local time.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Crossfade {
+    pub from: Time,
+    pub to: Time,
+    pub shape: FadeShape,
+}
+
+impl Crossfade {
+    fn rising(&self, local: Time) -> f32 {
+        self.shape.gain(((local - self.from).as_secs_f64() / (self.to - self.from).as_secs_f64()) as f32)
+    }
+    fn falling(&self, local: Time) -> f32 {
+        self.shape.gain(((self.to - local).as_secs_f64() / (self.to - self.from).as_secs_f64()) as f32)
+    }
+}
+
+/// Stereo balance gains `(left, right)` of a pan position.
+fn balance(pan: f32) -> (f32, f32) {
+    let p = pan.clamp(-1.0, 1.0);
+    ((1.0 - p).min(1.0), (1.0 + p).min(1.0))
+}
+
 /// A contiguous stretch of audio from one asset, in timeline coordinates.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AudioSpan {
@@ -567,80 +644,247 @@ pub struct AudioSpan {
     pub retime: Option<Retime>,
     /// Keyframes are relative to `local_origin` (the owning clip's start).
     pub params: AudioParams,
+    /// In the innermost retimed container's time, else in timeline time.
     pub local_origin: Time,
     /// Duration of the owning clip (for fade computation).
     pub clip_duration: Time,
     pub lane: i32,
-    pub extra_gain_db: f32,
+    /// Enclosing compound clips, outermost first.
+    pub containers: Vec<AudioContainer>,
+    pub crossfade_in: Option<Crossfade>,
+    pub crossfade_out: Option<Crossfade>,
 }
 
 impl AudioSpan {
     pub fn end(&self) -> Time {
         self.start + self.duration
     }
+    /// Clip-local time at absolute timeline time `t`.
+    pub fn local_time(&self, t: Time) -> Time {
+        self.containers.iter().fold(t, |t, c| c.enter(t)) - self.local_origin
+    }
     /// Source time at absolute timeline time `t`.
     pub fn source_time(&self, t: Time) -> Time {
-        let local = t - self.local_origin;
+        let local = self.local_time(t);
         match &self.retime {
             Some(r) => self.source_in + r.map(local),
             None => self.source_in + local,
         }
     }
-    /// Linear gain at absolute time `t` (volume keyframes + fades).
-    pub fn gain_at(&self, t: Time) -> f32 {
-        self.params.gain_at(t - self.local_origin, self.clip_duration) * crate::clip::db_to_gain(self.extra_gain_db)
+    /// Whether this clip or a compound around it changes speed.
+    pub fn is_retimed(&self) -> bool {
+        self.retime.is_some() || self.containers.iter().any(|c| c.retime.is_some())
     }
-    pub fn pan_at(&self, t: Time) -> f32 {
-        self.params.pan.at_f32(t - self.local_origin).clamp(-1.0, 1.0)
-    }
-}
-
-fn collect_audio(clips: &[Clip], offset: Time, window: (Time, Time), extra_db: f32, out: &mut Vec<AudioSpan>) {
-    let mut acc = Time::ZERO;
-    for p in clips {
-        let start = offset + acc;
-        push_clip_audio(p, start, 0, window, extra_db, out);
-        for cc in &p.connected {
-            push_clip_audio(cc, start + cc.offset, cc.lane, window, extra_db, out);
+    /// Playback speed of the source at absolute time `t`, through every retime.
+    pub fn speed_at(&self, mut t: Time) -> f64 {
+        let mut speed = 1.0;
+        for c in &self.containers {
+            if let Some(r) = &c.retime {
+                speed *= r.speed_at((t - c.origin).max(Time::ZERO));
+            }
+            t = c.enter(t);
         }
-        acc += p.duration;
+        speed * self.retime.as_ref().map_or(1.0, |r| r.speed_at((t - self.local_origin).max(Time::ZERO)))
+    }
+    /// The timeline time pitch-preserving grains may not reach back past.
+    pub fn stretch_origin(&self) -> Time {
+        self.containers.iter().find(|c| c.retime.is_some()).map_or(self.local_origin, |c| c.origin)
+    }
+    /// Linear gain at absolute time `t`: the volume and fades of the clip and
+    /// of every compound around it.
+    pub fn gain_at(&self, mut t: Time) -> f32 {
+        let mut gain = 1.0;
+        for c in &self.containers {
+            gain *= c.params.gain_at(t - c.origin, c.duration);
+            t = c.enter(t);
+            if c.retime.is_some() && (t < c.window.0 || t >= c.window.1) {
+                return 0.0;
+            }
+        }
+        let local = t - self.local_origin;
+        if let Some(x) = &self.crossfade_in {
+            gain *= x.rising(local);
+        }
+        if let Some(x) = &self.crossfade_out {
+            gain *= x.falling(local);
+        }
+        gain * self.params.gain_at(local, self.clip_duration)
+    }
+    /// Stereo balance gains `(left, right)` at absolute time `t`.
+    pub fn balance_at(&self, mut t: Time) -> (f32, f32) {
+        let (mut l, mut r) = (1.0, 1.0);
+        for c in &self.containers {
+            let (cl, cr) = balance(c.params.pan.at_f32(t - c.origin));
+            l *= cl;
+            r *= cr;
+            t = c.enter(t);
+        }
+        let (cl, cr) = balance(self.params.pan.at_f32(t - self.local_origin));
+        (l * cl, r * cr)
+    }
+    /// Net pan at absolute time `t` (-1 left .. 1 right).
+    pub fn pan_at(&self, t: Time) -> f32 {
+        let (l, r) = self.balance_at(t);
+        r - l
     }
 }
 
-fn push_clip_audio(c: &Clip, start: Time, lane: i32, window: (Time, Time), extra_db: f32, out: &mut Vec<AudioSpan>) {
-    if !c.enabled || !c.av.audio || c.audio.muted {
+/// How a clip's audible edges change for Audio Crossfades.
+#[derive(Clone, Copy, Default)]
+struct Edges {
+    /// Media played beyond the clip before its start / after its end.
+    before: Time,
+    after: Time,
+    fade_in: Option<Crossfade>,
+    fade_out: Option<Crossfade>,
+}
+
+fn can_sound(c: &Clip) -> bool {
+    c.enabled && c.has_audio() && !c.audio.muted
+}
+
+/// Spare media `(before, after)` a clip can play for a crossfade.
+fn handles(c: &Clip) -> (Time, Time) {
+    if c.retime.is_some() || !matches!(c.kind, ClipKind::Asset { .. }) {
+        return (Time::ZERO, Time::ZERO);
+    }
+    let after = c.media_duration.map_or(Time::ZERO, |md| md - c.source_in - c.duration);
+    (c.source_in.max(Time::ZERO), after.max(Time::ZERO))
+}
+
+/// Audio Crossfades of `placed` clips. A crossfade centres on the cut and
+/// overlaps as far as both clips have spare media; with none, the first
+/// fades out into the cut and the second fades in from it. With no touching
+/// neighbour (or beside a J/L edit) it is a fade at the audible edge.
+fn crossfade_edges(placed: &[(&Clip, Time, i32)]) -> Vec<Edges> {
+    let mut out = vec![Edges::default(); placed.len()];
+    if !placed.iter().any(|(c, ..)| c.audio.crossfade_in.is_positive() || c.audio.crossfade_out.is_positive()) {
+        return out;
+    }
+    let mut paired = vec![(false, false); placed.len()];
+    for (i, &(a, a_start, lane)) in placed.iter().enumerate() {
+        if !can_sound(a) || a.audio_split().1.is_positive() {
+            continue;
+        }
+        let cut = a_start + a.duration;
+        let Some(j) = placed.iter().position(|&(b, s, l)| l == lane && s == cut && can_sound(b)) else { continue };
+        let b = placed[j].0;
+        if b.audio_split().0.is_positive() {
+            continue;
+        }
+        paired[i].1 = true;
+        paired[j].0 = true;
+        let wanted = if a.audio.crossfade_out.is_positive() { a.audio.crossfade_out } else { b.audio.crossfade_in };
+        let d = wanted.min(a.duration).min(b.duration);
+        if !d.is_positive() {
+            continue;
+        }
+        let half = d.div_i64(2).max(Time(1));
+        let (before, after) = (half.min(handles(b).0), half.min(handles(a).1));
+        if before.is_zero() && after.is_zero() {
+            let shape = FadeShape::EqualPower;
+            out[i].fade_out = Some(Crossfade { from: a.duration - half, to: a.duration, shape });
+            out[j].fade_in = Some(Crossfade { from: Time::ZERO, to: half, shape });
+        } else {
+            // the same recording continuing across the cut would gain 3 dB with equal power
+            let continuous = a.asset_id().is_some() && a.asset_id() == b.asset_id() && b.source_in == a.source_in + a.duration;
+            let shape = if continuous { FadeShape::Linear } else { FadeShape::EqualPower };
+            out[i].after = after;
+            out[i].fade_out = Some(Crossfade { from: a.duration - before, to: a.duration + after, shape });
+            out[j].before = before;
+            out[j].fade_in = Some(Crossfade { from: -before, to: after, shape });
+        }
+    }
+    for (i, &(c, ..)) in placed.iter().enumerate() {
+        let (lead, tail) = c.audio_split();
+        let shape = FadeShape::EqualPower;
+        if !paired[i].0 && c.audio.crossfade_in.is_positive() {
+            out[i].fade_in = Some(Crossfade { from: -lead, to: c.audio.crossfade_in.min(c.duration) - lead, shape });
+        }
+        if !paired[i].1 && c.audio.crossfade_out.is_positive() {
+            out[i].fade_out = Some(Crossfade { from: c.duration + tail - c.audio.crossfade_out.min(c.duration), to: c.duration + tail, shape });
+        }
+    }
+    out
+}
+
+/// `tracks` are the lane controls (only the root timeline has them).
+fn collect_audio(clips: &[Clip], offset: Time, window: (Time, Time), tracks: &[crate::tracks::TrackState], out: &mut Vec<AudioSpan>) {
+    let mut placed: Vec<(&Clip, Time, i32)> = Vec::new();
+    let mut start = offset;
+    for p in clips {
+        placed.push((p, start, 0));
+        placed.extend(p.connected.iter().map(|cc| (cc, start + cc.offset, cc.lane)));
+        start += p.duration;
+    }
+    let edges = crossfade_edges(&placed);
+    for (&(c, start, lane), edge) in placed.iter().zip(&edges) {
+        if crate::tracks::lane_audible(tracks, lane) {
+            push_clip_audio(c, start, lane, window, edge, out);
+        }
+    }
+}
+
+fn push_clip_audio(c: &Clip, start: Time, lane: i32, window: (Time, Time), edge: &Edges, out: &mut Vec<AudioSpan>) {
+    if !can_sound(c) {
         return;
     }
-    // J/L split edits widen the audible range beyond the video edges.
+    // J/L split edits and crossfades widen the audible range beyond the video edges.
     let (lead, tail) = c.audio_split();
-    let s = (start - lead).max(window.0);
-    let e = (start + c.duration + tail).min(window.1);
+    let s = (start - lead - edge.before).max(window.0);
+    let e = (start + c.duration + tail + edge.after).min(window.1);
     if e <= s {
         return;
     }
+    let mut params = c.audio.clone();
+    params.audio_lead = lead;
+    params.audio_tail = tail;
     match &c.kind {
-        ClipKind::Asset { asset } => {
-            let mut params = c.audio.clone();
-            params.audio_lead = lead;
-            params.audio_tail = tail;
-            out.push(AudioSpan {
-                clip: c.id,
-                asset: *asset,
-                start: s,
-                duration: e - s,
-                source_in: c.source_in,
-                retime: c.retime.clone(),
-                params,
-                local_origin: start,
-                clip_duration: c.duration,
-                lane,
-                extra_gain_db: extra_db,
-            })
-        }
-        ClipKind::Compound(comp) if c.retime.is_none() => {
-            let inner_offset = start - c.source_in;
-            let gain = extra_db + c.audio.volume_db.value as f32;
-            collect_audio(&comp.spine, inner_offset, (s, e), gain, out);
+        ClipKind::Asset { asset } => out.push(AudioSpan {
+            clip: c.id,
+            asset: *asset,
+            start: s,
+            duration: e - s,
+            source_in: c.source_in,
+            retime: c.retime.clone(),
+            params,
+            local_origin: start,
+            clip_duration: c.duration,
+            lane,
+            containers: Vec::new(),
+            crossfade_in: edge.fade_in,
+            crossfade_out: edge.fade_out,
+        }),
+        ClipKind::Compound(comp) => {
+            let first = out.len();
+            // the compound's own crossfades act as fades on its envelope
+            if let Some(x) = edge.fade_in {
+                params.fade_in = params.fade_in.max(x.to);
+            }
+            if let Some(x) = edge.fade_out {
+                params.fade_out = params.fade_out.max(c.duration - x.from);
+            }
+            match &c.retime {
+                // same clock as the timeline around it
+                None => collect_audio(&comp.spine, start - c.source_in, (s, e), &[], out),
+                Some(_) => {
+                    let range = c.source_range();
+                    collect_audio(&comp.spine, Time::ZERO, range, &[], out);
+                }
+            }
+            for span in &mut out[first..] {
+                let inner = (span.start, span.end());
+                if let Some(r) = &c.retime {
+                    // back to this level's time; `window` gates what can't be narrowed (reverse)
+                    let outer = |t: Time| r.inverse(t - c.source_in).map(|local| start + local);
+                    let a = outer(inner.0).unwrap_or(s).max(s);
+                    let b = outer(inner.1).unwrap_or(e).min(e);
+                    span.start = a;
+                    span.duration = (b - a).max(Time::ZERO);
+                }
+                let container = AudioContainer { params: params.clone(), origin: start, duration: c.duration, source_in: c.source_in, retime: c.retime.clone(), window: inner };
+                span.containers.insert(0, container);
+            }
         }
         _ => {}
     }
@@ -649,7 +893,7 @@ fn push_clip_audio(c: &Clip, start: Time, lane: i32, window: (Time, Time), extra
 /// Flatten every audible clip into absolute-time spans.
 pub fn audio_spans(timeline: &Timeline) -> Vec<AudioSpan> {
     let mut out = Vec::new();
-    collect_audio(&timeline.spine, Time::ZERO, (Time::ZERO, Time::MAX), 0.0, &mut out);
+    collect_audio(&timeline.spine, Time::ZERO, (Time::ZERO, Time::MAX), &timeline.tracks, &mut out);
     out.sort_by_key(|s| (s.start, s.lane));
     out
 }

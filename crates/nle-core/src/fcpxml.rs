@@ -594,6 +594,8 @@ fn spine_el_at(spine: &[Clip], base: Time, fmt: &VideoFormat, ctx: &mut ExportCt
         if let Some(tr) = &c.transition_in {
             if !prev_real {
                 sp.push(transition_el(tr, acc));
+            } else if spine[i - 1].transition_out.is_none() {
+                sp.push(transition_el(tr, acc - tr.duration.div_i64(2)));
             }
         }
         sp.push(clip_el(c, acc, fmt, ctx));

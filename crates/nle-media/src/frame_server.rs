@@ -113,8 +113,9 @@ impl FrameServer {
             std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
             std::collections::hash_map::Entry::Vacant(e) => e.insert(decode::open(asset, DecodeOptions { use_proxy: proxy, max_height: None })?),
         };
-        let source_t = asset.video.as_ref().map(|v| v.cfr_locked_source_time(t)).unwrap_or(t);
-        dec.frame_at(source_t)
+        // `t` is the file's own time, variable-rate or not: the decoder samples
+        // by timestamp, which is what keeps the picture with the sound.
+        dec.frame_at(t)
     }
 
     pub fn clear_sync(&self) {
@@ -228,9 +229,7 @@ fn worker_loop(
             ahead = PREFETCH_FRAMES;
             continue;
         }
-        let raw_t = Time::from_frames(index, rate);
-        let locked_t = asset.video.as_ref().map(|v| v.cfr_locked_source_time(raw_t)).unwrap_or(raw_t);
-        match d.frame_at(locked_t) {
+        match d.frame_at(Time::from_frames(index, rate)) {
             Ok(frame) => {
                 *backend.lock() = Some(d.backend());
                 out.push_overwrite(DecodedFrame { asset: asset.id, proxy, index, frame });

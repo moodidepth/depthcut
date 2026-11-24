@@ -60,12 +60,20 @@ actions! {
     RippleDelete => "Ripple Delete", "Edit";
     DeleteWithGap => "Lift Delete (Leave Gap)", "Edit";
     InsertGap => "Insert Gap at Playhead", "Edit";
+    Copy => "Copy Clips", "Edit";
+    Cut => "Cut Clips", "Edit";
+    Paste => "Paste Clips at Playhead", "Edit";
+    Duplicate => "Duplicate Clips", "Edit";
+    DetachAudio => "Detach Audio", "Edit";
+    UnlinkAudio => "Unlink Audio and Video", "Edit";
+    LinkAudio => "Link Audio and Video", "Edit";
     Undo => "Undo", "Edit";
     Redo => "Redo", "Edit";
     SelectAll => "Select All", "Edit";
     ClearSelection => "Clear Selection", "Edit";
     ToggleClipEnabled => "Enable / Disable Clip", "Edit";
     AddCrossDissolve => "Add Cross Dissolve", "Edit";
+    AddAudioCrossfade => "Add Audio Crossfade", "Edit";
     AddAdjustmentClip => "Add Adjustment Clip", "Edit";
     NewCompound => "New Compound Clip", "Edit";
     BreakApart => "Break Apart Clip Items", "Edit";
@@ -359,7 +367,7 @@ impl ActionMap {
                 (NextEdit, &[B::key(K::ArrowDown)]),
                 (GoToStart, &[B::key(K::Home)]),
                 (GoToEnd, &[B::key(K::End)]),
-                (SelectTool, &[B::key(K::A)]),
+                (SelectTool, &[B::key(K::V), B::key(K::A)]),
                 (TrimTool, &[B::key(K::T)]),
                 (BladeTool, &[B::ctrl_shift(K::B)]),
                 (RangeTool, &[B::key(K::R)]),
@@ -370,11 +378,17 @@ impl ActionMap {
                 (RippleDelete, &[B::shift(K::Delete), B::shift(K::Backspace)]),
                 (DeleteWithGap, &[B::key(K::Delete), B::key(K::Backspace)]),
                 (InsertGap, &[B::alt(K::G)]),
+                (Copy, &[B::ctrl(K::C)]),
+                (Cut, &[B::ctrl(K::X)]),
+                (Paste, &[B::ctrl(K::V)]),
+                (Duplicate, &[B::ctrl(K::D)]),
+                (DetachAudio, &[B::ctrl_shift(K::D)]),
+                (AddAudioCrossfade, &[B::ctrl_shift(K::T)]),
                 (Undo, &[B::ctrl(K::Z)]),
                 (Redo, &[B::ctrl_shift(K::Z)]),
                 (SelectAll, &[B::ctrl(K::A)]),
                 (ClearSelection, &[B::key(K::Escape)]),
-                (ToggleClipEnabled, &[B::key(K::V)]),
+                (ToggleClipEnabled, &[B::shift(K::D)]),
                 (AddCrossDissolve, &[B::ctrl(K::T)]),
                 (AddAdjustmentClip, &[B::alt(K::A)]),
                 (NewCompound, &[B::alt(K::C)]),
@@ -385,7 +399,7 @@ impl ActionMap {
                 (ConnectClip, &[B::alt(K::Q)]),
                 (OverwriteClip, &[B::key(K::D)]),
                 (AddKeyframe, &[B::alt(K::K)]),
-                (ToggleAnimation, &[B::ctrl(K::V)]),
+                (ToggleAnimation, &[B::shift(K::V)]),
                 (ToggleRetime, &[B::ctrl(K::R)]),
                 (AddMarker, &[B::key(K::M)]),
                 (AddNamedMarker, &[B::alt(K::M)]),
@@ -398,8 +412,8 @@ impl ActionMap {
                 (ToggleCopilot, &[B::ctrl_shift(K::A)]),
                 (ToggleSnapping, &[B::key(K::S), B::key(K::N)]),
                 (ToggleSkimming, &[B::shift(K::S)]),
-                (ZoomIn, &[B::ctrl(K::Equals), B::ctrl(K::Plus)]),
-                (ZoomOut, &[B::ctrl(K::Minus)]),
+                (ZoomIn, &[B::ctrl(K::Equals), B::ctrl(K::Plus), B::key(K::Equals), B::key(K::Plus)]),
+                (ZoomOut, &[B::ctrl(K::Minus), B::key(K::Minus)]),
                 (ZoomToFit, &[B::ctrl(K::Num0)]),
                 (AutoCaptions, &[B::ctrl_shift(K::C)]),
                 (Import, &[B::ctrl(K::I)]),
@@ -454,6 +468,12 @@ impl ActionMap {
                 (RippleDelete, &[B::key(K::Delete), B::key(K::Backspace)]),
                 (DeleteWithGap, &[B::shift(K::Delete), B::shift(K::Backspace)]),
                 (InsertGap, &[B::alt(K::W)]),
+                (Copy, &[B::ctrl(K::C)]),
+                (Cut, &[B::ctrl(K::X)]),
+                (Paste, &[B::ctrl(K::V)]),
+                (Duplicate, &[B::ctrl(K::D)]),
+                (DetachAudio, &[B::ctrl_shift(K::D)]),
+                (AddAudioCrossfade, &[B::ctrl_shift(K::T)]),
                 (Undo, &[B::ctrl(K::Z)]),
                 (Redo, &[B::ctrl_shift(K::Z)]),
                 (SelectAll, &[B::ctrl(K::A)]),
@@ -469,7 +489,7 @@ impl ActionMap {
                 (ConnectClip, &[B::key(K::Q)]),
                 (OverwriteClip, &[B::key(K::D)]),
                 (AddKeyframe, &[B::alt(K::K)]),
-                (ToggleAnimation, &[B::ctrl(K::V)]),
+                (ToggleAnimation, &[B::shift(K::V)]),
                 (ToggleRetime, &[B::ctrl(K::R)]),
                 (AddMarker, &[B::key(K::M)]),
                 (AddNamedMarker, &[B::alt(K::M)]),
@@ -482,8 +502,8 @@ impl ActionMap {
                 (ToggleCopilot, &[B::ctrl_shift(K::A)]),
                 (ToggleSnapping, &[B::key(K::N)]),
                 (ToggleSkimming, &[B::key(K::S)]),
-                (ZoomIn, &[B::ctrl(K::Equals), B::ctrl(K::Plus)]),
-                (ZoomOut, &[B::ctrl(K::Minus)]),
+                (ZoomIn, &[B::ctrl(K::Equals), B::ctrl(K::Plus), B::key(K::Equals), B::key(K::Plus)]),
+                (ZoomOut, &[B::ctrl(K::Minus), B::key(K::Minus)]),
                 (ZoomToFit, &[B::ctrl(K::Num0)]),
                 (AutoCaptions, &[B::ctrl_shift(K::C)]),
                 (Import, &[B::ctrl(K::I)]),
@@ -535,9 +555,15 @@ impl ActionMap {
                 (BladeAll, &[B::ctrl_shift(K::B)]),
                 (RippleTrimStart, &[B::alt(K::OpenBracket)]),
                 (RippleTrimEnd, &[B::alt(K::CloseBracket)]),
-                (RippleDelete, &[B::key(K::Delete), B::shift(K::Backspace)]),
+                (RippleDelete, &[B::key(K::Delete), B::shift(K::Delete), B::shift(K::Backspace)]),
                 (DeleteWithGap, &[B::key(K::Backspace)]),
                 (InsertGap, &[B::alt(K::W)]),
+                (Copy, &[B::ctrl(K::C)]),
+                (Cut, &[B::ctrl(K::X)]),
+                (Paste, &[B::ctrl(K::V)]),
+                (Duplicate, &[B::ctrl(K::D)]),
+                (DetachAudio, &[B::ctrl_shift(K::D)]),
+                (AddAudioCrossfade, &[B::ctrl_shift(K::T)]),
                 (Undo, &[B::ctrl(K::Z)]),
                 (Redo, &[B::ctrl_shift(K::Z)]),
                 (SelectAll, &[B::ctrl(K::A)]),
@@ -566,8 +592,8 @@ impl ActionMap {
                 (ToggleCopilot, &[B::ctrl_shift(K::A)]),
                 (ToggleSnapping, &[B::key(K::N)]),
                 (ToggleSkimming, &[B::key(K::S)]),
-                (ZoomIn, &[B::ctrl(K::Equals), B::ctrl(K::Plus)]),
-                (ZoomOut, &[B::ctrl(K::Minus)]),
+                (ZoomIn, &[B::ctrl(K::Equals), B::ctrl(K::Plus), B::key(K::Equals), B::key(K::Plus)]),
+                (ZoomOut, &[B::ctrl(K::Minus), B::key(K::Minus)]),
                 (ZoomToFit, &[B::ctrl(K::Num0)]),
                 (AutoCaptions, &[B::ctrl_shift(K::C)]),
                 (Import, &[B::ctrl(K::I)]),
@@ -648,6 +674,14 @@ impl ActionMap {
         self.get(a).first().map(|b| b.to_string()).unwrap_or_default()
     }
 
+    /// A tooltip naming the key: "Undo (Ctrl+Z)".
+    pub fn tip(&self, text: &str, a: Action) -> String {
+        match self.hint(a) {
+            key if key.is_empty() => text.to_owned(),
+            key => format!("{text} ({key})"),
+        }
+    }
+
     pub fn to_toml(&self) -> String {
         let file =
             KeymapFile { profile: self.profile.clone(), bindings: self.bindings.iter().map(|(a, v)| (a.id().to_string(), v.iter().map(|b| b.to_string()).collect())).collect() };
@@ -655,16 +689,23 @@ impl ActionMap {
     }
 
     /// Parse TOML. Actions missing from the file keep the profile's defaults,
-    /// so new commands get a binding after an update.
+    /// so new commands get a binding after an update, unless the file already
+    /// uses that key for something else.
     pub fn from_toml(s: &str) -> Result<Self, KeymapError> {
         let file: KeymapFile = toml::from_str(s).map_err(|e| KeymapError::Toml(e.to_string()))?;
         let mut map = ActionMap::preset(&file.profile).unwrap_or_default();
         map.profile = file.profile;
+        let mut saved: BTreeMap<Action, Vec<KeyBinding>> = BTreeMap::new();
         for (id, list) in file.bindings {
             let a = Action::from_id(&id).ok_or(KeymapError::UnknownAction(id))?;
-            let v = list.iter().map(|s| s.parse()).collect::<Result<Vec<KeyBinding>, _>>()?;
-            map.set(a, v);
+            saved.insert(a, list.iter().map(|s| s.parse()).collect::<Result<Vec<KeyBinding>, _>>()?);
         }
+        for (a, defaults) in map.bindings.iter_mut() {
+            if !saved.contains_key(a) {
+                defaults.retain(|b| !saved.values().any(|v| v.contains(b)));
+            }
+        }
+        map.bindings.extend(saved);
         Ok(map)
     }
 
@@ -742,6 +783,17 @@ mod tests {
         assert_eq!(p.get(Action::Redo), &[KeyBinding::ctrl_shift(KeyCode::Z)]);
         assert!(ActionMap::from_toml("profile = \"x\"\n[bindings]\nNope = [\"A\"]\n").is_err());
         assert!(ActionMap::from_toml("profile = \"x\"\n[bindings]\nUndo = [\"Hyper+Q\"]\n").is_err());
+    }
+
+    #[test]
+    fn defaults_of_new_actions_give_way_to_saved_bindings() {
+        let saved = "profile = \"Argon Montage\"
+[bindings]
+ZoomToFit = [\"Shift+Z\"]
+";
+        let m = ActionMap::from_toml(saved).unwrap();
+        assert_eq!(m.lookup(&KeyBinding::shift(KeyCode::Z)), Some(Action::ZoomToFit));
+        assert!(m.conflicts().is_empty(), "{:?}", m.conflicts());
     }
 
     #[test]

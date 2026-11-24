@@ -279,7 +279,8 @@ fn metadata(app: &mut App, ui: &mut egui::Ui, a: &MediaAsset) {
         egui::Grid::new("meta").num_columns(2).spacing([10.0, 3.0]).show(ui, |ui| {
             let mut row = |k: &str, v: String| {
                 ui.label(egui::RichText::new(k).color(theme::TEXT_DIM));
-                ui.label(v);
+                // a long path must not widen the panel over the viewer (hover shows all of it)
+                ui.add(egui::Label::new(v).truncate());
                 ui.end_row();
             };
             row("Duration", format_timecode(a.duration, a.frame_rate()));

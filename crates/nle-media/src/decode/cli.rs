@@ -3,20 +3,41 @@
 //! The process is kept alive while frames are requested sequentially
 //! (playback), and restarted with a fast input seek when the requested
 //! frame jumps (scrubbing). If a hardware path fails to produce a frame
-//! the next plan (QSV → VA-API/D3D11VA → software) is tried silently.
+//! the next plan (see [`hwaccel::plan_decode`]) is tried silently.
+//! Past the end of the picture the last frame is held; a file that cannot be
+//! read is an error, never a held frame.
 
-use super::{scaled_dims, DecodeOptions, VideoDecoder};
+use super::{preroll_frames, scaled_dims, DecodeOptions, VideoDecoder};
 use crate::ffmpeg_cli;
 use crate::frame::{PixelFormat, VideoFrame};
 use crate::hwaccel::{self, Chroma, DecoderPlan, HwBackend, Platform, VideoCodec, INTEL_ARC_A750};
 use crate::MediaError;
-use nle_core::{FrameRate, MediaAsset, Time};
-use std::io::Read;
-use std::path::PathBuf;
+use nle_core::{AssetKind, FrameRate, MediaAsset, Time};
+use std::io::{ErrorKind, Read};
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Stdio};
 
 /// How far ahead (in frames) we read forward instead of re-seeking.
 const MAX_FORWARD_READ_SECS: i64 = 2;
+
+/// The `-i` of `path` with the `-ss` before and after it that start exactly on
+/// frame `index`.
+fn seek_args(cmd: &mut std::process::Command, path: &Path, index: i64, rate: FrameRate) {
+    let index = index.max(0);
+    let preroll = preroll_frames(path, rate);
+    // Near the top, decode from it: FLV cannot seek to before its first timestamp.
+    let trim = if index < 2 * preroll { index } else { preroll };
+    let secs = |frames: i64| Time::from_frames(frames, rate).as_secs_f64();
+    if index > trim {
+        cmd.args(["-ss", &format!("{:.6}", secs(index - trim))]);
+    }
+    cmd.arg("-i").arg(path);
+    if trim > 0 {
+        // a quarter frame early: Matroska and FLV round times to milliseconds,
+        // which can put the wanted frame just before its exact time
+        cmd.args(["-ss", &format!("{:.6}", secs(trim) - 0.25 / rate.fps())]);
+    }
+}
 
 pub struct CliDecoder {
     path: PathBuf,
@@ -30,10 +51,17 @@ pub struct CliDecoder {
     /// Source chroma layout (picks the hardware download format).
     chroma: Chroma,
     rate: FrameRate,
+    /// Variable-rate source: resampled by timestamp.
+    resample: bool,
     child: Option<Child>,
     stdout: Option<ChildStdout>,
     next_index: i64,
     last: Option<(i64, VideoFrame)>,
+    /// No later than this is the picture expected to end (the container's
+    /// length; the first frame for a still).
+    expected_end: i64,
+    /// The file's final frame, once it has been found.
+    end: Option<(i64, VideoFrame)>,
 }
 
 impl CliDecoder {
@@ -58,10 +86,13 @@ impl CliDecoder {
             format: PixelFormat::for_bit_depth(depth),
             chroma,
             rate: v.frame_rate,
+            resample: v.is_vfr,
             child: None,
             stdout: None,
             next_index: -1,
             last: None,
+            expected_end: if asset.kind == AssetKind::Image { 0 } else { asset.duration.frames_floor(v.frame_rate).max(0) },
+            end: None,
         })
     }
 
@@ -104,13 +135,17 @@ impl CliDecoder {
     fn spawn(&mut self, frame_index: i64) -> Result<(), MediaError> {
         self.kill();
         let plan = self.plans[self.plan_idx].clone();
-        let t = Time::from_frames(frame_index.max(0), self.rate).as_secs_f64();
-        let (hw_out, vf) = self.filter(self.format.ffmpeg_name());
+        let (hw_out, mut vf) = self.filter(self.format.ffmpeg_name());
+        if self.resample {
+            // `-fps_mode cfr` alone lets a picture lag over a frame before it
+            // drops one, which adds up to 100 ms behind the sound
+            vf = format!("fps={}/{},{vf}", self.rate.num, self.rate.den);
+        }
         let mut cmd = ffmpeg_cli::command(&ffmpeg_cli::ffmpeg_path());
         cmd.args(["-hide_banner", "-loglevel", "error", "-nostdin"]);
         cmd.args(&plan.input_args);
         cmd.args(&hw_out);
-        cmd.args(["-ss", &format!("{t:.6}"), "-i"]).arg(&self.path);
+        seek_args(&mut cmd, &self.path, frame_index, self.rate);
         cmd.args(["-map", "0:v:0", "-an", "-sn", "-vf", &vf]);
         cmd.args(["-fps_mode", "cfr", "-r", &format!("{}/{}", self.rate.num, self.rate.den)]);
         cmd.args(["-pix_fmt", self.format.ffmpeg_name(), "-f", "rawvideo", "pipe:1"]);
@@ -126,10 +161,48 @@ impl CliDecoder {
         let size = self.format.frame_size(self.width, self.height);
         let out = self.stdout.as_mut().ok_or(MediaError::Eof)?;
         let mut buf = vec![0u8; size];
-        out.read_exact(&mut buf).map_err(|_| MediaError::Eof)?;
+        if let Err(e) = out.read_exact(&mut buf) {
+            return Err(if e.kind() == ErrorKind::UnexpectedEof { self.stream_ended() } else { MediaError::Io(e) });
+        }
         let pts = Time::from_frames(self.next_index, self.rate);
         self.next_index += 1;
         Ok(VideoFrame::new(self.width, self.height, self.format, buf, pts))
+    }
+
+    /// What an exhausted stream means: the end of the picture if FFmpeg
+    /// exited cleanly, otherwise a file it could not read.
+    fn stream_ended(&mut self) -> MediaError {
+        self.stdout = None;
+        match self.child.take().map(|mut c| c.wait()) {
+            Some(Ok(status)) if !status.success() => MediaError::Decode(format!("FFmpeg could not read {} ({status})", self.path.display())),
+            Some(Err(e)) => MediaError::Io(e),
+            _ => MediaError::Eof,
+        }
+    }
+
+    /// The last frame of the picture, for a request past it (`idx`). Reads to
+    /// the end from a little before it, stepping further back while that
+    /// finds nothing (the sound can outlast the picture).
+    fn final_frame(&mut self, idx: i64) -> Result<(i64, VideoFrame), MediaError> {
+        let from = idx.min(self.expected_end);
+        let mut back = self.rate.nominal().max(1);
+        loop {
+            let start = (from - back).max(0);
+            self.spawn(start)?;
+            let mut found = None;
+            loop {
+                match self.read_frame() {
+                    Ok(f) => found = Some((self.next_index - 1, f)),
+                    Err(MediaError::Eof) => break,
+                    Err(e) => return Err(e),
+                }
+            }
+            match found {
+                Some(end) => return Ok(end),
+                None if start == 0 => return Err(MediaError::Eof),
+                None => back *= 4,
+            }
+        }
     }
 
     fn decode_index(&mut self, idx: i64) -> Result<VideoFrame, MediaError> {
@@ -178,30 +251,29 @@ impl VideoDecoder for CliDecoder {
                 return Ok(f.clone());
             }
         }
+        if let Some((i, f)) = &self.end {
+            if idx >= *i {
+                return Ok(f.clone());
+            }
+        }
         loop {
-            match self.decode_index(idx) {
-                Ok(f) => {
-                    self.last = Some((idx, f.clone()));
+            let decoded = match self.decode_index(idx) {
+                Ok(f) => Ok((idx, f)),
+                Err(MediaError::Eof) => self.final_frame(idx).inspect(|end| self.end = Some(end.clone())),
+                Err(e) => Err(e),
+            };
+            match decoded {
+                Ok((i, f)) => {
+                    self.last = Some((i, f.clone()));
                     return Ok(f);
                 }
-                Err(MediaError::Eof) if self.last.is_some() && self.next_index > idx.min(1) && self.plan_idx + 1 >= self.plans.len() => {
-                    // past the end of the media: hold the last frame
-                    return self.last.as_ref().map(|(_, f)| f.clone()).ok_or(MediaError::Eof);
+                // this path produced nothing → try the next plan
+                Err(e) if self.plan_idx + 1 < self.plans.len() => {
+                    log::warn!("{:?} decode failed for {} ({e}); falling back", self.backend(), self.path.display());
+                    self.plan_idx += 1;
+                    self.kill();
                 }
-                Err(e) => {
-                    // a hardware path that produces nothing → try the next plan
-                    let produced_any = self.last.is_some();
-                    if !produced_any && self.plan_idx + 1 < self.plans.len() {
-                        log::warn!("{:?} decode failed for {} ({e}); falling back", self.backend(), self.path.display());
-                        self.plan_idx += 1;
-                        self.kill();
-                        continue;
-                    }
-                    if let Some((_, f)) = &self.last {
-                        return Ok(f.clone());
-                    }
-                    return Err(e);
-                }
+                Err(e) => return Err(e),
             }
         }
     }
@@ -214,7 +286,7 @@ impl VideoDecoder for CliDecoder {
         let mut cmd = ffmpeg_cli::command(&ffmpeg_cli::ffmpeg_path());
         cmd.args(["-hide_banner", "-loglevel", "error", "-nostdin"]);
         cmd.args(&plan.input_args);
-        cmd.args(["-ss", &format!("{:.6}", t.max(Time::ZERO).as_secs_f64()), "-i"]).arg(&self.path);
+        seek_args(&mut cmd, &self.path, t.frames_floor(self.rate), self.rate);
         cmd.args(["-map", "0:v:0", "-frames:v", "1", "-vf", &format!("scale={tw}:{th}:flags=area"), "-pix_fmt", "rgba", "-f", "rawvideo", "pipe:1"]);
         let out = cmd.stdin(Stdio::null()).stderr(Stdio::null()).output().map_err(MediaError::Io)?;
         if out.stdout.len() == (tw * th * 4) as usize {

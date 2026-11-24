@@ -5,6 +5,7 @@
 //   → working space (Rec.709 gamma 2.4, or ACEScct over AP1)
 //   → lift / gamma / gain wheels, contrast about 18 % grey, saturation
 //   → back to Rec.709 display (highlight roll-off for scene / HDR sources)
+//   → brightness (an even offset on the displayed values)
 //   → creative .cube 3D LUT.
 // Rec.709 input with the gamma working space is exactly the original
 // (pre colour management) math. Optional before/after split wipe.
@@ -25,6 +26,10 @@ struct Grade {
     working: u32,
     in_lut_size: f32, // 0: no input LUT
     tonemap: u32,
+    brightness: f32,
+    _pad0: f32,
+    _pad1: f32,
+    _pad2: f32,
 };
 
 @group(0) @binding(0) var src: texture_2d<f32>;
@@ -67,6 +72,7 @@ fn grade(c_in: vec3<f32>) -> vec3<f32> {
         }
         c = display_encode(out_lin);
     }
+    c += vec3<f32>(g.brightness);
 
     if (g.lut_mix > 0.0) {
         c = mix(c, sample_lut(lut, c, g.lut_size), g.lut_mix);

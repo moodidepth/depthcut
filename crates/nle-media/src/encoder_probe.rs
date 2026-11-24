@@ -3,7 +3,7 @@
 //! `ffmpeg -encoders` only lists what the build was *compiled* with — an
 //! Intel machine still lists `h264_nvenc`. This module runs a tiny real
 //! encode per candidate, in priority order (Intel QSV → NVIDIA NVENC → AMD
-//! AMF → `libx264`), once, on a background thread, so the export dialog can
+//! AMF → `libx264` / `libx265`), once, on a background thread, so the export dialog can
 //! pre-select the fastest encoder that actually works and never blocks the
 //! UI. Any failure (no FFmpeg, driver missing, timeout) degrades to the next
 //! candidate and finally to an empty, CPU-only result — never a panic.
@@ -34,7 +34,7 @@ impl EncoderBackend {
 }
 
 /// Encoders to test, fastest first.
-pub const CANDIDATES: [(&str, EncoderBackend); 10] = [
+pub const CANDIDATES: [(&str, EncoderBackend); 11] = [
     ("av1_qsv", EncoderBackend::Qsv),
     ("hevc_qsv", EncoderBackend::Qsv),
     ("h264_qsv", EncoderBackend::Qsv),
@@ -45,6 +45,7 @@ pub const CANDIDATES: [(&str, EncoderBackend); 10] = [
     ("hevc_amf", EncoderBackend::Amf),
     ("h264_amf", EncoderBackend::Amf),
     ("libx264", EncoderBackend::Cpu),
+    ("libx265", EncoderBackend::Cpu),
 ];
 
 /// Result of the probe: which backend won and every encoder that works.
@@ -173,11 +174,11 @@ mod tests {
         assert_eq!(all.backend, EncoderBackend::Qsv);
         assert_eq!(all.best(), Some("av1_qsv"));
         assert_eq!(all.encoders.len(), CANDIDATES.len());
-        assert_eq!(all.encoders.last(), Some(&"libx264"));
+        assert_eq!(all.encoders.last(), Some(&"libx265"));
 
         let nvidia = probe_with(&HwCaps::default(), |_, b| matches!(b, EncoderBackend::Nvenc | EncoderBackend::Cpu));
         assert_eq!(nvidia.backend, EncoderBackend::Nvenc);
-        assert_eq!(nvidia.encoders, ["av1_nvenc", "hevc_nvenc", "h264_nvenc", "libx264"]);
+        assert_eq!(nvidia.encoders, ["av1_nvenc", "hevc_nvenc", "h264_nvenc", "libx264", "libx265"]);
 
         let amd = probe_with(&HwCaps::default(), |n, _| n.ends_with("_amf") && n != "av1_amf");
         assert_eq!((amd.backend, amd.best()), (EncoderBackend::Amf, Some("hevc_amf")));
@@ -187,7 +188,7 @@ mod tests {
     fn degrades_to_cpu_then_to_nothing() {
         let cpu = probe_with(&HwCaps::default(), |_, b| b == EncoderBackend::Cpu);
         assert_eq!(cpu.backend, EncoderBackend::Cpu);
-        assert_eq!(cpu.encoders, ["libx264"]);
+        assert_eq!(cpu.encoders, ["libx264", "libx265"]);
         assert!(!cpu.has_hardware() && cpu.works("libx264") && !cpu.works("h264_qsv"));
 
         let none = probe_with(&HwCaps::default(), |_, _| false);

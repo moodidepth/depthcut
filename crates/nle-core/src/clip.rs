@@ -92,6 +92,40 @@ pub enum CropMode {
 /// Normalised rectangle `[x, y, w, h]` in source-frame fractions.
 pub type NormRect = [f32; 4];
 
+/// Aspect ratio of the cropped picture.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CropAspect {
+    #[default]
+    Free,
+    Wide16x9,
+    Tall9x16,
+    Square,
+    Portrait4x5,
+}
+
+impl CropAspect {
+    pub const ALL: [CropAspect; 5] = [CropAspect::Free, CropAspect::Wide16x9, CropAspect::Tall9x16, CropAspect::Square, CropAspect::Portrait4x5];
+    pub fn label(self) -> &'static str {
+        match self {
+            CropAspect::Free => "Free",
+            CropAspect::Wide16x9 => "16:9",
+            CropAspect::Tall9x16 => "9:16",
+            CropAspect::Square => "1:1",
+            CropAspect::Portrait4x5 => "4:5",
+        }
+    }
+    /// Width over height; `None` when free.
+    pub fn ratio(self) -> Option<f32> {
+        match self {
+            CropAspect::Free => None,
+            CropAspect::Wide16x9 => Some(16.0 / 9.0),
+            CropAspect::Tall9x16 => Some(9.0 / 16.0),
+            CropAspect::Square => Some(1.0),
+            CropAspect::Portrait4x5 => Some(0.8),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct VideoParams {
     /// Offset from frame centre, as a fraction of the frame size.
@@ -115,6 +149,20 @@ pub struct VideoParams {
     /// Ride along with a track on another clip (titles, callouts, stickers).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub follow: Option<crate::motion::Follow>,
+    /// Mirror the picture inside its cropped box.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub flip_horizontal: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub flip_vertical: bool,
+    /// Editing one scale axis scales the other by the same factor.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub scale_lock: bool,
+    /// The last crop preset chosen.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub crop_aspect: CropAspect,
+    /// Crop edits keep the cropped picture's aspect ratio.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub crop_lock: bool,
 }
 
 impl Default for VideoParams {
@@ -137,6 +185,11 @@ impl Default for VideoParams {
             ken_burns_end: [0.1, 0.1, 0.8, 0.8],
             blend_mode: BlendMode::Normal,
             follow: None,
+            flip_horizontal: false,
+            flip_vertical: false,
+            scale_lock: true,
+            crop_aspect: CropAspect::Free,
+            crop_lock: false,
         }
     }
 }
@@ -193,6 +246,9 @@ pub struct ColorParams {
     pub enabled: bool,
     /// Stops.
     pub exposure: Param,
+    /// -1..1, 0 neutral: an offset on the displayed values (exposure is a gain in stops).
+    #[serde(default)]
+    pub brightness: Param,
     /// -1..1, 0 neutral.
     pub contrast: Param,
     /// 0..2, 1 neutral.
@@ -228,6 +284,7 @@ impl Default for ColorParams {
         ColorParams {
             enabled: true,
             exposure: Param::new(0.0),
+            brightness: Param::new(0.0),
             contrast: Param::new(0.0),
             saturation: Param::new(1.0),
             temperature: Param::new(0.0),
@@ -245,13 +302,15 @@ impl Default for ColorParams {
 }
 
 impl ColorParams {
-    pub fn params_mut(&mut self) -> [&mut Param; 5] {
-        [&mut self.exposure, &mut self.contrast, &mut self.saturation, &mut self.temperature, &mut self.tint]
+    pub fn params_mut(&mut self) -> [&mut Param; 6] {
+        [&mut self.exposure, &mut self.brightness, &mut self.contrast, &mut self.saturation, &mut self.temperature, &mut self.tint]
     }
 
     pub fn is_identity(&self) -> bool {
         !self.enabled
             || (!self.exposure.is_animated()
+                && !self.brightness.is_animated()
+                && self.brightness.value == 0.0
                 && !self.contrast.is_animated()
                 && !self.saturation.is_animated()
                 && !self.temperature.is_animated()
@@ -502,6 +561,12 @@ pub struct AudioParams {
     /// Dialogue leveler (automatic gain riding).
     #[serde(default)]
     pub leveler: crate::audio_fx::LevelerSettings,
+    /// Audio Crossfade on the cut before this clip (a fade-in without a neighbour).
+    #[serde(default, skip_serializing_if = "time_is_zero")]
+    pub crossfade_in: Time,
+    /// Audio Crossfade on the cut after this clip (a fade-out without a neighbour).
+    #[serde(default, skip_serializing_if = "time_is_zero")]
+    pub crossfade_out: Time,
 }
 
 fn default_lowpass_hz() -> Param {
@@ -543,6 +608,8 @@ impl Default for AudioParams {
             noise_reduction: Default::default(),
             voice_isolation: Default::default(),
             leveler: Default::default(),
+            crossfade_in: Time::ZERO,
+            crossfade_out: Time::ZERO,
         }
     }
 }
@@ -591,6 +658,14 @@ impl AudioParams {
 
 pub(crate) fn default_true() -> bool {
     true
+}
+
+fn is_true(v: &bool) -> bool {
+    *v
+}
+
+fn is_default<T: Default + PartialEq>(v: &T) -> bool {
+    *v == T::default()
 }
 
 pub fn db_to_gain(db: f32) -> f32 {
@@ -961,6 +1036,9 @@ pub struct Clip {
     /// Camera stabilization (analysed camera path + smoothing settings).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stabilization: Option<crate::motion::Stabilization>,
+    /// Linked audio/video pair (see `links.rs`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<u64>,
 }
 
 impl Clip {
@@ -990,6 +1068,7 @@ impl Clip {
             audition: Vec::new(),
             tracks: Vec::new(),
             stabilization: None,
+            link: None,
         }
     }
 
@@ -1097,6 +1176,27 @@ impl Clip {
         }
     }
 
+    /// The transition on the cut between this clip and `next`: this clip's
+    /// end transition, else `next`'s start transition.
+    pub fn cut_transition<'a>(&'a self, next: &'a Clip) -> Option<&'a Transition> {
+        self.transition_out.as_ref().or(next.transition_in.as_ref())
+    }
+
+    /// New ids for everything inside this clip except its connected clips.
+    fn remint_contents(&mut self) {
+        if let ClipKind::Compound(comp) = &mut self.kind {
+            comp.spine.iter_mut().for_each(Clip::remint_ids);
+        }
+        self.audition.iter_mut().for_each(Clip::remint_ids);
+    }
+
+    /// New ids for this clip and everything attached to or nested in it (copies).
+    pub fn remint_ids(&mut self) {
+        self.id = ClipId::new();
+        self.connected.iter_mut().for_each(Clip::remint_ids);
+        self.remint_contents();
+    }
+
     pub fn end_offset(&self) -> Time {
         self.offset + self.duration
     }
@@ -1147,6 +1247,8 @@ impl Clip {
         let mut left = self.clone();
         let mut right = self.clone();
         right.id = ClipId::new();
+        // both halves hold a copy of the contents: one of them needs its own ids
+        right.remint_contents();
         left.duration = at;
         right.duration = self.duration - at;
 
@@ -1180,6 +1282,8 @@ impl Clip {
         right.transition_in = None;
         left.audio.fade_out = Time::ZERO;
         right.audio.fade_in = Time::ZERO;
+        left.audio.crossfade_out = Time::ZERO;
+        right.audio.crossfade_in = Time::ZERO;
         Some((left, right))
     }
 
@@ -1206,6 +1310,7 @@ impl Clip {
             ClipKind::Compound(comp) => comp.spine.iter().map(Clip::max_id).max().unwrap_or(0),
             _ => 0,
         };
-        own.max(connected).max(takes).max(inner)
+        // link ids come from the same counter
+        own.max(connected).max(takes).max(inner).max(self.link.unwrap_or(0))
     }
 }

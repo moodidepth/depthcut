@@ -5,10 +5,9 @@
 
 use crate::app::{drag_key, App, EditMode, Tool};
 use crate::inspector::clip_accent;
-use crate::theme;
+use crate::{theme, track_headers};
 use eframe::egui::{self, Color32, CornerRadius, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 use nle_core::captions::CaptionTrack;
-use nle_core::clip::db_to_gain;
 use nle_core::speed::{MAX_VELOCITY, MIN_VELOCITY};
 use nle_core::{Action, AssetId, AudioRole, Clip, ClipId, ClipKind, Command, FrameBlendMode, Interpolation, Marker, MarkerKind, Param, Retime, Time, Timeline};
 use std::borrow::Cow;
@@ -294,8 +293,12 @@ fn overview(app: &mut App, ui: &mut egui::Ui) {
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     toolbar(app, ui);
     overview(app, ui);
-    let area = ui.available_rect_before_wrap();
-    let resp = ui.allocate_rect(area, Sense::click_and_drag());
+    let full = ui.available_rect_before_wrap();
+    ui.allocate_rect(full, Sense::hover());
+    let split = (full.left() + track_headers::WIDTH).min(full.right());
+    let column = Rect::from_min_max(full.min, Pos2::new(split, full.bottom()));
+    let area = Rect::from_min_max(Pos2::new(split, full.top()), full.max);
+    let resp = ui.interact(area, ui.id().with("timeline-lanes"), Sense::click_and_drag());
     let painter = ui.painter_at(area);
     painter.rect_filled(area, CornerRadius::ZERO, theme::BG);
 
@@ -339,8 +342,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 
     // ----- rows
     let placed: Vec<(Clip, Time, i32, Option<ClipId>)> = app.project.timeline.placed_clips().into_iter().map(|p| (p.clip.clone(), p.start, p.lane, p.parent)).collect();
-    let max_lane = placed.iter().map(|p| p.2).max().unwrap_or(0).max(0) + 1;
-    let min_lane = placed.iter().map(|p| p.2).min().unwrap_or(0).min(0) - 1;
+    // a lane with a switch on stays listed when it has no clips left
+    let used = || placed.iter().map(|p| p.2).chain(app.project.timeline.tracks.iter().map(|t| t.lane));
+    let max_lane = used().max().unwrap_or(0).max(0) + 1;
+    let min_lane = used().min().unwrap_or(0).min(0) - 1;
     let anim = if app.tl.show_animation { ANIM_H } else { 0.0 };
     let retime_extra = if app.tl.show_retime { RETIME_H + 2.0 } else { 0.0 };
     let has_captions = !app.project.timeline.captions.is_empty();
@@ -487,6 +492,14 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         }
         draw_clip(app, &painter, rect, clip, sel.contains(&clip.id));
         draw_duck_overlay(app, &painter, rect, clip, *start);
+        let track = app.project.timeline.track(*lane);
+        if track.hidden || track.locked {
+            let shade = if track.hidden { Color32::from_black_alpha(130) } else { Color32::from_black_alpha(60) };
+            painter.rect_filled(rect, CornerRadius::same(4), shade);
+            if track.locked && rect.width() > 24.0 {
+                painter.text(rect.right_bottom() - Vec2::new(4.0, 3.0), egui::Align2::RIGHT_BOTTOM, "🔒", egui::FontId::proportional(11.0), theme::SNAP);
+            }
+        }
         // J/L split edits: audio extends past the picture edges.
         let (lead, tail) = clip.audio_split();
         if lead.is_positive() || tail.is_positive() {
@@ -525,8 +538,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 draw(tr, end, false);
             }
             if let Some(tr) = &c.transition_in {
-                if i == 0 {
-                    draw(tr, starts[i], true);
+                match i.checked_sub(1).map(|j| &app.project.timeline.spine[j]).filter(|prev| !prev.is_gap()) {
+                    Some(prev) if prev.transition_out.is_some() => {} // the previous clip's wins
+                    Some(_) => draw(tr, starts[i], false),
+                    None => draw(tr, starts[i], true),
                 }
             }
         }
@@ -643,10 +658,15 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             }
             Some(k)
         } else if let Some(h) = hit_at(origin) {
+            let locked = app.project.timeline.is_locked(h.lane) && app.tool != Tool::Range;
             let near_start = (origin.x - h.rect.left()).abs() < EDGE_PX;
             let near_end = (origin.x - h.rect.right()).abs() < EDGE_PX;
             let roll = if matches!(app.tool, Tool::Trim) && !mods.alt && h.lane == 0 { roll_target(&app.project.timeline, h, near_start, near_end) } else { None };
             match app.tool {
+                _ if locked => {
+                    app.status(format!("{} is locked", track_headers::lane_name(h.lane)));
+                    None
+                }
                 Tool::Select | Tool::Trim if (near_start || near_end) && mods.alt => Some(Drag::Split { id: h.id, start_edge: near_start && !near_end, origin: t }),
                 Tool::Trim if roll.is_some() => roll.map(|(left, edit)| Drag::Roll { left, edit, origin: t }),
                 Tool::Select | Tool::Trim if near_start || near_end => Some(Drag::Trim { id: h.id, start_edge: near_start && !near_end, origin: t }),
@@ -683,7 +703,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         match d {
             Drag::Scrub => {
                 let (t, s) = tl.snap(raw_t, snap_threshold, &app.tl.snap_extra, None);
-                app.playhead = t.snap_to_frame(rate);
+                app.scrub_to(t.snap_to_frame(rate));
                 if s {
                     snap_line = Some(t);
                 }
@@ -1082,6 +1102,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             ui.ctx().set_cursor_icon(icon);
         }
     }
+    // in the role view the negative lanes are folded into the bands
+    let strips: Vec<(i32, Rect)> = rows
+        .iter()
+        .filter(|r| !role_mode || r.lane >= 0)
+        .map(|r| (r.lane, Rect::from_min_max(Pos2::new(column.left(), r.top + retime_extra), Pos2::new(column.right(), r.top + r.height - anim))))
+        .collect();
+    track_headers::show(app, ui, column, area.top() + header_h, &strips);
     let _ = frame;
 }
 
@@ -1091,7 +1118,7 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
     egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |ui| {
         ui.horizontal(|ui| {
             for t in Tool::ALL {
-                let r = ui.selectable_label(app.tool == t, egui::RichText::new(t.icon()).size(15.0)).on_hover_text(t.label());
+                let r = ui.selectable_label(app.tool == t, egui::RichText::new(t.icon()).size(15.0)).on_hover_text(app.keymap.tip(t.label(), t.action()));
                 if r.clicked() {
                     app.tool = t;
                 }
@@ -1111,10 +1138,10 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
                 }
             }
             ui.separator();
-            if ui.add_enabled(app.history.can_undo(), egui::Button::new("↶")).on_hover_text("Undo (Ctrl+Z)").clicked() {
+            if ui.add_enabled(app.history.can_undo(), egui::Button::new("↶")).on_hover_text(app.keymap.tip("Undo", Action::Undo)).clicked() {
                 app.undo();
             }
-            if ui.add_enabled(app.history.can_redo(), egui::Button::new("↷")).on_hover_text("Redo (Ctrl+Shift+Z)").clicked() {
+            if ui.add_enabled(app.history.can_redo(), egui::Button::new("↷")).on_hover_text(app.keymap.tip("Redo", Action::Redo)).clicked() {
                 app.redo();
             }
             ui.separator();
@@ -1130,7 +1157,11 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let mut z = app.tl.pps.ln();
-                if ui.add(egui::Slider::new(&mut z, 0.0..=8.3).show_value(false)).on_hover_text("Zoom (Ctrl+scroll, Ctrl+0 to fit)").changed() {
+                if ui
+                    .add(egui::Slider::new(&mut z, 0.0..=8.3).show_value(false))
+                    .on_hover_text(format!("Zoom (Ctrl+scroll, {} to fit)", app.keymap.hint(Action::ZoomToFit)))
+                    .changed()
+                {
                     app.tl.pps = z.exp();
                 }
                 if ui.small_button("Fit").clicked() {
@@ -1156,8 +1187,8 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
                 ui.toggle_value(&mut app.show_captions, "CC Captions").on_hover_text("Auto captions & Whisper transcription");
                 let lanes_tip = format!("Group the audio below the storyline into Dialogue / Music / SFX / General lanes ({})", app.keymap.hint(Action::ToggleAudioLanes));
                 ui.toggle_value(&mut app.tl.audio_lanes, "Audio Lanes").on_hover_text(lanes_tip);
-                ui.toggle_value(&mut app.tl.show_retime, "Retime").on_hover_text("Retime editor (Ctrl+R)");
-                ui.toggle_value(&mut app.tl.show_animation, "Animation").on_hover_text("Video animation lane (Ctrl+V)");
+                ui.toggle_value(&mut app.tl.show_retime, "Retime").on_hover_text(app.keymap.tip("Retime editor", Action::ToggleRetime));
+                ui.toggle_value(&mut app.tl.show_animation, "Animation").on_hover_text(app.keymap.tip("Video animation lane", Action::ToggleAnimation));
             });
         });
     });
@@ -1492,8 +1523,18 @@ fn draw_clip(app: &App, p: &egui::Painter, rect: Rect, c: &Clip, selected: bool)
                 if let Some(pk) = c.asset_id().and_then(|a| app.library.peaks.get(&a)) {
                     draw_peaks(&p, pk, c, rect, arect);
                     // volume line
-                    let vy = arect.top() + 3.0 + (1.0 - ((c.audio.volume_db.value as f32 + 60.0) / 72.0).clamp(0.0, 1.0)) * (arect.height() - 6.0);
-                    p.line_segment([Pos2::new(arect.left(), vy), Pos2::new(arect.right(), vy)], Stroke::new(1.0_f32, Color32::from_white_alpha(140)));
+                    let pps = pps_of(rect, c).max(1e-3);
+                    let vy = |x: f32| {
+                        let t = Time::from_secs_f64(((x - rect.left()) / pps).max(0.0) as f64).min(c.duration);
+                        let db = c.audio.volume_db.at(t) as f32;
+                        Pos2::new(x, arect.top() + 3.0 + (1.0 - ((db + 60.0) / 72.0).clamp(0.0, 1.0)) * (arect.height() - 6.0))
+                    };
+                    let (x0, x1) = (arect.left().max(p.clip_rect().left()), arect.right().min(p.clip_rect().right()));
+                    let steps = if c.audio.volume_db.is_animated() { ((x1 - x0) / 4.0).ceil().max(1.0) as usize } else { 1 };
+                    if x1 > x0 {
+                        let line = (0..=steps).map(|i| vy(x0 + (x1 - x0) * i as f32 / steps as f32)).collect();
+                        p.add(egui::Shape::line(line, Stroke::new(1.0_f32, Color32::from_white_alpha(140))));
+                    }
                 }
                 // fade handles
                 let fi = c.audio.fade_in.as_secs_f64() as f32 * pps_of(rect, c);
@@ -1609,13 +1650,20 @@ fn video_params(c: &Clip) -> Vec<(Cow<'static, str>, &Param)> {
         (Cow::Borrowed("Scale X"), &v.scale_x),
         (Cow::Borrowed("Scale Y"), &v.scale_y),
         (Cow::Borrowed("Rotation"), &v.rotation),
+        (Cow::Borrowed("Anchor X"), &v.anchor_x),
+        (Cow::Borrowed("Anchor Y"), &v.anchor_y),
         (Cow::Borrowed("Crop L"), &v.crop_left),
         (Cow::Borrowed("Crop R"), &v.crop_right),
         (Cow::Borrowed("Crop T"), &v.crop_top),
         (Cow::Borrowed("Crop B"), &v.crop_bottom),
         (Cow::Borrowed("Exposure"), &col.exposure),
+        (Cow::Borrowed("Brightness"), &col.brightness),
+        (Cow::Borrowed("Contrast"), &col.contrast),
         (Cow::Borrowed("Saturation"), &col.saturation),
+        (Cow::Borrowed("Temperature"), &col.temperature),
+        (Cow::Borrowed("Tint"), &col.tint),
         (Cow::Borrowed("Volume"), &c.audio.volume_db),
+        (Cow::Borrowed("Pan"), &c.audio.pan),
     ];
     for e in &c.effects {
         let defs = e.kind.params();
@@ -1725,6 +1773,11 @@ fn move_keys(c: &mut Clip, from: Time, to: Time, tol: Time) {
     c.for_each_param_mut(&mut f);
 }
 
+/// How tall the waveform is drawn at clip time `t`: what the mixer applies.
+fn wave_gain(c: &Clip, t: Time) -> f32 {
+    c.audio.gain_at(t, c.duration)
+}
+
 /// Width of one waveform column in points.
 const WAVE_COL: f32 = 2.0;
 
@@ -1741,7 +1794,6 @@ fn draw_peaks(p: &egui::Painter, pk: &nle_media::PeakBuffer, c: &Clip, rect: Rec
         return;
     }
     let pps = rect.width() / c.duration.as_secs_f64().max(1e-6) as f32;
-    let gain = db_to_gain(c.audio.volume_db.value as f32);
     let mid = arect.center().y;
     let color = theme::AUDIO.gamma_multiply(0.9);
     // Align columns to the clip's left edge so bars do not shimmer while scrolling.
@@ -1756,7 +1808,7 @@ fn draw_peaks(p: &egui::Painter, pk: &nle_media::PeakBuffer, c: &Clip, rect: Rec
         let s_next = c.source_time(local(x + WAVE_COL)).as_secs_f64();
         let (lo, hi) = pk.range(s_prev.min(s_next), s_prev.max(s_next));
         s_prev = s_next;
-        let g = gain * c.audio.gain_at(l0, c.duration);
+        let g = wave_gain(c, l0);
         let top = mid - shape(hi * g) * half;
         let bottom = (mid - shape(lo * g) * half).max(top + 1.0);
         let left = x.max(x0);
@@ -1883,7 +1935,12 @@ fn roll_target(tl: &Timeline, h: &Hit, near_start: bool, near_end: bool) -> Opti
 fn roll_drag_target(app: &App, edit: Time, origin: Time, raw_t: Time, snap: Time) -> Time {
     let tl = &app.project.timeline;
     let want = edit + (raw_t - origin);
-    let best = app.tl.snap_targets(app.playhead).into_iter().filter(|t| (*t - want).abs() <= snap).min_by_key(|t| (*t - want).abs());
+    if !tl.snapping {
+        return want.snap_to_frame(tl.format.rate);
+    }
+    // the cut being rolled is an edit point itself: snapping to it would pin it
+    let points = tl.snap_points(None).into_iter().filter(|t| *t != edit).chain(app.tl.snap_targets(app.playhead));
+    let best = points.filter(|t| (*t - want).abs() <= snap).min_by_key(|t| (*t - want).abs());
     best.unwrap_or(want).snap_to_frame(tl.format.rate)
 }
 
@@ -1944,6 +2001,10 @@ fn hold_if_grave(app: &App, h: &Hit, cmd: Command) -> Command {
 
 fn context_menu(app: &mut App, ui: &mut egui::Ui, clip: Option<ClipId>) {
     let Some(id) = clip else {
+        if ui.add_enabled(app.can_paste(), egui::Button::new("Paste at Playhead")).clicked() {
+            app.paste_clips();
+            ui.close_menu();
+        }
         if ui.button("Add Basic Title").clicked() {
             app.add_title(false);
             ui.close_menu();
@@ -1977,19 +2038,63 @@ fn context_menu(app: &mut App, ui: &mut egui::Ui, clip: Option<ClipId>) {
         return;
     };
     let spine = nle_core::command::is_spine(&app.project.timeline, id);
+    // the menu acts on the whole selection when opened on part of it
+    let select = |app: &mut App| {
+        if !app.selection.contains(&id) {
+            app.selection = vec![id];
+        }
+    };
+    let (linkable, linked) =
+        app.project.timeline.clip(id).map_or((false, false), |c| (c.av.video && c.av.audio && c.link.is_none() && matches!(c.kind, ClipKind::Asset { .. }), c.link.is_some()));
+    if ui.button("Cut").clicked() {
+        select(app);
+        app.cut_selection();
+        ui.close_menu();
+    }
+    if ui.button("Copy").clicked() {
+        select(app);
+        app.copy_selection();
+        ui.close_menu();
+    }
+    if ui.add_enabled(app.can_paste(), egui::Button::new("Paste at Playhead")).clicked() {
+        app.paste_clips();
+        ui.close_menu();
+    }
+    if ui.button("Duplicate").clicked() {
+        select(app);
+        app.duplicate_selection();
+        ui.close_menu();
+    }
+    ui.separator();
     if ui.button("Delete").clicked() {
-        app.selection = vec![id];
-        app.delete_selection(false);
+        select(app);
+        app.delete_clips(false);
         ui.close_menu();
     }
     if ui.add_enabled(spine, egui::Button::new("Replace with Gap")).clicked() {
-        app.selection = vec![id];
-        app.delete_selection(true);
+        select(app);
+        app.delete_clips(true);
         ui.close_menu();
     }
     if ui.button("Blade at Playhead").clicked() {
         let at = app.playhead;
         app.exec(Command::BladeClip { id, at });
+        ui.close_menu();
+    }
+    ui.separator();
+    if ui.add_enabled(linkable, egui::Button::new("Detach Audio")).clicked() {
+        select(app);
+        app.detach_audio();
+        ui.close_menu();
+    }
+    if ui.add_enabled(linked, egui::Button::new("Unlink Audio and Video")).clicked() {
+        select(app);
+        app.unlink_audio();
+        ui.close_menu();
+    }
+    let pair = !linked && app.selection.len() == 2 && app.selection.contains(&id);
+    if ui.add_enabled(pair, egui::Button::new("Link Audio and Video")).on_hover_text("Select one video clip and one audio clip").clicked() {
+        app.link_audio();
         ui.close_menu();
     }
     ui.separator();
@@ -2043,7 +2148,11 @@ fn context_menu(app: &mut App, ui: &mut egui::Ui, clip: Option<ClipId>) {
         }
     });
     if ui.add_enabled(spine, egui::Button::new("Lift from Storyline")).clicked() {
-        app.exec(Command::LiftToLane { id, lane: 1 });
+        let tl = &app.project.timeline;
+        if let (Some(at), Some(c)) = (tl.clip_start(id), tl.clip(id)) {
+            let lane = tl.free_lane(1, at, c.duration);
+            app.exec(Command::LiftToLane { id, lane });
+        }
         ui.close_menu();
     }
     if ui.add_enabled(!spine, egui::Button::new("Overwrite to Primary Storyline")).clicked() {
@@ -2058,12 +2167,24 @@ fn context_menu(app: &mut App, ui: &mut egui::Ui, clip: Option<ClipId>) {
     }
     ui.separator();
     ui.menu_button("Add Transition", |ui| {
-        for k in nle_core::TransitionKind::ALL {
-            if ui.button(k.label()).clicked() {
-                app.selection = vec![id];
-                app.add_transition(k);
-                ui.close_menu();
-            }
+        for (edge, at_end) in [("At Start", false), ("At End", true)] {
+            ui.menu_button(edge, |ui| {
+                for k in nle_core::TransitionKind::ALL {
+                    let label = if k == nle_core::TransitionKind::DipToBlack { "Fade to Black (Dip to Black)" } else { k.label() };
+                    if ui.add_enabled(spine, egui::Button::new(label)).clicked() {
+                        app.selection = vec![id];
+                        app.add_transition_at(k, at_end);
+                        ui.close_menu();
+                    }
+                }
+                ui.separator();
+                let audible = app.project.timeline.clip(id).is_some_and(|c| c.has_audio());
+                if ui.add_enabled(audible, egui::Button::new("Audio Crossfade")).clicked() {
+                    app.selection = vec![id];
+                    app.add_audio_crossfade(at_end);
+                    ui.close_menu();
+                }
+            });
         }
     });
     ui.menu_button("Retime", |ui| app.retime_menu(ui));
@@ -2206,4 +2327,16 @@ fn set_segment(app: &mut App, id: ClipId, _seg: usize, f: impl FnOnce(&mut Retim
     let mut r = c.retime.clone().unwrap_or_else(|| Retime::uniform(c.duration, 1.0));
     f(&mut r);
     app.exec(Command::SetRetime { id, retime: Some(r) });
+}
+
+#[cfg(test)]
+mod wave_tests {
+    use super::{wave_gain, Clip, Time};
+
+    #[test]
+    fn the_waveform_applies_clip_volume_once() {
+        let mut c = Clip::gap(Time::from_secs(4));
+        c.audio.volume_db.value = -20.0;
+        assert!((wave_gain(&c, Time::from_secs(2)) - 0.1).abs() < 1e-3);
+    }
 }

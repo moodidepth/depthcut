@@ -85,6 +85,83 @@ fn mean_y(nv12: &[u8], x0: u32, x1: u32) -> f32 {
     s as f32 / n as f32
 }
 
+/// A dark picture with a bright band over the third quarter of one axis.
+struct Band(usize);
+
+impl FrameSource for Band {
+    fn frame_rate(&self, _: AssetId) -> FrameRate {
+        FrameRate::FPS_30
+    }
+    fn frame(&mut self, _: AssetId, index: i64) -> Option<VideoFrame> {
+        let mut data = Vec::new();
+        for y in 0..H {
+            for x in 0..W {
+                let (at, len) = if self.0 == 0 { (x, W) } else { (y, H) };
+                data.push(if (len / 2..len * 3 / 4).contains(&at) { 200u8 } else { 60 });
+            }
+        }
+        data.resize((W * H * 3 / 2) as usize, 128);
+        Some(VideoFrame::new(W, H, PixelFormat::Nv12, data, Time::from_frames(index, FrameRate::FPS_30)))
+    }
+}
+
+#[test]
+fn a_background_lut_arrives_after_the_first_picture() {
+    let Some(gpu) = gpu() else { return };
+    struct RemoveOnDrop(std::path::PathBuf);
+    impl Drop for RemoveOnDrop {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    let path = std::env::temp_dir().join(format!("rcp-lut-{}.cube", std::process::id()));
+    let _cleanup = RemoveOnDrop(path.clone());
+    std::fs::write(&path, "LUT_3D_SIZE 2\n".to_string() + &"1 0 0\n".repeat(8)).unwrap();
+    let mut layer = Layer::new(ClipId(1), 0, LayerSource::Solid([0.5, 0.5, 0.5, 1.0]));
+    layer.color.enabled = true;
+    layer.color.lut = Some(nle_core::LutRef { path: path.to_string_lossy().into_owned(), intensity: 1.0 });
+    let comp = Composition::new(Time::ZERO, vec![RenderNode::Layer(layer)]);
+    let draw = |r: &mut Renderer| {
+        r.render(&comp, &mut Band(0), RenderOptions::default());
+        r.read_display()[..3].to_vec()
+    };
+    let mut blocking = Renderer::new(gpu.clone(), 16, 16);
+    let wanted = draw(&mut blocking);
+
+    let mut preview = Renderer::new(gpu, 16, 16);
+    preview.load_luts_in_background();
+    assert_ne!(draw(&mut preview), wanted, "the first picture waited for the file");
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !preview.poll_luts() {
+        assert!(std::time::Instant::now() < until, "the LUT never arrived");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(draw(&mut preview), wanted);
+}
+
+#[test]
+fn flip_mirrors_the_picture_inside_its_crop() {
+    let Some(gpu) = gpu() else { return };
+    let mut r = Renderer::new(gpu, W, H);
+    for axis in 0..2 {
+        for flipped in [false, true] {
+            let mut layer = media_layer(AssetId(9100 + axis as u64 * 2 + flipped as u64));
+            layer.video.crop[axis * 2] = 0.5;
+            layer.video.flip[axis] = flipped;
+            let out = r.render_nv12(&Composition::new(Time::ZERO, vec![RenderNode::Layer(layer)]), &mut Band(axis), RenderOptions::default());
+            let len = if axis == 0 { W } else { H };
+            let at = |p: u32| {
+                let (x, y) = if axis == 0 { (p, H / 2) } else { (W / 2, p) };
+                out[(y * W + x) as usize] as i32
+            };
+            let (near, far) = if flipped { (60, 200) } else { (200, 60) };
+            for (p, want) in [(len / 8, 16), (len * 5 / 8, near), (len * 7 / 8, far)] {
+                assert!((at(p) - want).abs() <= 3, "axis {axis}, flipped {flipped}, at {p}: {} for {want}", at(p));
+            }
+        }
+    }
+}
+
 #[test]
 fn gpu_pipeline_end_to_end() {
     let Some(gpu) = gpu() else { return };
