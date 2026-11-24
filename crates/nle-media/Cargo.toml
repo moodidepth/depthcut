@@ -46,3 +46,4 @@ futures-util = { workspace = true, optional = true }
 whisper-rs = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
 zip = { workspace = true, optional = true }
+vst3 = "0.3"

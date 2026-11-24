@@ -402,18 +402,19 @@ impl Default for LevelerSettings {
 // Mixer busses
 // ---------------------------------------------------------------------------
 
-/// A CLAP plug-in in a bus insert slot (after the built-in EQ and effects,
+/// A CLAP or VST3 plug-in in a bus insert slot (after the built-in EQ and effects,
 /// before the fader).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PluginInsert {
-    /// The `.clap` file (bundle directory on macOS).
+    /// The `.clap` or `.vst3` file or bundle directory; the extension picks
+    /// the format.
     pub path: String,
-    /// CLAP plug-in id inside it.
+    /// Plug-in id inside it (CLAP id, or the VST3 class id as 32 hex digits).
     pub id: String,
     pub name: String,
     pub bypass: bool,
-    /// Values set in the editor, by CLAP parameter id; others keep the
+    /// Values set in the editor, by parameter id; others keep the
     /// plug-in's defaults.
     pub params: Vec<(u32, f64)>,
 }
@@ -442,7 +443,7 @@ pub struct BusSettings {
     pub solo: bool,
     pub eq: ParametricEq,
     pub fx: AudioFx,
-    /// CLAP plug-ins, processed in order.
+    /// CLAP / VST3 plug-ins, processed in order.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub plugins: Vec<PluginInsert>,
     /// Fader automation (dB) on the timeline clock; replaces `gain_db` while

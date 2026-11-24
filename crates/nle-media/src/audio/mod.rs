@@ -11,11 +11,13 @@ pub mod fx;
 pub mod meter;
 pub mod mixer;
 pub mod output;
+pub mod plugins;
 pub mod preview;
 pub mod record;
 pub mod resample;
 pub mod restore;
 pub mod vocal;
+pub mod vst3_host;
 
 pub use decode::decode_audio;
 pub use ducking::{duck_curve, DuckCurve, DuckEnvelope, Ducker, EnvelopeFollower, ENV_HOP_SECS};

@@ -10,11 +10,11 @@
 //! preview volume → −1 dBFS limiter. Bus faders and balance follow their
 //! automation on the timeline clock.
 
-use super::clap_host::ClapInstance;
 use super::ducking::{DuckCurve, DuckEnvelope, Ducker, RmsAccumulator};
 use super::eq::{BandKind, Biquad, ParametricEqProc};
 use super::fx::{FxChain, GainReduction, Leveler};
 use super::meter::{LoudnessMeter, MeterReading};
+use super::plugins::PluginInstance;
 use super::restore::{restore_key, RestoreKey, Restored};
 use super::vocal::VocalClarity;
 use crate::frame::AudioBuffer;
@@ -272,7 +272,8 @@ impl TimelineMixer {
             for (k, ins) in wanted.iter().enumerate() {
                 let key = (ins.path.clone(), ins.id.clone());
                 if slots.get(k).is_none_or(|s| s.key != key) {
-                    let inst = ClapInstance::load(std::path::Path::new(&ins.path), &ins.id, self.sample_rate).map_err(|e| log::warn!("CLAP insert on mixer slot {b}: {e}")).ok();
+                    let inst =
+                        PluginInstance::load(std::path::Path::new(&ins.path), &ins.id, self.sample_rate).map_err(|e| log::warn!("plug-in insert on mixer slot {b}: {e}")).ok();
                     let slot = PluginSlot { key, inst };
                     if k < slots.len() {
                         slots[k] = slot;
@@ -799,10 +800,10 @@ fn gain_smoothing(sample_rate: u32) -> f32 {
 }
 
 /// Bus fader + balance as (L, R) gains.
-/// A loaded CLAP insert and what it was loaded from.
+/// A loaded plug-in insert (CLAP or VST3) and what it was loaded from.
 struct PluginSlot {
     key: (String, String),
-    inst: Option<ClapInstance>,
+    inst: Option<PluginInstance>,
 }
 
 fn bus_gains(s: &BusSettings, audible: bool) -> [f32; 2] {
@@ -1404,6 +1405,13 @@ mod tests {
         mix.master.plugins = vec![gain(-6.0206), gain(-6.0206)];
         let o = tail(&render_with(&mix, false));
         assert!((o / (0.3 / 4.0 / 2f32.sqrt()) - 1.0).abs() < 0.03, "two master inserts: {o}");
+        // a VST3 in series with a CLAP
+        let vst3 = crate::audio::vst3_host::test_plugin();
+        let vst3_id = crate::audio::vst3_host::describe(&vst3).unwrap()[0].id.clone();
+        let mut mix = MixerSettings::default();
+        mix.master.plugins = vec![gain(-6.0206), PluginInsert { path: vst3.to_string_lossy().into_owned(), id: vst3_id, ..gain(-6.0206) }];
+        let o = tail(&render_with(&mix, false));
+        assert!((o / (0.3 / 4.0 / 2f32.sqrt()) - 1.0).abs() < 0.03, "CLAP + VST3 on master: {o}");
         // bypassed / missing plug-ins pass audio through
         mix.master.plugins[0].bypass = true;
         mix.master.plugins[1].path = "C:/missing/none.clap".into();

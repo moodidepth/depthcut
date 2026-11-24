@@ -10,7 +10,7 @@ use eframe::egui::{self, Color32, Stroke};
 use nle_core::{
     AudioFx, AudioRole, AutoLane, AutoPoint, BusId, BusSettings, EqBandType, FilterSlope, GateMode, MixerSettings, ParametricEq, PluginInsert, Time, BUS_SLOTS, MAX_USER_BUSSES,
 };
-use nle_media::audio::clap_host::{self, PluginInfo};
+use nle_media::audio::plugins::{self, PluginInfo};
 use nle_media::audio::{GainReduction, MeterReading, ParametricEqProc};
 
 // ---------------------------------------------------------------------------
@@ -387,7 +387,7 @@ pub struct MixerView {
     armed: [bool; BUS_SLOTS],
     /// The touch pass being recorded.
     touch: Option<Touch>,
-    /// CLAP plug-ins found by the last scan (scanned when the add menu first opens).
+    /// CLAP / VST3 plug-ins found by the last scan (scanned when the add menu first opens).
     clap_found: Option<Vec<PluginInfo>>,
     /// Plug-ins that failed to load in the last scan / browse.
     clap_errors: Vec<String>,
@@ -743,7 +743,7 @@ fn strip(ui: &mut egui::Ui, info: StripInfo, s: &mut BusSettings, view: &mut Mix
                 }
                 let fx_on = s.eq.is_active() || s.fx.is_active() || s.plugins.iter().any(|p| !p.bypass);
                 let fx = egui::Button::new(egui::RichText::new("FX").color(if fx_on { info.color } else { theme::TEXT })).selected(selected);
-                if ui.add(fx).on_hover_text("EQ, inserts, CLAP plug-ins and automation for this bus").clicked() {
+                if ui.add(fx).on_hover_text("EQ, inserts, CLAP / VST3 plug-ins and automation for this bus").clicked() {
                     view.selected = if selected { None } else { Some(b) };
                 }
             });
@@ -762,7 +762,7 @@ fn strip(ui: &mut egui::Ui, info: StripInfo, s: &mut BusSettings, view: &mut Mix
     });
 }
 
-/// CLAP inserts of one bus: bypass, remove, parameters, add.
+/// CLAP / VST3 inserts of one bus: bypass, remove, parameters, add.
 fn plugin_inserts(ui: &mut egui::Ui, plugins: &mut Vec<PluginInsert>, view: &mut MixerView, b: usize) {
     ui.label(egui::RichText::new("After the built-in EQ and inserts, before the fader. Audio effects only; no plug-in windows.").small().color(theme::TEXT_DIM));
     let mut remove = None;
@@ -773,10 +773,12 @@ fn plugin_inserts(ui: &mut egui::Ui, plugins: &mut Vec<PluginInsert>, view: &mut
                 if ui
                     .checkbox(&mut on, egui::RichText::new(&p.name).strong())
                     .on_hover_text(format!(
-                        "{}
+                        "{} {}
 {}
 Untick to bypass",
-                        p.id, p.path
+                        plugins::format_name(std::path::Path::new(&p.path)),
+                        p.id,
+                        p.path
                     ))
                     .changed()
                 {
@@ -786,7 +788,7 @@ Untick to bypass",
                     remove = Some(k);
                 }
             });
-            match clap_host::param_infos(std::path::Path::new(&p.path), &p.id) {
+            match plugins::param_infos(std::path::Path::new(&p.path), &p.id) {
                 Ok(infos) if infos.is_empty() => {
                     ui.label(egui::RichText::new("No parameters").small().color(theme::TEXT_DIM));
                 }
@@ -815,28 +817,29 @@ Untick to bypass",
     let add = |plugins: &mut Vec<PluginInsert>, info: &PluginInfo| {
         plugins.push(PluginInsert { path: info.path.to_string_lossy().into_owned(), id: info.id.clone(), name: info.name.clone(), bypass: false, params: Vec::new() });
     };
-    ui.menu_button("+ Add CLAP plug-in", |ui| {
+    ui.menu_button("+ Add plug-in", |ui| {
         if view.clap_found.is_none() {
-            let (found, errors) = clap_host::scan();
+            let (found, errors) = plugins::scan();
             view.clap_found = Some(found);
             view.clap_errors = errors;
         }
         let found = view.clap_found.clone().unwrap_or_default();
         if found.is_empty() {
-            ui.label(egui::RichText::new("No CLAP plug-ins in the standard folders").small().color(theme::TEXT_DIM));
+            ui.label(egui::RichText::new("No CLAP or VST3 effects in the standard folders").small().color(theme::TEXT_DIM));
         }
         for info in &found {
-            let label = if info.vendor.is_empty() { info.name.clone() } else { format!("{} — {}", info.name, info.vendor) };
+            let kind = plugins::format_name(&info.path);
+            let label = if info.vendor.is_empty() { format!("{} ({kind})", info.name) } else { format!("{} — {} ({kind})", info.name, info.vendor) };
             if ui.button(label).on_hover_text(info.path.display().to_string()).clicked() {
                 add(plugins, info);
                 ui.close_menu();
             }
         }
         ui.separator();
-        if ui.button("Browse for a .clap file…").clicked() {
+        if ui.button("Browse for a .clap / .vst3 file…").clicked() {
             ui.close_menu();
-            if let Some(path) = rfd::FileDialog::new().add_filter("CLAP plug-in", &["clap"]).pick_file() {
-                match clap_host::describe(&path) {
+            if let Some(path) = rfd::FileDialog::new().add_filter("CLAP or VST3 plug-in", &["clap", "vst3"]).pick_file() {
+                match plugins::describe(&path) {
                     Ok(v) if v.is_empty() => view.clap_errors.push(format!("{}: no plug-ins inside", path.display())),
                     Ok(v) => v.iter().for_each(|info| add(plugins, info)),
                     Err(e) => view.clap_errors.push(e),
@@ -978,7 +981,7 @@ pub fn mixer_panel(ui: &mut egui::Ui, mix: &mut MixerSettings, view: &mut MixerV
                 ui.collapsing("EQ", |ui| eq_editor(ui, &mut s.eq, egui::Id::new(("bus-eq", b))));
                 ui.collapsing("Inserts", |ui| fx_editor(ui, &mut s.fx, egui::Id::new(("bus-fx", b)), Some(gr)));
                 let n = s.plugins.len();
-                egui::CollapsingHeader::new(if n == 0 { "CLAP plug-ins".to_string() } else { format!("CLAP plug-ins ({n})") })
+                egui::CollapsingHeader::new(if n == 0 { "Plug-ins".to_string() } else { format!("Plug-ins ({n})") })
                     .id_salt(("bus-clap", b))
                     .default_open(n > 0)
                     .show(ui, |ui| plugin_inserts(ui, &mut s.plugins, view, b));

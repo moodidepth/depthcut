@@ -8,6 +8,8 @@ members = [
     "crates/nle-ui",
     # test fixture for the CLAP host (built on demand by its tests)
     "crates/clap-test-gain",
+    # test fixture for the VST3 host (built on demand by its tests)
+    "crates/vst3-test-gain",
 ]
 default-members = [
     "crates/nle-core",
