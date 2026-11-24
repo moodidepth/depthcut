@@ -227,6 +227,8 @@ pub struct App {
     pub marker_dialog: Option<(usize, String, [u8; 3])>,
     pub captions: captions_ui::CaptionsState,
     pub transcript: crate::transcript_ui::TranscriptState,
+    pub graph: crate::graph_ui::GraphState,
+    pub title_templates: crate::inspector::TitleTemplates,
     pub online: online_ui::OnlineState,
     pub discord: DiscordPresence,
     pub show_shortcuts: bool,
@@ -387,6 +389,8 @@ impl App {
             marker_dialog: None,
             captions: captions_ui::CaptionsState::default(),
             transcript: Default::default(),
+            graph: Default::default(),
+            title_templates: Default::default(),
             online: online_ui::OnlineState::default(),
             discord: DiscordPresence::start(),
             show_shortcuts: false,
@@ -850,9 +854,16 @@ impl App {
 
     pub fn add_title(&mut self, lower_third: bool) {
         let params = if lower_third { TitleParams::lower_third("Name", "Title") } else { TitleParams::default() };
-        let mut clip = Clip::title(params, Time::from_secs(4));
-        clip.name = if lower_third { "Lower Third".into() } else { "Basic Title".into() };
-        let lane = self.free_lane_above(self.playhead, Time::from_secs(4));
+        self.add_title_with(if lower_third { "Lower Third" } else { "Basic Title" }, params);
+    }
+
+    /// Add a title (or shape / credits) clip from a template at the playhead.
+    pub fn add_title_with(&mut self, name: &str, params: TitleParams) {
+        // rolling titles need time to scroll
+        let dur = Time::from_secs(if params.roll == nle_core::RollMode::None { 4 } else { 12 });
+        let mut clip = Clip::title(params, dur);
+        clip.name = name.into();
+        let lane = self.free_lane_above(self.playhead, dur);
         if self.project.timeline.spine.is_empty() {
             self.exec(Command::Append { clip });
         } else {
@@ -2269,6 +2280,7 @@ impl App {
             Action::ToggleAudioMixer => self.mixer_view.open = !self.mixer_view.open,
             Action::AutoCaptions => self.show_captions = !self.show_captions,
             Action::ToggleTranscript => self.transcript.open = !self.transcript.open,
+            Action::ToggleGraphEditor => self.graph.open = !self.graph.open,
             Action::Import => self.import_dialog(),
             Action::ImportFcpxml => self.request_switch(ProjectSwitch::ImportFcpxml),
             Action::Open => self.request_switch(ProjectSwitch::Open),
@@ -2529,6 +2541,28 @@ impl App {
                     self.add_title(true);
                     ui.close_menu();
                 }
+                ui.menu_button("Add Title from Template", |ui| {
+                    for (name, p) in TitleParams::templates() {
+                        if ui.button(name).clicked() {
+                            self.add_title_with(name, p);
+                            ui.close_menu();
+                        }
+                    }
+                    self.title_templates.ensure_loaded();
+                    if !self.title_templates.user.is_empty() {
+                        ui.separator();
+                        let mut pick = None;
+                        for (name, p) in &self.title_templates.user {
+                            if ui.button(name).clicked() {
+                                pick = Some((name.clone(), p.clone()));
+                            }
+                        }
+                        if let Some((name, p)) = pick {
+                            self.add_title_with(&name, p);
+                            ui.close_menu();
+                        }
+                    }
+                });
                 if ui.button(self.menu_label("Add Adjustment Clip", Action::AddAdjustmentClip)).clicked() {
                     self.add_adjustment_clip();
                     ui.close_menu();
@@ -2769,6 +2803,10 @@ impl App {
                 let mut mixer = self.mixer_view.open;
                 if ui.checkbox(&mut mixer, self.menu_label("Audio Mixer", Action::ToggleAudioMixer)).changed() {
                     self.mixer_view.open = mixer;
+                }
+                let mut graph = self.graph.open;
+                if ui.checkbox(&mut graph, self.menu_label("Graph Editor", Action::ToggleGraphEditor)).changed() {
+                    self.graph.open = graph;
                 }
             });
             ui.menu_button("Help", |ui| {
@@ -3162,6 +3200,7 @@ impl eframe::App for App {
         }
         captions_ui::show(self, ctx);
         crate::transcript_ui::show(self, ctx);
+        crate::graph_ui::show(self, ctx);
         self.discord.show_dialog(ctx);
         shortcuts_ui::show(self, ctx);
         crate::about_ui::show(&mut self.about, ctx);

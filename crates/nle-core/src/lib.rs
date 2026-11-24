@@ -66,7 +66,7 @@ pub use audio_fx::{
 pub use captions::{CaptionSegment, CaptionStyle, CaptionTrack, CaptionWord, SubtitleFormat};
 pub use clip::{
     AudioParams, AudioRole, AvFlags, BlendMode, Clip, ClipKind, ColorParams, ColorWheel, CompoundClip, CropAspect, CropMode, Direction, DuckingSettings, EqSettings, FadeShape,
-    LutRef, TitleParams, TitleStyle, Transition, TransitionKind, VideoParams,
+    LutRef, RollMode, ShapeKind, ShapeSpec, TitleParams, TitleStyle, Transition, TransitionKind, VideoParams,
 };
 pub use command::{Command, History};
 pub use edit_ops::CopiedClip;

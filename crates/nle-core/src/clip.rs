@@ -9,6 +9,31 @@ use crate::text_anim::TextAnimation;
 use crate::time::Time;
 use serde::{Deserialize, Serialize};
 
+/// Display names of the built-in animatable parameters, in
+/// [`Clip::animatable_params`] order.
+pub const ANIMATABLE_NAMES: [&str; 20] = [
+    "Opacity",
+    "Position X",
+    "Position Y",
+    "Scale X",
+    "Scale Y",
+    "Rotation",
+    "Anchor X",
+    "Anchor Y",
+    "Crop L",
+    "Crop R",
+    "Crop T",
+    "Crop B",
+    "Exposure",
+    "Brightness",
+    "Contrast",
+    "Saturation",
+    "Temperature",
+    "Tint",
+    "Volume",
+    "Pan",
+];
+
 // ---------------------------------------------------------------------------
 // Video (transform / crop / compositing)
 // ---------------------------------------------------------------------------
@@ -757,6 +782,87 @@ pub struct TitleParams {
     /// Word-highlight: colour of words not spoken yet (`None` = text colour).
     #[serde(default)]
     pub dim_color: Option<[f32; 4]>,
+    /// A vector shape drawn instead of the text (fill = `color`; outline,
+    /// shadow and animations apply as for text).
+    #[serde(default)]
+    pub shape: Option<ShapeSpec>,
+    /// Rolling credits / crawl: the text block scrolls through the frame
+    /// over the clip's duration.
+    #[serde(default)]
+    pub roll: RollMode,
+}
+
+/// Scroll direction of a rolling title.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RollMode {
+    #[default]
+    None,
+    /// Credits: bottom to top.
+    Up,
+    /// Crawl: right to left.
+    Left,
+}
+
+impl RollMode {
+    pub const ALL: [RollMode; 3] = [RollMode::None, RollMode::Up, RollMode::Left];
+    pub fn label(self) -> &'static str {
+        match self {
+            RollMode::None => "Static",
+            RollMode::Up => "Roll (credits)",
+            RollMode::Left => "Crawl",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ShapeKind {
+    Rectangle,
+    RoundedRect,
+    Ellipse,
+    Triangle,
+    Star,
+    Line,
+}
+
+impl ShapeKind {
+    pub const ALL: [ShapeKind; 6] = [ShapeKind::Rectangle, ShapeKind::RoundedRect, ShapeKind::Ellipse, ShapeKind::Triangle, ShapeKind::Star, ShapeKind::Line];
+    pub fn label(self) -> &'static str {
+        match self {
+            ShapeKind::Rectangle => "Rectangle",
+            ShapeKind::RoundedRect => "Rounded Rectangle",
+            ShapeKind::Ellipse => "Ellipse",
+            ShapeKind::Triangle => "Triangle",
+            ShapeKind::Star => "Star",
+            ShapeKind::Line => "Line",
+        }
+    }
+}
+
+/// A generator shape: sizes are pixels at 1080p, centred on the title position.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ShapeSpec {
+    pub kind: ShapeKind,
+    /// Width, height (a line's height is its thickness).
+    pub size: [f32; 2],
+    /// Corner radius (rounded rectangle).
+    pub radius: f32,
+    /// Star points.
+    pub points: u32,
+    /// Star inner radius as a fraction of the outer one.
+    pub inner: f32,
+    /// Rotation, degrees clockwise.
+    pub rotation: f32,
+}
+
+impl ShapeSpec {
+    pub fn new(kind: ShapeKind) -> Self {
+        let size = match kind {
+            ShapeKind::Line => [600.0, 12.0],
+            ShapeKind::Rectangle | ShapeKind::RoundedRect => [600.0, 300.0],
+            _ => [360.0, 360.0],
+        };
+        ShapeSpec { kind, size, radius: 40.0, points: 5, inner: 0.45, rotation: 0.0 }
+    }
 }
 
 fn default_anim_duration() -> f32 {
@@ -800,6 +906,8 @@ impl Default for TitleParams {
             word_times: Vec::new(),
             word_pill: false,
             dim_color: None,
+            shape: None,
+            roll: RollMode::None,
         }
     }
 }
@@ -815,6 +923,70 @@ impl TitleParams {
             position: [0.08, 0.82],
             ..Default::default()
         }
+    }
+
+    /// Built-in title templates (name, params).
+    pub fn templates() -> Vec<(&'static str, TitleParams)> {
+        let shape = |kind: ShapeKind, color: [f32; 4]| TitleParams { text: String::new(), shape: Some(ShapeSpec::new(kind)), color, shadow_enabled: false, ..Default::default() };
+        vec![
+            ("Basic Title", TitleParams::default()),
+            ("Lower Third", TitleParams::lower_third("Name", "Title")),
+            (
+                "Bold Heading",
+                TitleParams {
+                    text: "HEADLINE".into(),
+                    font_family: crate::captions::HEAVY_FONT.into(),
+                    font_size: 140.0,
+                    tracking: 6.0,
+                    outline_enabled: true,
+                    animation: TextAnimation::PopBounce,
+                    ..Default::default()
+                },
+            ),
+            (
+                "Boxed Caption",
+                TitleParams {
+                    text: "Caption text".into(),
+                    font_size: 56.0,
+                    pill_enabled: true,
+                    pill_color: [0.0, 0.0, 0.0, 0.7],
+                    shadow_enabled: false,
+                    position: [0.5, 0.86],
+                    ..Default::default()
+                },
+            ),
+            ("Typewriter", TitleParams { text: "Once upon a time…".into(), font_size: 72.0, animation: TextAnimation::Typewriter, anim_duration: 2.0, ..Default::default() }),
+            (
+                "Rolling Credits",
+                TitleParams {
+                    text: "THE END\n\nDirector | Name\nProducer | Name\nEditor | Name\nMusic | Name\n\nThanks for watching".into(),
+                    font_size: 54.0,
+                    roll: RollMode::Up,
+                    shadow_enabled: false,
+                    ..Default::default()
+                },
+            ),
+            (
+                "News Crawl",
+                TitleParams {
+                    text: "BREAKING  •  Headline one  •  Headline two  •  Headline three".into(),
+                    font_size: 48.0,
+                    roll: RollMode::Left,
+                    pill_enabled: true,
+                    pill_color: [0.75, 0.05, 0.05, 0.92],
+                    pill_radius: 0.0,
+                    position: [0.5, 0.9],
+                    shadow_enabled: false,
+                    ..Default::default()
+                },
+            ),
+            ("Rectangle", shape(ShapeKind::Rectangle, [0.04, 0.52, 1.0, 1.0])),
+            ("Rounded Box", shape(ShapeKind::RoundedRect, [1.0, 1.0, 1.0, 0.9])),
+            ("Circle", shape(ShapeKind::Ellipse, [1.0, 0.8, 0.1, 1.0])),
+            ("Triangle", shape(ShapeKind::Triangle, [0.2, 0.85, 0.4, 1.0])),
+            ("Star", shape(ShapeKind::Star, [1.0, 0.85, 0.1, 1.0])),
+            ("Line", shape(ShapeKind::Line, [1.0, 1.0, 1.0, 1.0])),
+        ]
     }
 }
 
@@ -833,10 +1005,22 @@ pub enum TransitionKind {
     Push,
     LumaWipe,
     ZoomPunch,
+    /// Straight soft-edged wipe in the transition's direction.
+    Wipe,
+    /// Circle opening from the centre.
+    Iris,
+    /// Sweep clockwise from 12 o'clock.
+    ClockWipe,
+    /// Two doors opening from the centre (horizontal for Left / Right).
+    BarnDoor,
+    /// Zoom blur into A, cut, zoom blur out of B.
+    CrossZoom,
+    /// Dissolve through a blur.
+    BlurDissolve,
 }
 
 impl TransitionKind {
-    pub const ALL: [TransitionKind; 8] = [
+    pub const ALL: [TransitionKind; 14] = [
         TransitionKind::CrossDissolve,
         TransitionKind::DipToBlack,
         TransitionKind::DipToWhite,
@@ -845,6 +1029,12 @@ impl TransitionKind {
         TransitionKind::Push,
         TransitionKind::LumaWipe,
         TransitionKind::ZoomPunch,
+        TransitionKind::Wipe,
+        TransitionKind::Iris,
+        TransitionKind::ClockWipe,
+        TransitionKind::BarnDoor,
+        TransitionKind::CrossZoom,
+        TransitionKind::BlurDissolve,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -856,6 +1046,12 @@ impl TransitionKind {
             TransitionKind::Push => "Push",
             TransitionKind::LumaWipe => "Luma Wipe",
             TransitionKind::ZoomPunch => "Zoom Punch",
+            TransitionKind::Wipe => "Wipe",
+            TransitionKind::Iris => "Iris",
+            TransitionKind::ClockWipe => "Clock Wipe",
+            TransitionKind::BarnDoor => "Barn Door",
+            TransitionKind::CrossZoom => "Cross Zoom",
+            TransitionKind::BlurDissolve => "Blur Dissolve",
         }
     }
     pub fn from_label(s: &str) -> Option<Self> {
@@ -1231,11 +1427,82 @@ impl Clip {
         (lead, tail)
     }
 
+    /// Every parameter shown in the keyframe lane and the graph editor, with
+    /// its display name (built-ins, then each effect's parameters).
+    pub fn animatable_params(&self) -> Vec<(std::borrow::Cow<'static, str>, &Param)> {
+        let (v, col, a) = (&self.video, &self.color, &self.audio);
+        let refs: [&Param; 20] = [
+            &v.opacity,
+            &v.position_x,
+            &v.position_y,
+            &v.scale_x,
+            &v.scale_y,
+            &v.rotation,
+            &v.anchor_x,
+            &v.anchor_y,
+            &v.crop_left,
+            &v.crop_right,
+            &v.crop_top,
+            &v.crop_bottom,
+            &col.exposure,
+            &col.brightness,
+            &col.contrast,
+            &col.saturation,
+            &col.temperature,
+            &col.tint,
+            &a.volume_db,
+            &a.pan,
+        ];
+        let mut out: Vec<_> = ANIMATABLE_NAMES.iter().zip(refs).map(|(n, p)| (std::borrow::Cow::Borrowed(*n), p)).collect();
+        for e in &self.effects {
+            for (d, p) in e.kind.params().iter().zip(&e.params) {
+                out.push((std::borrow::Cow::Owned(format!("{}: {}", e.kind.label(), d.name)), p));
+            }
+        }
+        out
+    }
+
+    /// [`Clip::animatable_params`], mutable (same order and names).
+    pub fn animatable_params_mut(&mut self) -> Vec<(std::borrow::Cow<'static, str>, &mut Param)> {
+        let (v, col, a) = (&mut self.video, &mut self.color, &mut self.audio);
+        let refs: [&mut Param; 20] = [
+            &mut v.opacity,
+            &mut v.position_x,
+            &mut v.position_y,
+            &mut v.scale_x,
+            &mut v.scale_y,
+            &mut v.rotation,
+            &mut v.anchor_x,
+            &mut v.anchor_y,
+            &mut v.crop_left,
+            &mut v.crop_right,
+            &mut v.crop_top,
+            &mut v.crop_bottom,
+            &mut col.exposure,
+            &mut col.brightness,
+            &mut col.contrast,
+            &mut col.saturation,
+            &mut col.temperature,
+            &mut col.tint,
+            &mut a.volume_db,
+            &mut a.pan,
+        ];
+        let mut out: Vec<_> = ANIMATABLE_NAMES.iter().zip(refs).map(|(n, p)| (std::borrow::Cow::Borrowed(*n), p)).collect();
+        for e in &mut self.effects {
+            let label = e.kind.label();
+            for (d, p) in e.kind.params().iter().zip(&mut e.params) {
+                out.push((std::borrow::Cow::Owned(format!("{label}: {}", d.name)), p));
+            }
+        }
+        out
+    }
+
     /// Visit every keyframable parameter of the clip.
     /// Move every keyframe (parameters and colour nodes) by `dt`.
     pub fn shift_keys(&mut self, dt: Time) {
         self.for_each_param_mut(|p| p.shift(dt));
         self.color.corrections.iter_mut().for_each(|n| n.shift_keys(dt));
+        self.effects.iter_mut().filter_map(|e| e.mask.as_mut()).for_each(|m| m.shift_keys(dt));
     }
 
     pub fn for_each_param_mut(&mut self, mut f: impl FnMut(&mut Param)) {
@@ -1286,6 +1553,8 @@ impl Clip {
         right.for_each_param_mut(|p| p.keep_right(at));
         left.color.corrections.iter_mut().for_each(|n| n.keep_left(at));
         right.color.corrections.iter_mut().for_each(|n| n.keep_right(at));
+        left.effects.iter_mut().filter_map(|e| e.mask.as_mut()).for_each(|m| m.keep_left(at));
+        right.effects.iter_mut().filter_map(|e| e.mask.as_mut()).for_each(|m| m.keep_right(at));
 
         left.anchor = if self.anchor < at { self.anchor } else { Time::ZERO };
         right.anchor = if self.anchor >= at { self.anchor - at } else { Time::ZERO };

@@ -370,7 +370,7 @@ fn resolve_effects(c: &Clip, local: Time, src: Option<f64>) -> Vec<ResolvedEffec
             let mut r = e.resolve(local);
             if let Some(s) = src {
                 if let Some(m) = e.mask.as_ref().filter(|m| m.track.is_some()) {
-                    r.mask = Some(tracked_mask(c, m, s).resolve());
+                    r.mask = Some(tracked_mask(c, &m.at(local), s).resolve());
                 }
                 if e.kind == EffectKind::GamingReframe916 {
                     if let Some(t) = e.track.and_then(|id| c.tracks.iter().find(|t| t.id == id)) {

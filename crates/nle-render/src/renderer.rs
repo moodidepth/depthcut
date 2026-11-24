@@ -1565,6 +1565,13 @@ impl Renderer {
             "levels" => &self.p.fx_levels,
             "person_matte" => &self.p.fx_person_matte,
             "depth_map" => &self.p.fx_depth_map,
+            "mirror" => &self.p.fx_mirror,
+            "kaleidoscope" => &self.p.fx_kaleidoscope,
+            "posterize" => &self.p.fx_posterize,
+            "invert" => &self.p.fx_invert,
+            "tint" => &self.p.fx_tint,
+            "find_edges" => &self.p.fx_find_edges,
+            "letterbox" => &self.p.fx_letterbox,
             other => unreachable!("unknown effect pipeline {other}"),
         };
         self.dispatch(
@@ -1745,6 +1752,13 @@ impl Renderer {
             EffectKind::LensDistortion => simple(self, enc, "lens_distortion", base),
             EffectKind::HueSatLightness => simple(self, enc, "hue_sat_lightness", base),
             EffectKind::Levels => simple(self, enc, "levels", base),
+            EffectKind::Mirror => simple(self, enc, "mirror", base),
+            EffectKind::Kaleidoscope => simple(self, enc, "kaleidoscope", base),
+            EffectKind::Posterize => simple(self, enc, "posterize", base),
+            EffectKind::Invert => simple(self, enc, "invert", base),
+            EffectKind::Tint => simple(self, enc, "tint", base),
+            EffectKind::FindEdges => simple(self, enc, "find_edges", base),
+            EffectKind::Letterbox => simple(self, enc, "letterbox", base),
             EffectKind::PersonMatte | EffectKind::DepthMap => {
                 let (kind, pipe) = if e.kind == EffectKind::PersonMatte { (MatteKind::Person, "person_matte") } else { (MatteKind::Depth, "depth_map") };
                 // no generated matte for this frame: pass through
@@ -1809,6 +1823,7 @@ impl Renderer {
         anim.layout_key().hash(&mut h);
         anim.highlight_word.hash(&mut h);
         anim.dim_from.hash(&mut h);
+        ((anim.roll * 100_000.0).round() as i32).hash(&mut h);
         ((anim.word_scale * 64.0).round() as i32).hash(&mut h);
         ((anim.word_lift * 4.0).round() as i32).hash(&mut h);
         if p.word_pill {
@@ -1837,7 +1852,8 @@ impl Renderer {
             &mask.data,
         );
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        if self.masks.len() > 96 {
+        // rolling titles make a frame-sized mask per frame: bound by bytes too
+        if self.masks.len() > 96 || self.masks.values().map(|m| m.bytes).sum::<u64>() > 384 << 20 {
             self.masks.clear();
         }
         let m = Arc::new(MaskTex { _texture: texture, view, rect: mask.rect, pill: mask.pill, bytes: mask.data.len() as u64 });

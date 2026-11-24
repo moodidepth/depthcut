@@ -108,6 +108,7 @@ actions! {
     ToggleAudioLanes => "Show Audio Lanes by Role", "View";
     ToggleScopes => "Show Video Scopes", "View";
     ToggleAudioMixer => "Show Audio Mixer", "View";
+    ToggleGraphEditor => "Show Graph Editor", "View";
     AutoCaptions => "Auto Captions", "Captions";
     ToggleTranscript => "Transcript (Text-Based Editing)", "Captions";
     Import => "Import Media", "File";
@@ -457,6 +458,7 @@ impl ActionMap {
                 (ZoomToFit, &[B::ctrl(K::Num0)]),
                 (AutoCaptions, &[B::ctrl_shift(K::C)]),
                 (ToggleTranscript, &[B::ctrl_alt(K::T)]),
+                (ToggleGraphEditor, &[B::ctrl_shift(K::G)]),
                 (Import, &[B::ctrl(K::I)]),
                 (ImportFcpxml, &[B::ctrl_shift(K::I)]),
                 (Open, &[B::ctrl(K::O)]),
@@ -581,6 +583,7 @@ impl ActionMap {
                 (ZoomToFit, &[B::ctrl(K::Num0)]),
                 (AutoCaptions, &[B::ctrl_shift(K::C)]),
                 (ToggleTranscript, &[B::ctrl_alt(K::T)]),
+                (ToggleGraphEditor, &[B::ctrl_shift(K::G)]),
                 (Import, &[B::ctrl(K::I)]),
                 (ImportFcpxml, &[B::ctrl_shift(K::I)]),
                 (Open, &[B::ctrl(K::O)]),
@@ -705,6 +708,7 @@ impl ActionMap {
                 (ZoomToFit, &[B::ctrl(K::Num0)]),
                 (AutoCaptions, &[B::ctrl_shift(K::C)]),
                 (ToggleTranscript, &[B::ctrl_alt(K::T)]),
+                (ToggleGraphEditor, &[B::ctrl_shift(K::G)]),
                 (Import, &[B::ctrl(K::I)]),
                 (ImportFcpxml, &[B::ctrl_shift(K::I)]),
                 (Open, &[B::ctrl(K::O)]),

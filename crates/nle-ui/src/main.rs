@@ -20,6 +20,7 @@ mod discord;
 mod export_ui;
 mod ffmpeg_setup;
 mod grade_ui;
+mod graph_ui;
 mod inspector;
 mod key_input;
 mod media;

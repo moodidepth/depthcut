@@ -486,6 +486,20 @@ pub fn transform_mask(mask: &ShapeMask, h: &Mat3, aspect: f32, model: MotionMode
         } else {
             mask.points.iter().map(|p| apply(h, *p)).collect()
         };
+        // tangents ride along as offsets from their (moved) point
+        if mask.is_bezier() && model != MotionModel::Translation {
+            m.handles = mask
+                .points
+                .iter()
+                .zip(&mask.handles)
+                .zip(&m.points)
+                .map(|((p, hd), q)| {
+                    let i = apply(h, [p[0] + hd[0], p[1] + hd[1]]);
+                    let o = apply(h, [p[0] + hd[2], p[1] + hd[3]]);
+                    [i[0] - q[0], i[1] - q[1], o[0] - q[0], o[1] - q[1]]
+                })
+                .collect();
+        }
     }
     m
 }

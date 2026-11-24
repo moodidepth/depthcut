@@ -222,6 +222,9 @@ pub struct Curve {
     pub keys: Vec<Keyframe>,
 }
 
+/// A tangent handle's position in (time, value) space.
+pub type HandlePoint = (Time, f64);
+
 impl Curve {
     pub fn new() -> Self {
         Curve { keys: Vec::new() }
@@ -290,6 +293,150 @@ impl Curve {
     /// Index of the keyframe nearest to `t` within `tolerance`.
     pub fn key_near(&self, t: Time, tolerance: Time) -> Option<usize> {
         self.keys.iter().enumerate().filter(|(_, k)| (k.time - t).abs() <= tolerance).min_by_key(|(_, k)| (k.time - t).abs()).map(|(i, _)| i)
+    }
+
+    // ----- graph editor ---------------------------------------------------
+
+    /// Move key `i` to (`t`, `value`). The time is kept at least `gap`
+    /// inside its neighbours so the order never changes. Returns the
+    /// time actually used.
+    pub fn move_key(&mut self, i: usize, t: Time, value: f64, gap: Time) -> Time {
+        let Some(k) = self.keys.get(i) else { return t };
+        let mut t = t;
+        if i > 0 {
+            t = t.max(self.keys[i - 1].time + gap);
+        }
+        if i + 1 < self.keys.len() {
+            t = t.min(self.keys[i + 1].time - gap);
+        }
+        if i > 0 && i + 1 < self.keys.len() && self.keys[i - 1].time + gap > self.keys[i + 1].time - gap {
+            t = k.time;
+        }
+        self.keys[i].time = t;
+        self.keys[i].value = value;
+        t
+    }
+
+    /// Graph positions of key `i`'s (in, out) tangent handles: the in
+    /// handle exists when the segment into the key is Bézier, the out
+    /// handle when the segment out of it is.
+    pub fn handle_points(&self, i: usize) -> (Option<HandlePoint>, Option<HandlePoint>) {
+        let k = &self.keys;
+        let Some(key) = k.get(i) else { return (None, None) };
+        let inh = (i > 0 && k[i - 1].interp == Interpolation::Bezier).then(|| {
+            let span = (key.time - k[i - 1].time).0 as f64;
+            (key.time - Time((span * key.in_handle.dt) as i64), key.value + key.in_handle.dv)
+        });
+        let outh = (i + 1 < k.len() && key.interp == Interpolation::Bezier).then(|| {
+            let span = (k[i + 1].time - key.time).0 as f64;
+            (key.time + Time((span * key.out_handle.dt) as i64), key.value + key.out_handle.dv)
+        });
+        (inh, outh)
+    }
+
+    fn spans(&self, i: usize) -> (f64, f64) {
+        let k = &self.keys;
+        let before = if i > 0 { (k[i].time - k[i - 1].time).0 as f64 } else { 0.0 };
+        let after = if i + 1 < k.len() { (k[i + 1].time - k[i].time).0 as f64 } else { 0.0 };
+        (before, after)
+    }
+
+    /// Drag key `i`'s out handle to graph point (`t`, `v`). The segment
+    /// after the key becomes Bézier. With `mirror`, the in handle turns to
+    /// keep the same slope (a smooth key).
+    pub fn set_out_handle(&mut self, i: usize, t: Time, v: f64, mirror: bool) {
+        if i + 1 >= self.keys.len() {
+            return;
+        }
+        let (before, after) = self.spans(i);
+        let k = &mut self.keys[i];
+        k.interp = Interpolation::Bezier;
+        k.out_handle.dt = ((t - k.time).0 as f64 / after.max(1.0)).clamp(0.0, 1.0);
+        k.out_handle.dv = v - k.value;
+        if mirror && before > 0.0 && k.out_handle.dt > 1e-6 {
+            let slope = k.out_handle.dv / (k.out_handle.dt * after);
+            k.in_handle.dv = -slope * k.in_handle.dt * before;
+        }
+    }
+
+    /// Drag key `i`'s in handle to graph point (`t`, `v`). The segment
+    /// into the key becomes Bézier. `mirror` as for the out handle.
+    pub fn set_in_handle(&mut self, i: usize, t: Time, v: f64, mirror: bool) {
+        if i == 0 || i >= self.keys.len() {
+            return;
+        }
+        let (before, after) = self.spans(i);
+        self.keys[i - 1].interp = Interpolation::Bezier;
+        let k = &mut self.keys[i];
+        k.in_handle.dt = ((k.time - t).0 as f64 / before.max(1.0)).clamp(0.0, 1.0);
+        k.in_handle.dv = v - k.value;
+        if mirror && after > 0.0 && k.in_handle.dt > 1e-6 {
+            let slope = -k.in_handle.dv / (k.in_handle.dt * before);
+            k.out_handle.dv = slope * k.out_handle.dt * after;
+        }
+    }
+
+    /// Give key `i` smooth Bézier tangents along the line through its
+    /// neighbours (both adjoining segments become Bézier).
+    pub fn auto_smooth(&mut self, i: usize) {
+        let n = self.keys.len();
+        if i >= n || n < 2 {
+            return;
+        }
+        let (a, b) = (self.keys[i.saturating_sub(1)], self.keys[(i + 1).min(n - 1)]);
+        let dt = (b.time - a.time).0 as f64;
+        let slope = if dt > 0.0 { (b.value - a.value) / dt } else { 0.0 };
+        let (before, after) = self.spans(i);
+        let k = &mut self.keys[i];
+        k.in_handle = Handle { dt: 1.0 / 3.0, dv: -slope * before / 3.0 };
+        k.out_handle = Handle { dt: 1.0 / 3.0, dv: slope * after / 3.0 };
+        if i + 1 < n {
+            k.interp = Interpolation::Bezier;
+        }
+        if i > 0 {
+            self.keys[i - 1].interp = Interpolation::Bezier;
+        }
+    }
+
+    /// Flat tangents on key `i` (ease in and out of it).
+    pub fn flatten(&mut self, i: usize) {
+        let n = self.keys.len();
+        if i >= n {
+            return;
+        }
+        let k = &mut self.keys[i];
+        k.in_handle.dv = 0.0;
+        k.out_handle.dv = 0.0;
+        if i + 1 < n {
+            k.interp = Interpolation::Bezier;
+        }
+        if i > 0 {
+            self.keys[i - 1].interp = Interpolation::Bezier;
+        }
+    }
+
+    /// Lowest and highest value the curve reaches (keys, handles and a
+    /// sampled pass over the segments).
+    pub fn value_range(&self) -> Option<(f64, f64)> {
+        let (first, last) = (self.keys.first()?, self.keys.last()?);
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        let mut add = |v: f64| {
+            lo = lo.min(v);
+            hi = hi.max(v);
+        };
+        for (i, k) in self.keys.iter().enumerate() {
+            add(k.value);
+            let (a, b) = self.handle_points(i);
+            for (_, v) in a.into_iter().chain(b) {
+                add(v);
+            }
+        }
+        let span = (last.time - first.time).0;
+        for s in 0..=64 {
+            add(self.eval(first.time + Time(span * s / 64)));
+        }
+        Some((lo, hi))
     }
 }
 
@@ -429,6 +576,54 @@ mod tests {
         assert!((c.eval(Time::from_secs(1)) - 5.0).abs() < 1e-9);
         assert_eq!(c.eval(Time::from_secs(-1)), 0.0);
         assert_eq!(c.eval(Time::from_secs(3)), 10.0);
+    }
+
+    #[test]
+    fn graph_editor_moves_keys_and_shapes_handles() {
+        let s = Time::from_secs;
+        let gap = Time::from_millis(40);
+        let mut c = Curve::new();
+        for (t, v) in [(0, 0.0), (2, 10.0), (4, 0.0)] {
+            c.insert(Keyframe::new(s(t), v));
+        }
+        // a key cannot pass its neighbours
+        assert_eq!(c.move_key(1, s(9), 12.0, gap), s(4) - gap);
+        assert_eq!(c.keys[1].value, 12.0);
+        c.move_key(1, s(2), 10.0, gap);
+        assert_eq!(c.keys.iter().map(|k| k.time).collect::<Vec<_>>(), vec![s(0), s(2), s(4)]);
+
+        // auto smooth on a ramp keeps it a ramp
+        let mut ramp = Curve::new();
+        for (t, v) in [(0, 0.0), (1, 1.0), (2, 2.0)] {
+            ramp.insert(Keyframe::new(s(t), v));
+        }
+        (0..3).for_each(|i| ramp.auto_smooth(i));
+        assert_eq!(ramp.keys[0].interp, Interpolation::Bezier);
+        assert_eq!(ramp.keys[1].interp, Interpolation::Bezier);
+        assert!((ramp.eval(Time::from_millis(1500)) - 1.5).abs() < 0.02, "{}", ramp.eval(Time::from_millis(1500)));
+
+        // flat tangents on the peak: the curve does not overshoot it
+        c.flatten(1);
+        let (lo, hi) = c.value_range().unwrap();
+        assert!(lo >= -1e-6 && hi <= 10.0 + 1e-6, "{lo} {hi}");
+        assert!(c.eval(Time::from_millis(1900)) > 9.5, "eases into the peak");
+
+        // dragging the out handle up makes the curve rise above the key after it
+        let (_, out) = c.handle_points(1);
+        let (ot, _) = out.unwrap();
+        c.set_out_handle(1, ot, 16.0, true);
+        assert!(c.eval(Time::from_millis(2300)) > 10.0);
+        // mirrored: the in handle points the other way (below the key)
+        let (inh, _) = c.handle_points(1);
+        assert!(inh.unwrap().1 < 10.0);
+        // the handle lands where it was dragged
+        let (_, out) = c.handle_points(1);
+        assert!((out.unwrap().1 - 16.0).abs() < 1e-9);
+        // broken handles: the in handle moves alone
+        let before = c.keys[1].out_handle;
+        c.set_in_handle(1, s(1), 3.0, false);
+        assert_eq!(c.keys[1].out_handle, before);
+        assert!((c.handle_points(1).0.unwrap().1 - 3.0).abs() < 1e-9);
     }
 
     #[test]

@@ -228,7 +228,7 @@ fn node_editor(ui: &mut egui::Ui, n: &mut ColorCorrection, working: WorkingSpace
     if !reset {
         node_keys(ui, n, t, tol, view);
     }
-    node_controls(ui, n, working, view);
+    node_controls(ui, n, working, view, t, tol);
     if keyed && !reset && !n.keys.is_empty() {
         if NodeValues::of(n) != shown {
             n.set_key(t, tol);
@@ -267,7 +267,7 @@ fn node_keys(ui: &mut egui::Ui, n: &mut ColorCorrection, t: Time, tol: Time, vie
     });
 }
 
-fn node_controls(ui: &mut egui::Ui, n: &mut ColorCorrection, working: WorkingSpace, view: &mut ColorView) {
+fn node_controls(ui: &mut egui::Ui, n: &mut ColorCorrection, working: WorkingSpace, view: &mut ColorView, t: Time, tol: Time) {
     let id = n.id;
     ui.horizontal(|ui| {
         label(ui, "Mix");
@@ -305,7 +305,7 @@ fn node_controls(ui: &mut egui::Ui, n: &mut ColorCorrection, working: WorkingSpa
     });
     sub(ui, "Curves", id, true, |ui| curves(ui, n));
     sub(ui, "Qualifier", id, n.qualifier.is_some(), |ui| qualifier(ui, n, view));
-    sub(ui, "Window", id, n.mask.is_some(), |ui| mask_editor(ui, &mut n.mask, MaskFocus::Node(id), &mut view.mask_focus));
+    sub(ui, "Window", id, n.mask.is_some(), |ui| mask_editor(ui, &mut n.mask, MaskFocus::Node(id), &mut view.mask_focus, t, tol));
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -530,7 +530,8 @@ fn qualifier(ui: &mut egui::Ui, n: &mut ColorCorrection, view: &mut ColorView) {
 }
 
 /// Shape / position / feather of an optional mask (correction window or effect mask).
-pub fn mask_editor(ui: &mut egui::Ui, mask: &mut Option<ShapeMask>, me: MaskFocus, focus: &mut Option<MaskFocus>) {
+/// `t` is clip-local time (for rotoscoping keys), `tol` half a frame.
+pub fn mask_editor(ui: &mut egui::Ui, mask: &mut Option<ShapeMask>, me: MaskFocus, focus: &mut Option<MaskFocus>, t: Time, tol: Time) {
     ui.horizontal(|ui| {
         label(ui, "Shape");
         let text = mask.as_ref().map(|m| m.shape.label()).unwrap_or("None");
@@ -573,9 +574,48 @@ pub fn mask_editor(ui: &mut egui::Ui, mask: &mut Option<ShapeMask>, me: MaskFocu
         ui.horizontal(|ui| {
             label(ui, "Points");
             ui.label(format!("{}", m.points.len()));
-            ui.checkbox(&mut m.smooth, "Smooth (Bézier)");
+            let mut bez = m.is_bezier();
+            if !bez {
+                ui.checkbox(&mut m.smooth, "Smooth");
+            }
+            if ui.toggle_value(&mut bez, "Bézier handles").on_hover_text("Per-point tangents you drag in the viewer").changed() {
+                if bez {
+                    m.convert_to_bezier();
+                } else {
+                    m.clear_bezier();
+                }
+            }
         });
-        ui.label(egui::RichText::new("In the viewer: drag points, drag inside to move, click an edge to add a point, right-click to remove.").small().color(theme::TEXT_DIM));
+        ui.horizontal(|ui| {
+            label(ui, "Roto");
+            let near = m.shape_key_near(t, tol);
+            let (txt, tip) = if near.is_some() {
+                ("◆ Update Key", "Store the shape at the playhead")
+            } else {
+                ("◇ Key Shape", "Store the shape at the playhead; with keys, every viewer edit keys the shape")
+            };
+            if ui.small_button(txt).on_hover_text(tip).clicked() {
+                if let Some((p, h)) = m.shape_at(t) {
+                    m.points = p;
+                    m.handles = h;
+                }
+                m.set_shape_key(t, tol);
+            }
+            if near.is_some() && ui.small_button("Remove").clicked() {
+                m.remove_shape_key_near(t, tol);
+            }
+            if !m.shape_keys.is_empty() {
+                ui.label(egui::RichText::new(format!("{} keys", m.shape_keys.len())).small().color(theme::TEXT_DIM));
+                if ui.small_button("Clear").on_hover_text("Keep the shape at the playhead, drop the keys").clicked() {
+                    *m = m.at(t);
+                }
+            }
+        });
+        ui.label(
+            egui::RichText::new("In the viewer: drag points, drag inside to move, click an edge to add a point, right-click to remove. Bézier: drag the round tangent handles (Alt breaks the pair).")
+                .small()
+                .color(theme::TEXT_DIM),
+        );
     }
     drag(ui, "Feather", &mut m.feather, 0.0..=0.5, 0.002, 0.05);
     ui.checkbox(&mut m.invert, "Invert");
@@ -624,6 +664,12 @@ pub fn mask_gizmo(app: &mut App, ui: &mut egui::Ui, img: Rect, frame: (f32, f32)
         app.color_view.mask_focus = None;
         return false;
     };
+    // a rotoscoped shape: edit it where it is at the playhead, then key it
+    let roto = !m.shape_keys.is_empty();
+    if let Some((p, h)) = m.shape_at(local) {
+        m.points = p;
+        m.handles = h;
+    }
     let aspect = frame.0 / frame.1;
     let hpx = img.height();
     let to_s = |uv: [f32; 2]| Pos2::new(img.left() + uv[0] * img.width(), img.top() + uv[1] * img.height());
@@ -708,6 +754,37 @@ pub fn mask_gizmo(app: &mut App, ui: &mut egui::Ui, img: Rect, frame: (f32, f32)
             // registered first so the point handles (added later) sit on top
             let body = ui.interact(img, ui.id().with("mask-body"), Sense::click_and_drag());
             let mut remove = None;
+            if m.is_bezier() {
+                let alt = ui.input(|i| i.modifiers.alt);
+                for i in 0..m.points.len() {
+                    let at = to_s(m.points[i]);
+                    for side in [0usize, 2] {
+                        let h = m.handles[i];
+                        let raw = Pos2::new(at.x + h[side] * img.width(), at.y + h[side + 1] * img.height());
+                        let zero = raw.distance(at) < 0.5;
+                        // a sharp corner offers only its out handle, a little to the right
+                        if zero && side == 0 {
+                            continue;
+                        }
+                        let hp = if zero { at + Vec2::new(14.0, 0.0) } else { raw };
+                        painter.line_segment([at, hp], Stroke::new(1.0_f32, col.gamma_multiply(0.7)));
+                        let r = ui.interact(Rect::from_center_size(hp, Vec2::splat(12.0)), ui.id().with(("mask-tan", i, side)), Sense::drag());
+                        painter.circle_filled(hp, 3.5, if r.hovered() || r.dragged() { col } else { Color32::WHITE });
+                        if let Some(p) = r.interact_pointer_pos().filter(|_| r.dragged()) {
+                            let d = [(p.x - at.x) / img.width(), (p.y - at.y) / img.height()];
+                            m.handles[i][side] = d[0];
+                            m.handles[i][side + 1] = d[1];
+                            if !alt {
+                                // keep the pair opposite (smooth point)
+                                let o = 2 - side;
+                                m.handles[i][o] = -d[0];
+                                m.handles[i][o + 1] = -d[1];
+                            }
+                            changed = true;
+                        }
+                    }
+                }
+            }
             for i in 0..m.points.len() {
                 let at = to_s(m.points[i]);
                 let r = ui.interact(Rect::from_center_size(at, Vec2::splat(14.0)), ui.id().with(("mask-pt", i)), Sense::click_and_drag());
@@ -723,7 +800,7 @@ pub fn mask_gizmo(app: &mut App, ui: &mut egui::Ui, img: Rect, frame: (f32, f32)
                 }
             }
             if let Some(i) = remove {
-                m.points.remove(i);
+                m.remove_point(i);
                 changed = true;
             }
             // click near an edge to insert a point; drag inside to move the shape
@@ -740,7 +817,7 @@ pub fn mask_gizmo(app: &mut App, ui: &mut egui::Ui, img: Rect, frame: (f32, f32)
                         .min_by(|a, b| a.1.total_cmp(&b.1));
                     if let Some((i, d)) = best {
                         if d < 10.0 && n < nle_core::color::MAX_MASK_POINTS {
-                            m.points.insert(i + 1, from_s(pos));
+                            m.insert_point(i + 1, from_s(pos));
                             changed = true;
                         }
                     }
@@ -762,6 +839,11 @@ pub fn mask_gizmo(app: &mut App, ui: &mut egui::Ui, img: Rect, frame: (f32, f32)
         app.color_view.mask_focus = None;
     }
     if changed {
+        if roto {
+            if let Some(m) = mask_of(&mut edited, focus) {
+                m.set_shape_key(local, tol);
+            }
+        }
         if let Some((nid, base)) = keyed {
             if let Some(n) = edited.color.corrections.iter_mut().find(|n| n.id == nid) {
                 n.set_key(local, tol);

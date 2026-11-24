@@ -1,6 +1,7 @@
 // GPU transitions between two full-frame images.
 // 0 Cross Dissolve · 1 Dip to Black · 2 Dip to White · 3 Whip Pan
-// 4 Slide · 5 Push · 6 Luma Wipe · 7 Zoom Punch
+// 4 Slide · 5 Push · 6 Luma Wipe · 7 Zoom Punch · 8 Wipe · 9 Iris
+// 10 Clock Wipe · 11 Barn Door · 12 Cross Zoom · 13 Blur Dissolve
 
 struct Tr {
     dir: vec2<f32>,
@@ -38,6 +39,25 @@ fn strip(uv: vec2<f32>, shift: f32) -> vec3<f32> {
         return sa(q);
     }
     return sb(q + t.dir);
+}
+
+// Reveal mask: 1 where B shows. `e` grows from 0 (first revealed) to 1;
+// the soft edge (width s) sweeps past both ends so p = 0 / 1 are exact.
+fn reveal(e: f32, p: f32, s: f32) -> f32 {
+    let edge = p * (1.0 + s);
+    return 1.0 - smoothstep(edge - s, edge, e);
+}
+
+fn blur_mix(uv: vec2<f32>, p: f32, r: f32) -> vec3<f32> {
+    var acc = vec3<f32>(0.0);
+    for (var j = -2; j <= 2; j = j + 1) {
+        for (var i = -2; i <= 2; i = i + 1) {
+            let o = vec2<f32>(f32(i), f32(j)) * r * 0.5;
+            let q = clamp(uv + o, vec2<f32>(0.0), vec2<f32>(1.0));
+            acc = acc + mix(sa(q), sb(q), p);
+        }
+    }
+    return acc / 25.0;
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -110,6 +130,45 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
                 }
             }
             out = acc / 12.0;
+        }
+        case 8u: {
+            // B enters from the side the direction points away from
+            let e = 1.0 - (dot(uv - vec2<f32>(0.5), -t.dir) + 0.5);
+            out = mix(sa(uv), sb(uv), reveal(e, p, max(t.softness, 0.001)));
+        }
+        case 9u: {
+            let asp = f32(dims.x) / f32(dims.y);
+            let rmax = length(vec2<f32>(asp, 1.0) * 0.5);
+            let e = length((uv - vec2<f32>(0.5)) * vec2<f32>(asp, 1.0)) / rmax;
+            out = mix(sa(uv), sb(uv), reveal(e, p, max(t.softness, 0.001)));
+        }
+        case 10u: {
+            let d = uv - vec2<f32>(0.5);
+            let e = fract(atan2(d.x, -d.y) / 6.2831853 + 1.0);
+            out = mix(sa(uv), sb(uv), reveal(e, p, max(t.softness * 0.25, 0.001)));
+        }
+        case 11u: {
+            var e = abs(uv.x - 0.5) * 2.0;
+            if (abs(t.dir.y) > 0.5) {
+                e = abs(uv.y - 0.5) * 2.0;
+            }
+            out = mix(sa(uv), sb(uv), reveal(e, p, max(t.softness, 0.001)));
+        }
+        case 12u: {
+            let c = vec2<f32>(0.5);
+            let k = sin(3.14159265 * p);
+            let zoom = 1.0 + 1.2 * k;
+            let w = smoothstep(0.4, 0.6, p);
+            var acc = vec3<f32>(0.0);
+            for (var i = 0; i < 16; i = i + 1) {
+                let s = 1.0 - 0.35 * k * (f32(i) / 15.0);
+                let q = clamp(c + (uv - c) / zoom * s, vec2<f32>(0.0), vec2<f32>(1.0));
+                acc = acc + mix(sa(q), sb(q), w);
+            }
+            out = acc / 16.0;
+        }
+        case 13u: {
+            out = blur_mix(uv, smoothstep(0.0, 1.0, p), sin(3.14159265 * p) * 0.02);
         }
         default: {
             out = mix(sa(uv), sb(uv), p);

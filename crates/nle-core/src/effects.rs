@@ -63,6 +63,20 @@ pub enum EffectKind {
     /// AI depth map (local ONNX depth model): show depth, depth fog, or
     /// keep only a near / far range.
     DepthMap,
+    /// Reflects one half (or a quadrant) of the frame onto the other.
+    Mirror,
+    /// Radial mirror segments around a centre.
+    Kaleidoscope,
+    /// Quantises each channel to a few levels.
+    Posterize,
+    /// Negative image (RGB) or inverted brightness (luma).
+    Invert,
+    /// Black & white, sepia or a two-colour duotone map.
+    Tint,
+    /// Sobel edges, emboss relief or a pencil-sketch look.
+    FindEdges,
+    /// Cinema bars for a chosen aspect ratio.
+    Letterbox,
 }
 
 /// Which per-frame AI matte an effect reads (see `FrameSource::matte`).
@@ -252,6 +266,33 @@ const DEPTH_MAP: &[ParamDef] = &[
     color("Fog Green", 0.8),
     color("Fog Blue", 0.85),
 ];
+pub const MIRROR_MODES: &[&str] = &["Left onto Right", "Right onto Left", "Top onto Bottom", "Bottom onto Top", "Quad"];
+const MIRROR: &[ParamDef] = &[choice("Mode", MIRROR_MODES, 0.0), num("Center", 0.0, 1.0, 0.5, "")];
+const KALEIDOSCOPE: &[ParamDef] = &[
+    int("Segments", 2.0, 16.0, 6.0),
+    num("Angle", 0.0, 360.0, 0.0, "°"),
+    num("Center X", -0.5, 0.5, 0.0, ""),
+    num("Center Y", -0.5, 0.5, 0.0, ""),
+    num("Zoom", 0.25, 4.0, 1.0, "x"),
+];
+const POSTERIZE: &[ParamDef] = &[int("Levels", 2.0, 32.0, 6.0), num("Mix", 0.0, 1.0, 1.0, "")];
+const INVERT: &[ParamDef] = &[num("Amount", 0.0, 1.0, 1.0, ""), choice("Channel", &["RGB", "Luma"], 0.0)];
+pub const TINT_MODES: &[&str] = &["Black & White", "Sepia", "Duotone"];
+const TINT: &[ParamDef] = &[
+    choice("Mode", TINT_MODES, 0.0),
+    num("Amount", 0.0, 1.0, 1.0, ""),
+    color("Shadow Red", 0.08),
+    color("Shadow Green", 0.05),
+    color("Shadow Blue", 0.3),
+    color("Highlight Red", 1.0),
+    color("Highlight Green", 0.85),
+    color("Highlight Blue", 0.5),
+];
+pub const EDGE_MODES: &[&str] = &["Edges", "Emboss", "Sketch"];
+const FIND_EDGES: &[ParamDef] = &[choice("Mode", EDGE_MODES, 0.0), num("Strength", 0.0, 8.0, 2.0, ""), num("Mix", 0.0, 1.0, 1.0, "")];
+pub const LETTERBOX_ASPECTS: &[&str] = &["2.39:1", "2.00:1", "1.85:1", "4:3", "1:1", "9:16"];
+const LETTERBOX: &[ParamDef] =
+    &[choice("Aspect", LETTERBOX_ASPECTS, 0.0), num("Opacity", 0.0, 1.0, 1.0, ""), color("Bar Red", 0.0), color("Bar Green", 0.0), color("Bar Blue", 0.0)];
 const LEVELS: &[ParamDef] = &[
     num("Input Black", 0.0, 1.0, 0.0, ""),
     num("Input White", 0.0, 1.0, 1.0, ""),
@@ -262,7 +303,7 @@ const LEVELS: &[ParamDef] = &[
 ];
 
 impl EffectKind {
-    pub const ALL: [EffectKind; 22] = [
+    pub const ALL: [EffectKind; 29] = [
         EffectKind::MotionBlur,
         EffectKind::Halation,
         EffectKind::CameraShake,
@@ -285,6 +326,13 @@ impl EffectKind {
         EffectKind::Levels,
         EffectKind::PersonMatte,
         EffectKind::DepthMap,
+        EffectKind::Mirror,
+        EffectKind::Kaleidoscope,
+        EffectKind::Posterize,
+        EffectKind::Invert,
+        EffectKind::Tint,
+        EffectKind::FindEdges,
+        EffectKind::Letterbox,
     ];
 
     pub fn label(self) -> &'static str {
@@ -311,6 +359,13 @@ impl EffectKind {
             EffectKind::Levels => "Levels",
             EffectKind::PersonMatte => "Person Matte (AI)",
             EffectKind::DepthMap => "Depth Map (AI)",
+            EffectKind::Mirror => "Mirror",
+            EffectKind::Kaleidoscope => "Kaleidoscope",
+            EffectKind::Posterize => "Posterize",
+            EffectKind::Invert => "Invert",
+            EffectKind::Tint => "Black & White / Tint",
+            EffectKind::FindEdges => "Find Edges / Emboss",
+            EffectKind::Letterbox => "Letterbox",
         }
     }
 
@@ -330,6 +385,13 @@ impl EffectKind {
             EffectKind::RgbSplitGlitch | EffectKind::ImpactFlash => "Glitch & Impact",
             EffectKind::NeonOutline => "Stylize",
             EffectKind::GamingReframe916 => "Reframe",
+            EffectKind::Mirror => "Distort",
+            EffectKind::Kaleidoscope => "Distort",
+            EffectKind::Posterize => "Stylize",
+            EffectKind::Invert => "Color",
+            EffectKind::Tint => "Color",
+            EffectKind::FindEdges => "Stylize",
+            EffectKind::Letterbox => "Stylize",
         }
     }
 
@@ -357,6 +419,13 @@ impl EffectKind {
             EffectKind::Levels => LEVELS,
             EffectKind::PersonMatte => PERSON_MATTE,
             EffectKind::DepthMap => DEPTH_MAP,
+            EffectKind::Mirror => MIRROR,
+            EffectKind::Kaleidoscope => KALEIDOSCOPE,
+            EffectKind::Posterize => POSTERIZE,
+            EffectKind::Invert => INVERT,
+            EffectKind::Tint => TINT,
+            EffectKind::FindEdges => FIND_EDGES,
+            EffectKind::Letterbox => LETTERBOX,
         }
     }
 
@@ -439,7 +508,7 @@ impl Effect {
                 _ => v as f32,
             };
         }
-        ResolvedEffect { kind: self.kind, values, mask: self.mask.as_ref().map(|m| m.resolve()) }
+        ResolvedEffect { kind: self.kind, values, mask: self.mask.as_ref().map(|m| m.at(t).resolve()) }
     }
 }
 
@@ -481,6 +550,12 @@ impl ResolvedEffect {
             EffectKind::HueSatLightness => v[0] == 0.0 && v[1] == 0.0 && v[2] == 0.0,
             EffectKind::Levels => v[0] <= 0.0 && v[1] >= 1.0 && v[2] == 1.0 && v[3] <= 0.0 && v[4] >= 1.0,
             EffectKind::PersonMatte | EffectKind::DepthMap => false,
+            EffectKind::Mirror | EffectKind::Kaleidoscope => false,
+            EffectKind::Posterize => v[1] <= 0.0,
+            EffectKind::Invert => v[0] <= 0.0,
+            EffectKind::Tint => v[1] <= 0.0,
+            EffectKind::FindEdges => v[2] <= 0.0,
+            EffectKind::Letterbox => v[1] <= 0.0,
         }
     }
 }
@@ -554,7 +629,10 @@ mod tests {
         let mut e = Effect::new(Vignette);
         e.params[0].value = -0.4; // white vignette is still an effect
         assert!(!e.resolve(Time::ZERO).is_noop());
-        assert_eq!(EffectKind::ALL.len(), 22);
+        assert_eq!(EffectKind::ALL.len(), 29);
+        for k in [Mirror, Kaleidoscope, Posterize, Invert, Tint, FindEdges, Letterbox] {
+            assert!(!Effect::new(k).resolve(Time::ZERO).is_noop(), "{k:?} defaults do something");
+        }
         for k in [PersonMatte, DepthMap] {
             assert!(!Effect::new(k).resolve(Time::ZERO).is_noop() && k.matte().is_some(), "{k:?}");
         }

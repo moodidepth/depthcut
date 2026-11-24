@@ -78,6 +78,8 @@ pub struct TitleAnim {
     pub pill_glide: f32,
     /// Word-highlight: words from this index on are not spoken yet (dimmed).
     pub dim_from: Option<usize>,
+    /// Rolling title progress 0..1 (block enters at 0, has left at 1).
+    pub roll: f32,
 }
 
 impl Default for TitleAnim {
@@ -96,6 +98,7 @@ impl Default for TitleAnim {
             pill_from: None,
             pill_glide: 1.0,
             dim_from: None,
+            roll: 0.0,
         }
     }
 }
@@ -196,6 +199,9 @@ pub fn title_anim(p: &TitleParams, local: Time, duration: Time) -> TitleAnim {
     let left = (dur - t).max(0.0);
     let u_out = (left / a_in).clamp(0.0, 1.0);
     let mut s = TitleAnim::default();
+    if p.roll != crate::clip::RollMode::None {
+        s.roll = (t / dur).clamp(0.0, 1.0);
+    }
     match p.animation {
         TextAnimation::None => {}
         TextAnimation::PopBounce => {

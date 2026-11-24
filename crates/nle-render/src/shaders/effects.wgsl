@@ -827,3 +827,170 @@ fn depth_map(@builtin(global_invocation_id) id: vec3<u32>) {
     let hi = select(1.0 - smoothstep(near - s, near + s, d), 1.0, near >= 0.999);
     textureStore(dst, vec2<i32>(id.xy), vec4<f32>(base.rgb, base.a * lo * hi));
 }
+
+// ----- distort / stylize / colour (phase 8) ----------------------------------
+
+fn tri_wrap(q: vec2<f32>) -> vec2<f32> {
+    // mirrored repeat: 0..1 as is, 1..2 reflected, and so on
+    return vec2<f32>(1.0) - abs(fract(q * 0.5) * 2.0 - vec2<f32>(1.0));
+}
+
+// a = (mode 0 L→R / 1 R→L / 2 T→B / 3 B→T / 4 quad, centre)
+@compute @workgroup_size(8, 8, 1)
+fn mirror_fx(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (!inside(id)) {
+        return;
+    }
+    var uv = px_uv(id);
+    let c = u.a.y;
+    switch u32(u.a.x + 0.5) {
+        case 0u: {
+            if (uv.x > c) { uv.x = 2.0 * c - uv.x; }
+        }
+        case 1u: {
+            if (uv.x < c) { uv.x = 2.0 * c - uv.x; }
+        }
+        case 2u: {
+            if (uv.y > c) { uv.y = 2.0 * c - uv.y; }
+        }
+        case 3u: {
+            if (uv.y < c) { uv.y = 2.0 * c - uv.y; }
+        }
+        default: {
+            if (uv.x > 0.5) { uv.x = 1.0 - uv.x; }
+            if (uv.y > 0.5) { uv.y = 1.0 - uv.y; }
+        }
+    }
+    textureStore(dst, vec2<i32>(id.xy), textureSampleLevel(src, samp, tri_wrap(uv), 0.0));
+}
+
+// a = (segments, angle°, centre x, centre y), b.x = zoom
+@compute @workgroup_size(8, 8, 1)
+fn kaleidoscope(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (!inside(id)) {
+        return;
+    }
+    let uv = px_uv(id);
+    let asp = vec2<f32>(u.dims.x / u.dims.y, 1.0);
+    let c = vec2<f32>(0.5 + u.a.z, 0.5 + u.a.w);
+    let p = (uv - c) * asp;
+    let r = length(p) / max(u.b.x, 0.01);
+    let rot = radians(u.a.y);
+    let seg = 6.2831853 / max(round(u.a.x), 1.0);
+    var a = atan2(p.y, p.x) - rot;
+    a = a - seg * floor(a / seg);
+    if (a > seg * 0.5) {
+        a = seg - a;
+    }
+    a = a + rot;
+    let q = c + vec2<f32>(cos(a), sin(a)) * r / asp;
+    textureStore(dst, vec2<i32>(id.xy), textureSampleLevel(src, samp, tri_wrap(q), 0.0));
+}
+
+// a = (levels, mix)
+@compute @workgroup_size(8, 8, 1)
+fn posterize(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (!inside(id)) {
+        return;
+    }
+    let base = textureLoad(src, vec2<i32>(id.xy), 0);
+    let n = max(round(u.a.x), 2.0) - 1.0;
+    let q = floor(clamp(base.rgb, vec3<f32>(0.0), vec3<f32>(1.0)) * n + vec3<f32>(0.5)) / n;
+    textureStore(dst, vec2<i32>(id.xy), vec4<f32>(mix(base.rgb, q, clamp(u.a.y, 0.0, 1.0)), base.a));
+}
+
+// a = (amount, channel 0 RGB / 1 luma)
+@compute @workgroup_size(8, 8, 1)
+fn invert(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (!inside(id)) {
+        return;
+    }
+    let base = textureLoad(src, vec2<i32>(id.xy), 0);
+    let c = clamp(base.rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+    var inv = vec3<f32>(1.0) - c;
+    if (u.a.y > 0.5) {
+        inv = max(c + vec3<f32>(1.0 - 2.0 * dot(c, LUMA)), vec3<f32>(0.0));
+    }
+    textureStore(dst, vec2<i32>(id.xy), vec4<f32>(mix(base.rgb, inv, clamp(u.a.x, 0.0, 1.0)), base.a));
+}
+
+// a = (mode 0 b&w / 1 sepia / 2 duotone, amount, shadow r, shadow g), b = (shadow b, highlight rgb)
+@compute @workgroup_size(8, 8, 1)
+fn tint(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (!inside(id)) {
+        return;
+    }
+    let base = textureLoad(src, vec2<i32>(id.xy), 0);
+    let c = base.rgb;
+    let l = dot(c, LUMA);
+    var t = vec3<f32>(l);
+    switch u32(u.a.x + 0.5) {
+        case 1u: {
+            t = vec3<f32>(dot(c, vec3<f32>(0.393, 0.769, 0.189)), dot(c, vec3<f32>(0.349, 0.686, 0.168)), dot(c, vec3<f32>(0.272, 0.534, 0.131)));
+        }
+        case 2u: {
+            t = mix(vec3<f32>(u.a.z, u.a.w, u.b.x), vec3<f32>(u.b.y, u.b.z, u.b.w), clamp(l, 0.0, 1.0));
+        }
+        default: {}
+    }
+    textureStore(dst, vec2<i32>(id.xy), vec4<f32>(mix(c, t, clamp(u.a.y, 0.0, 1.0)), base.a));
+}
+
+// a = (mode 0 edges / 1 emboss / 2 sketch, strength, mix)
+@compute @workgroup_size(8, 8, 1)
+fn find_edges(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (!inside(id)) {
+        return;
+    }
+    let uv = px_uv(id);
+    let base = textureSampleLevel(src, samp, uv, 0.0);
+    let t = vec2<f32>(max(u.k, 1.0)) / u.dims;
+    var l: array<f32, 9>;
+    for (var j = 0; j < 3; j = j + 1) {
+        for (var i = 0; i < 3; i = i + 1) {
+            let o = vec2<f32>(f32(i - 1), f32(j - 1)) * t;
+            l[j * 3 + i] = dot(textureSampleLevel(src, samp, uv + o, 0.0).rgb, LUMA);
+        }
+    }
+    let gx = (l[2] + 2.0 * l[5] + l[8]) - (l[0] + 2.0 * l[3] + l[6]);
+    let gy = (l[6] + 2.0 * l[7] + l[8]) - (l[0] + 2.0 * l[1] + l[2]);
+    let s = u.a.y;
+    var e: vec3<f32>;
+    switch u32(u.a.x + 0.5) {
+        case 1u: {
+            e = vec3<f32>(clamp(0.5 + (gx + gy) * s * 0.25, 0.0, 1.0));
+        }
+        case 2u: {
+            e = vec3<f32>(clamp(1.0 - length(vec2<f32>(gx, gy)) * s, 0.0, 1.0));
+        }
+        default: {
+            e = vec3<f32>(clamp(length(vec2<f32>(gx, gy)) * s, 0.0, 1.0));
+        }
+    }
+    textureStore(dst, vec2<i32>(id.xy), vec4<f32>(mix(base.rgb, e, clamp(u.a.z, 0.0, 1.0)), base.a));
+}
+
+// a = (aspect choice, opacity, bar r, bar g), b.x = bar b
+@compute @workgroup_size(8, 8, 1)
+fn letterbox(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (!inside(id)) {
+        return;
+    }
+    let uv = px_uv(id);
+    let base = textureLoad(src, vec2<i32>(id.xy), 0);
+    var ratios = array<f32, 6>(2.39, 2.0, 1.85, 1.3333333, 1.0, 0.5625);
+    let target_ratio = ratios[min(u32(u.a.x + 0.5), 5u)];
+    let fr = u.dims.x / u.dims.y;
+    var bar = false;
+    if (target_ratio > fr) {
+        bar = abs(uv.y - 0.5) > 0.5 * fr / target_ratio;
+    } else {
+        bar = abs(uv.x - 0.5) > 0.5 * target_ratio / fr;
+    }
+    var out = base;
+    if (bar) {
+        let o = clamp(u.a.y, 0.0, 1.0);
+        out = vec4<f32>(mix(base.rgb, vec3<f32>(u.a.z, u.a.w, u.b.x), o), max(base.a, o));
+    }
+    textureStore(dst, vec2<i32>(id.xy), out);
+}

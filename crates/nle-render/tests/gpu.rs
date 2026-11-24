@@ -73,6 +73,10 @@ fn media_layer(asset: AssetId) -> Layer {
     Layer::new(ClipId(1), 0, LayerSource::Media { asset, source_time: Time::ZERO, speed: 1.0, blend: FrameBlendMode::FloorFrame })
 }
 
+fn mean_row_y(nv12: &[u8], y: u32) -> f32 {
+    (0..W).map(|x| nv12[(y * W + x) as usize] as f32).sum::<f32>() / W as f32
+}
+
 fn mean_y(nv12: &[u8], x0: u32, x1: u32) -> f32 {
     let mut s = 0u64;
     let mut n = 0u64;
@@ -230,7 +234,33 @@ fn gpu_pipeline_end_to_end() {
         };
         let out = r.render_nv12(&Composition::new(Time::ZERO, vec![tr]), &mut src, RenderOptions::default());
         assert_eq!(out.len(), (W * H * 3 / 2) as usize);
+        // every kind starts on A and ends on B
+        for (p, want) in [(0.0, 180.0), (1.0, 40.0)] {
+            let tr = RenderNode::Transition {
+                from: Some(Box::new(media_layer(a))),
+                to: Some(Box::new(media_layer(b))),
+                transition: ResolvedTransition { kind, direction: Direction::Right, softness: 0.2, progress: p },
+            };
+            let y = mean_y(&r.render_nv12(&Composition::new(Time::ZERO, vec![tr]), &mut src, RenderOptions::default()), 0, W);
+            assert!((y - want).abs() <= 3.0, "{kind:?} at {p}: {y}");
+        }
     }
+    // wipes reveal B from one side / the centre first
+    let half = |r: &mut Renderer, src: &mut Solid, kind: TransitionKind, dir: Direction| {
+        let tr = RenderNode::Transition {
+            from: Some(Box::new(media_layer(a))),
+            to: Some(Box::new(media_layer(b))),
+            transition: ResolvedTransition { kind, direction: dir, softness: 0.05, progress: 0.3 },
+        };
+        let out = r.render_nv12(&Composition::new(Time::ZERO, vec![tr]), src, RenderOptions::default());
+        (mean_y(&out, 0, 6), mean_y(&out, W / 2 - 3, W / 2 + 3), mean_y(&out, W - 6, W))
+    };
+    let (l, _, rt) = half(&mut r, &mut src, TransitionKind::Wipe, Direction::Left);
+    assert!(rt < 60.0 && l > 160.0, "wipe left reveals B on the right first: {l} {rt}");
+    let (l, c, rt) = half(&mut r, &mut src, TransitionKind::Iris, Direction::Left);
+    assert!(c < 120.0 && l > 160.0 && rt > 160.0, "iris opens in the centre: {l} {c} {rt}");
+    let (l, c, rt) = half(&mut r, &mut src, TransitionKind::BarnDoor, Direction::Left);
+    assert!(c < 60.0 && l > 160.0 && rt > 160.0, "barn door opens in the centre: {l} {c} {rt}");
 
     // 7. Titles: white glyphs, centred, over black (needs a system font)
     let title = Layer { source: LayerSource::Title(Box::new(TitleParams { text: "Hi".into(), font_size: 900.0, ..Default::default() }), TitleAnim::default()), ..media_layer(a) };
@@ -243,6 +273,33 @@ fn gpu_pipeline_end_to_end() {
         let cy = lit.iter().map(|p| p.1 as f32).sum::<f32>() / lit.len() as f32;
         assert!((cx - W as f32 / 2.0).abs() < W as f32 * 0.2 && (cy - H as f32 / 2.0).abs() < H as f32 * 0.25, "title centred: ({cx}, {cy})");
         assert!(out[0] <= 20, "background stays black");
+    }
+    // 8. Shape generator (no font needed): a white rectangle filling the middle
+    let rect = TitleParams {
+        text: String::new(),
+        shape: Some(nle_core::ShapeSpec { size: [1080.0 * W as f32 / H as f32 * 0.5, 540.0], ..nle_core::ShapeSpec::new(nle_core::ShapeKind::Rectangle) }),
+        shadow_enabled: false,
+        ..Default::default()
+    };
+    let shape = Layer { source: LayerSource::Title(Box::new(rect), TitleAnim::default()), ..media_layer(a) };
+    let out = r.render_nv12(&Composition::new(Time::ZERO, vec![RenderNode::Layer(shape)]), &mut src, RenderOptions::default());
+    let y_at = |x: u32, y: u32| out[(y * W + x) as usize];
+    assert!(y_at(W / 2, H / 2) > 200, "shape centre is white: {}", y_at(W / 2, H / 2));
+    assert!(y_at(2, 2) <= 20 && y_at(W / 2, 2) <= 20, "outside the shape stays black");
+    // 9. Rolling credits through the real path: the mask is frame-tall and moves up
+    if nle_render::text::FontBook::system().has_fonts() {
+        let credits = TitleParams { text: "HI
+HI
+HI
+HI".into(), font_size: 600.0, roll: nle_core::RollMode::Up, shadow_enabled: false, ..Default::default() };
+        let mut first_lit = |roll: f32| {
+            let l = Layer { source: LayerSource::Title(Box::new(credits.clone()), TitleAnim { roll, ..Default::default() }), ..media_layer(a) };
+            let out = r.render_nv12(&Composition::new(Time::ZERO, vec![RenderNode::Layer(l)]), &mut src, RenderOptions::default());
+            (0..H).find(|&y| (0..W).any(|x| out[(y * W + x) as usize] > 128))
+        };
+        assert_eq!(first_lit(0.0), None, "credits start below the frame");
+        let (a1, a2) = (first_lit(0.1).expect("credits enter"), first_lit(0.15).expect("credits move"));
+        assert!(a2 < a1, "credits roll up: {a1} -> {a2}");
     }
 
     assert!(r.stats().cache_frames >= 1);
@@ -379,6 +436,16 @@ fn gpu_effects_and_animated_titles() {
             EffectKind::ChromaKey => {}
             // no matte from this source: AI mattes pass through (tests/matte.rs)
             EffectKind::PersonMatte | EffectKind::DepthMap => assert!((y - base_y).abs() < 1.0, "{kind:?} without a matte: {y}"),
+            EffectKind::Mirror | EffectKind::Kaleidoscope => assert!((y - base_y).abs() < 2.0, "{kind:?} keeps a flat frame flat: {y}"),
+            // grey stays grey through black & white
+            EffectKind::Tint => assert!((y - base_y).abs() < 3.0, "b&w of grey: {y}"),
+            EffectKind::Posterize => assert!((y - base_y).abs() < 30.0, "posterize stays near: {y}"),
+            EffectKind::Invert => assert!(y < base_y - 60.0, "invert darkens a light grey: {y}"),
+            EffectKind::FindEdges => assert!(y < 40.0, "a flat frame has no edges: {y}"),
+            EffectKind::Letterbox => {
+                let (top, mid) = (mean_row_y(&out, 0), mean_row_y(&out, H / 2));
+                assert!(top < 30.0 && (mid - base_y).abs() < 2.0, "2.39 bars top and bottom: {top} {mid}");
+            }
         }
     }
 

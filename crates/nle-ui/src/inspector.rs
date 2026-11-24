@@ -10,7 +10,7 @@ use crate::widgets::{color_wheel, param_row, slider_f32, ParamSpec};
 use eframe::egui::{self, Color32, Stroke};
 use nle_core::{
     AudioRole, BlendMode, Clip, ClipKind, Command, CropAspect, CropMode, Direction, Effect, EffectKind, FadeShape, FrameBlendMode, FrameRate, Interpolation, LutRef, ParamKind,
-    Retime, TextAnimation, Time, TitleStyle, Transition, TransitionKind, VideoFormat,
+    Retime, RollMode, ShapeKind, ShapeSpec, TextAnimation, Time, TitleParams, TitleStyle, Transition, TransitionKind, VideoFormat,
 };
 use nle_media::analysis::{normalize_gain_db, TARGET_LUFS};
 
@@ -60,6 +60,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 
     let mut retime_action: Option<RetimeAction> = None;
     let mut add_title: Option<bool> = None;
+    let mut pick_template: Option<(String, TitleParams)> = None;
+    let mut templates = std::mem::take(&mut app.title_templates);
+    templates.ensure_loaded();
     let mut analyze_beats = false;
     let mut multiband_beats = false;
     let mut scan_kills = false;
@@ -107,7 +110,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             &mut learn_noise,
             &busses,
         ),
-        InspectorTab::TitlesTransitions => titles_tab(ui, &mut c, &mut add_title),
+        InspectorTab::TitlesTransitions => titles_tab(ui, &mut c, &mut add_title, &mut templates, &mut pick_template),
         InspectorTab::Motion => motion_action = crate::motion_ui::tab(ui, &mut c, &motion_cx, motion_ui),
     });
 
@@ -155,8 +158,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         Some(RetimeAction::Blend(m)) => app.set_retime_blend(m),
         None => {}
     }
+    app.title_templates = templates;
     if let Some(lt) = add_title {
         app.add_title(lt);
+    }
+    if let Some((name, params)) = pick_template {
+        app.add_title_with(&name, params);
     }
     if analyze_beats {
         app.analyze_selected_beats();
@@ -714,7 +721,7 @@ fn effects_section(ui: &mut egui::Ui, effects: &mut Vec<Effect>, t: Time, f: Tim
                             i += 1;
                         }
                         egui::CollapsingHeader::new("Mask").id_salt(("fx-mask", id)).default_open(e.mask.is_some()).show(ui, |ui| {
-                            mask_editor(ui, &mut e.mask, MaskFocus::Effect(id), &mut view.mask_focus);
+                            mask_editor(ui, &mut e.mask, MaskFocus::Effect(id), &mut view.mask_focus, t, Time(f.0 / 2));
                         });
                     }
                 });
@@ -1042,7 +1049,36 @@ fn audio_tab(
 
 // ---------------------------------------------------------------------------
 
-fn titles_tab(ui: &mut egui::Ui, c: &mut Clip, add_title: &mut Option<bool>) {
+/// Saved user title templates (`title_templates.json` in the data folder).
+#[derive(Default)]
+pub struct TitleTemplates {
+    pub user: Vec<(String, TitleParams)>,
+    /// Name typed for "Save as Template".
+    pub name: String,
+    pub error: Option<String>,
+    loaded: bool,
+}
+
+impl TitleTemplates {
+    fn path() -> std::path::PathBuf {
+        nle_media::paths::local_data_dir().join("title_templates.json")
+    }
+
+    pub fn ensure_loaded(&mut self) {
+        if !self.loaded {
+            self.loaded = true;
+            self.user = std::fs::read(Self::path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        }
+    }
+
+    fn save(&mut self) {
+        let path = Self::path();
+        let res = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|_| std::fs::write(&path, serde_json::to_vec_pretty(&self.user).unwrap_or_default()));
+        self.error = res.err().map(|e| format!("Could not save templates: {e}"));
+    }
+}
+
+fn titles_tab(ui: &mut egui::Ui, c: &mut Clip, add_title: &mut Option<bool>, tpl: &mut TitleTemplates, pick: &mut Option<(String, TitleParams)>) {
     ui.horizontal(|ui| {
         if ui.button("＋ Basic Title").clicked() {
             *add_title = Some(false);
@@ -1051,10 +1087,97 @@ fn titles_tab(ui: &mut egui::Ui, c: &mut Clip, add_title: &mut Option<bool>) {
             *add_title = Some(true);
         }
     });
+    section(ui, "Templates", |ui| {
+        ui.label(egui::RichText::new("Click to add at the playhead").small().color(theme::TEXT_DIM));
+        ui.horizontal_wrapped(|ui| {
+            for (name, p) in TitleParams::templates() {
+                if ui.small_button(name).clicked() {
+                    *pick = Some((name.into(), p));
+                }
+            }
+        });
+        if !tpl.user.is_empty() {
+            ui.label(egui::RichText::new("My templates (right-click to delete)").small().color(theme::TEXT_DIM));
+            let mut delete = None;
+            ui.horizontal_wrapped(|ui| {
+                for (i, (name, p)) in tpl.user.iter().enumerate() {
+                    let r = ui.small_button(name);
+                    if r.clicked() {
+                        *pick = Some((name.clone(), p.clone()));
+                    }
+                    r.context_menu(|ui| {
+                        if ui.button("Delete Template").clicked() {
+                            delete = Some(i);
+                            ui.close_menu();
+                        }
+                    });
+                }
+            });
+            if let Some(i) = delete {
+                tpl.user.remove(i);
+                tpl.save();
+            }
+        }
+        if let ClipKind::Title(tp) = &c.kind {
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut tpl.name).hint_text("Template name").desired_width(150.0));
+                let name = tpl.name.trim().to_string();
+                if ui.add_enabled(!name.is_empty(), egui::Button::new("Save as Template")).on_hover_text("Save this title's look and text; same name replaces").clicked() {
+                    tpl.user.retain(|(n, _)| *n != name);
+                    tpl.user.push((name, TitleParams::clone(tp)));
+                    tpl.name.clear();
+                    tpl.save();
+                }
+            });
+        }
+        if let Some(e) = &tpl.error {
+            ui.colored_label(theme::PLAYHEAD, e);
+        }
+    });
     if let ClipKind::Title(tp) = &mut c.kind {
+        section(ui, "Shape", |ui| {
+            ui.horizontal_wrapped(|ui| {
+                if ui.selectable_label(tp.shape.is_none(), "Text").clicked() {
+                    tp.shape = None;
+                }
+                for k in ShapeKind::ALL {
+                    let on = tp.shape.as_ref().is_some_and(|s| s.kind == k);
+                    if ui.selectable_label(on, k.label()).clicked() && !on {
+                        tp.shape = Some(match tp.shape.take() {
+                            Some(s) => ShapeSpec { kind: k, ..s },
+                            None => ShapeSpec::new(k),
+                        });
+                    }
+                }
+            });
+            if let Some(s) = &mut tp.shape {
+                ui.label(egui::RichText::new("The shape replaces the text; Color fills it, outline / shadow / animation apply.").small().color(theme::TEXT_DIM));
+                slider_f32(ui, "Width", &mut s.size[0], 1.0..=3840.0, " px");
+                slider_f32(ui, if s.kind == ShapeKind::Line { "Thickness" } else { "Height" }, &mut s.size[1], 1.0..=2160.0, " px");
+                if s.kind == ShapeKind::RoundedRect {
+                    slider_f32(ui, "Corner", &mut s.radius, 0.0..=600.0, " px");
+                }
+                if s.kind == ShapeKind::Star {
+                    ui.horizontal(|ui| {
+                        ui.add_sized([96.0, 20.0], egui::Label::new(egui::RichText::new("Points").color(theme::TEXT_DIM)));
+                        ui.add(egui::Slider::new(&mut s.points, 3..=24));
+                    });
+                    slider_f32(ui, "Inner", &mut s.inner, 0.05..=1.0, "");
+                }
+                slider_f32(ui, "Rotation", &mut s.rotation, -180.0..=180.0, "°");
+            }
+        });
         section(ui, "Text", |ui| {
-            ui.add(egui::TextEdit::multiline(&mut tp.text).desired_rows(2).desired_width(f32::INFINITY));
+            ui.add(egui::TextEdit::multiline(&mut tp.text).hint_text("One row per line; \"Role | Name\" makes credit columns").desired_rows(2).desired_width(f32::INFINITY));
             ui.add(egui::TextEdit::singleline(&mut tp.subtitle).hint_text("Subtitle").desired_width(f32::INFINITY));
+            ui.horizontal(|ui| {
+                ui.add_sized([96.0, 20.0], egui::Label::new(egui::RichText::new("Scroll").color(theme::TEXT_DIM)));
+                for r in RollMode::ALL {
+                    ui.selectable_value(&mut tp.roll, r, r.label());
+                }
+            })
+            .response
+            .on_hover_text("Roll: credits move bottom to top over the clip; Crawl: right to left. Trim the clip to set the speed.");
             ui.horizontal(|ui| {
                 ui.add_sized([96.0, 20.0], egui::Label::new(egui::RichText::new("Style").color(theme::TEXT_DIM)));
                 for s in TitleStyle::ALL {

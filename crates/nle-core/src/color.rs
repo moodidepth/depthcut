@@ -376,12 +376,67 @@ pub struct ShapeMask {
     /// at the track's reference frame.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub track: Option<u64>,
+    /// Bézier tangents per point as `[in dx, in dy, out dx, out dy]`
+    /// (offsets from the point). When there is one per point the outline is
+    /// a cubic Bézier spline and `smooth` is ignored.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub handles: Vec<[f32; 4]>,
+    /// Rotoscoping: the polygon's shape at clip-local times. Between keys
+    /// every point (and tangent) moves in a straight line.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shape_keys: Vec<ShapeKey>,
+}
+
+/// Mask points and Bézier handles at one time.
+pub type ShapePose = (Vec<[f32; 2]>, Vec<[f32; 4]>);
+
+/// A polygon mask's points (and Bézier tangents) at one time.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ShapeKey {
+    pub time: Time,
+    pub points: Vec<[f32; 2]>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub handles: Vec<[f32; 4]>,
 }
 
 impl Default for ShapeMask {
     fn default() -> Self {
-        ShapeMask { shape: MaskShape::Ellipse, center: [0.5, 0.5], size: [0.3, 0.3], rotation: 0.0, feather: 0.05, invert: false, points: Vec::new(), smooth: false, track: None }
+        ShapeMask {
+            shape: MaskShape::Ellipse,
+            center: [0.5, 0.5],
+            size: [0.3, 0.3],
+            rotation: 0.0,
+            feather: 0.05,
+            invert: false,
+            points: Vec::new(),
+            smooth: false,
+            track: None,
+            handles: Vec::new(),
+            shape_keys: Vec::new(),
+        }
     }
+}
+
+fn cubic(a: [f32; 2], b: [f32; 2], c: [f32; 2], d: [f32; 2], t: f32) -> [f32; 2] {
+    let u = 1.0 - t;
+    let (w0, w1, w2, w3) = (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
+    [w0 * a[0] + w1 * b[0] + w2 * c[0] + w3 * d[0], w0 * a[1] + w1 * b[1] + w2 * c[1] + w3 * d[1]]
+}
+
+/// Bézier tangents that reproduce the Catmull-Rom spline through `p`
+/// (closed), or zero (sharp corners) when `smooth` is false.
+fn tangents_for(p: &[[f32; 2]], smooth: bool) -> Vec<[f32; 4]> {
+    let n = p.len();
+    (0..n)
+        .map(|i| {
+            if !smooth || n < 3 {
+                return [0.0; 4];
+            }
+            let (a, b) = (p[(i + n - 1) % n], p[(i + 1) % n]);
+            let t = [(b[0] - a[0]) / 6.0, (b[1] - a[1]) / 6.0];
+            [-t[0], -t[1], t[0], t[1]]
+        })
+        .collect()
 }
 
 impl ShapeMask {
@@ -393,10 +448,31 @@ impl ShapeMask {
         m
     }
 
+    /// True when every point carries Bézier tangents.
+    pub fn is_bezier(&self) -> bool {
+        !self.points.is_empty() && self.handles.len() == self.points.len()
+    }
+
     /// The polygon outline the GPU tests against: the vertices, or the
-    /// flattened spline when `smooth` (at most [`MAX_MASK_POINTS`]).
+    /// flattened spline when Bézier / `smooth` (at most [`MAX_MASK_POINTS`]).
     pub fn outline(&self) -> Vec<[f32; 2]> {
         let p = &self.points;
+        if self.is_bezier() && p.len() >= 3 {
+            let h = &self.handles;
+            let n = p.len().min(MAX_MASK_POINTS);
+            let per = (MAX_MASK_POINTS / n).max(1);
+            let mut out = Vec::with_capacity(n * per);
+            for i in 0..n {
+                let j = (i + 1) % n;
+                let (a, d) = (p[i], p[j]);
+                let b = [a[0] + h[i][2], a[1] + h[i][3]];
+                let c = [d[0] + h[j][0], d[1] + h[j][1]];
+                for s in 0..per {
+                    out.push(cubic(a, b, c, d, s as f32 / per as f32));
+                }
+            }
+            return out;
+        }
         if !self.smooth || p.len() < 3 {
             return p.iter().take(MAX_MASK_POINTS).copied().collect();
         }
@@ -466,6 +542,162 @@ pub struct ResolvedMask {
 }
 
 impl ShapeMask {
+    /// Give every point Bézier tangents, keeping the current outline
+    /// (smooth points get Catmull-Rom tangents, sharp ones zero tangents).
+    /// Applies to every shape key too.
+    pub fn convert_to_bezier(&mut self) {
+        if self.is_bezier() {
+            return;
+        }
+        self.handles = tangents_for(&self.points, self.smooth);
+        for k in &mut self.shape_keys {
+            k.handles = tangents_for(&k.points, self.smooth);
+        }
+        self.smooth = false;
+    }
+
+    /// Drop the Bézier tangents (straight edges again).
+    pub fn clear_bezier(&mut self) {
+        self.handles.clear();
+        self.shape_keys.iter_mut().for_each(|k| k.handles.clear());
+    }
+
+    /// Insert a point before index `i` (wrapping). Bézier masks get a zero
+    /// tangent; every shape key gets the midpoint of its own edge so the
+    /// keys keep matching point counts.
+    pub fn insert_point(&mut self, i: usize, p: [f32; 2]) {
+        let i = i.min(self.points.len());
+        self.points.insert(i, p);
+        if self.handles.len() + 1 == self.points.len() {
+            self.handles.insert(i, [0.0; 4]);
+        }
+        for k in &mut self.shape_keys {
+            let n = k.points.len();
+            if n == 0 {
+                continue;
+            }
+            let (a, b) = (k.points[(i + n - 1) % n], k.points[i % n]);
+            k.points.insert(i.min(n), [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5]);
+            if k.handles.len() == n {
+                k.handles.insert(i.min(n), [0.0; 4]);
+            }
+        }
+    }
+
+    /// Remove point `i` from the shape and every key.
+    pub fn remove_point(&mut self, i: usize) {
+        if i >= self.points.len() {
+            return;
+        }
+        self.points.remove(i);
+        if i < self.handles.len() {
+            self.handles.remove(i);
+        }
+        for k in &mut self.shape_keys {
+            if i < k.points.len() {
+                k.points.remove(i);
+            }
+            if i < k.handles.len() {
+                k.handles.remove(i);
+            }
+        }
+    }
+
+    /// Points and tangents at clip-local `t` (None without shape keys).
+    pub fn shape_at(&self, t: Time) -> Option<ShapePose> {
+        let k = &self.shape_keys;
+        let i = k.iter().position(|x| x.time > t);
+        let one = |s: &ShapeKey| (s.points.clone(), s.handles.clone());
+        match i {
+            _ if k.is_empty() => None,
+            Some(0) => Some(one(&k[0])),
+            None => Some(one(&k[k.len() - 1])),
+            Some(i) => {
+                let (a, b) = (&k[i - 1], &k[i]);
+                if a.points.len() != b.points.len() {
+                    return Some(one(a));
+                }
+                let span = (b.time - a.time).as_secs_f64();
+                let u = if span > 0.0 { ((t - a.time).as_secs_f64() / span).clamp(0.0, 1.0) as f32 } else { 1.0 };
+                let pts = a.points.iter().zip(&b.points).map(|(p, q)| [lerp(p[0], q[0], u), lerp(p[1], q[1], u)]).collect();
+                let hs = if a.handles.len() == b.handles.len() {
+                    a.handles.iter().zip(&b.handles).map(|(p, q)| std::array::from_fn(|j| lerp(p[j], q[j], u))).collect()
+                } else {
+                    a.handles.clone()
+                };
+                Some((pts, hs))
+            }
+        }
+    }
+
+    /// This mask as it renders at clip-local `t`.
+    pub fn at(&self, t: Time) -> ShapeMask {
+        let mut m = self.clone();
+        if let Some((p, h)) = self.shape_at(t) {
+            m.points = p;
+            m.handles = h;
+        }
+        m.shape_keys.clear();
+        m
+    }
+
+    pub fn shape_key_near(&self, t: Time, tolerance: Time) -> Option<usize> {
+        self.shape_keys.iter().position(|k| (k.time - t).abs() <= tolerance)
+    }
+
+    /// Store the current points / tangents as the shape key at `t`.
+    pub fn set_shape_key(&mut self, t: Time, tolerance: Time) {
+        let key = ShapeKey { time: t, points: self.points.clone(), handles: self.handles.clone() };
+        match self.shape_key_near(t, tolerance) {
+            Some(i) => self.shape_keys[i] = ShapeKey { time: self.shape_keys[i].time, ..key },
+            None => {
+                let at = self.shape_keys.partition_point(|k| k.time < t);
+                self.shape_keys.insert(at, key);
+            }
+        }
+    }
+
+    pub fn remove_shape_key_near(&mut self, t: Time, tolerance: Time) -> bool {
+        match self.shape_key_near(t, tolerance) {
+            Some(i) => {
+                self.shape_keys.remove(i);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn key_at(&self, at: Time) -> Option<ShapeKey> {
+        self.shape_at(at).map(|(points, handles)| ShapeKey { time: at, points, handles })
+    }
+
+    /// The part before `at` (blade).
+    pub fn keep_left(&mut self, at: Time) {
+        if let Some(k) = self.key_at(at) {
+            self.shape_keys.retain(|x| x.time <= at);
+            if self.shape_keys.last().map(|x| x.time) != Some(at) {
+                self.shape_keys.push(k);
+            }
+        }
+    }
+
+    /// The part after `at`, re-based to start at zero (blade).
+    pub fn keep_right(&mut self, at: Time) {
+        if let Some(k) = self.key_at(at) {
+            self.shape_keys.retain(|x| x.time >= at);
+            if self.shape_keys.first().map(|x| x.time) != Some(at) {
+                self.shape_keys.insert(0, k);
+            }
+            self.shift_keys(Time::ZERO - at);
+        }
+    }
+
+    pub fn shift_keys(&mut self, dt: Time) {
+        for k in &mut self.shape_keys {
+            k.time += dt;
+        }
+    }
+
     pub fn resolve(&self) -> ResolvedMask {
         let mut points = [[0.0; 2]; MAX_MASK_POINTS];
         let mut count = 0;
@@ -776,6 +1008,9 @@ impl ColorCorrection {
         if !self.keys.is_empty() {
             self.values_at(t).apply(&mut n);
         }
+        if let Some(m) = n.mask.as_mut().filter(|m| !m.shape_keys.is_empty()) {
+            *m = m.at(t);
+        }
         n
     }
 
@@ -815,6 +1050,9 @@ impl ColorCorrection {
 
     /// The part before `at` (blade).
     pub fn keep_left(&mut self, at: Time) {
+        if let Some(m) = &mut self.mask {
+            m.keep_left(at);
+        }
         if !self.keys.is_empty() {
             let v = self.values_at(at);
             self.keys.retain(|k| k.time <= at);
@@ -826,19 +1064,27 @@ impl ColorCorrection {
 
     /// The part after `at`, re-based to start at zero (blade).
     pub fn keep_right(&mut self, at: Time) {
+        if let Some(m) = &mut self.mask {
+            m.keep_right(at);
+        }
         if !self.keys.is_empty() {
             let v = self.values_at(at);
             self.keys.retain(|k| k.time >= at);
             if self.keys.first().map(|k| k.time) != Some(at) {
                 self.keys.insert(0, NodeKey { time: at, values: v });
             }
-            self.shift_keys(Time::ZERO - at);
+            for k in &mut self.keys {
+                k.time -= at;
+            }
         }
     }
 
     pub fn shift_keys(&mut self, dt: Time) {
         for k in &mut self.keys {
             k.time += dt;
+        }
+        if let Some(m) = &mut self.mask {
+            m.shift_keys(dt);
         }
     }
 
@@ -971,6 +1217,59 @@ mod tests {
         assert!(p.alpha([0.5, 0.21], aspect) > 0.99, "smooth outline bulges past the straight edge");
         p.smooth = false;
         assert!(p.alpha([0.5, 0.21], aspect) < 0.01);
+    }
+
+    #[test]
+    fn bezier_masks_keep_the_spline_and_shape_keys_interpolate() {
+        let aspect = 16.0 / 9.0;
+        let mut p = ShapeMask::new(MaskShape::Polygon);
+        p.points = vec![[0.25, 0.25], [0.75, 0.25], [0.75, 0.75], [0.25, 0.75]];
+        p.feather = 0.0;
+        p.smooth = true;
+        let spline = p.outline();
+        p.convert_to_bezier();
+        assert!(p.is_bezier() && !p.smooth);
+        // Catmull-Rom tangents reproduce the same curve
+        let bez = p.outline();
+        assert_eq!(spline.len(), bez.len());
+        for (a, b) in spline.iter().zip(&bez) {
+            assert!((a[0] - b[0]).abs() < 1e-4 && (a[1] - b[1]).abs() < 1e-4, "{a:?} vs {b:?}");
+        }
+        // zero tangents: straight edges
+        p.handles.iter_mut().for_each(|h| *h = [0.0; 4]);
+        assert!(p.alpha([0.5, 0.21], aspect) < 0.01);
+        assert!(p.alpha([0.26, 0.26], aspect) > 0.99);
+        // a long out tangent on the top-left point bows the top edge upwards
+        p.handles[0] = [0.0, 0.0, 0.2, -0.2];
+        assert!(p.alpha([0.35, 0.21], aspect) > 0.99);
+
+        // roto: two keys, the shape moves in a straight line between them
+        let s = Time::from_secs;
+        let mut m = ShapeMask::new(MaskShape::Polygon);
+        let tol = Time::from_millis(10);
+        m.set_shape_key(s(0), tol);
+        let start = m.points.clone();
+        for q in &mut m.points {
+            q[0] += 0.2;
+        }
+        m.set_shape_key(s(2), tol);
+        assert_eq!(m.shape_keys.len(), 2);
+        let mid = m.at(s(1));
+        assert!((mid.points[0][0] - (start[0][0] + 0.1)).abs() < 1e-5);
+        assert!(mid.shape_keys.is_empty());
+        assert_eq!(m.at(s(5)).points[0][0], start[0][0] + 0.2);
+        // inserting a point keeps every key the same length
+        m.insert_point(1, [0.5, 0.2]);
+        assert!(m.shape_keys.iter().all(|k| k.points.len() == 5));
+        m.remove_point(1);
+        assert!(m.shape_keys.iter().all(|k| k.points.len() == 4));
+        // blade: the right half starts where the left half ended
+        let (mut l, mut r) = (m.clone(), m.clone());
+        l.keep_left(s(1));
+        r.keep_right(s(1));
+        assert_eq!(l.at(s(1)).points, mid.points);
+        assert_eq!(r.at(Time::ZERO).points, mid.points);
+        assert_eq!(r.at(s(1)).points, m.at(s(2)).points);
     }
 
     #[test]

@@ -2,6 +2,7 @@
 //! mask. Effects (shadow, pill, colour) are applied on the GPU.
 
 use ab_glyph::{point, Font, FontVec, PxScale, ScaleFont};
+use nle_core::clip::{RollMode, ShapeKind, ShapeSpec};
 use nle_core::{TitleAnim, TitleParams, TitleStyle};
 use std::path::{Path, PathBuf};
 
@@ -136,12 +137,25 @@ impl TextMask {
     }
 }
 
+/// Horizontal placement of a line piece: centred, or one side of a
+/// two-column "Role | Name" credits row.
+#[derive(Clone, Copy, PartialEq)]
+enum Col {
+    Center,
+    /// Right-aligned against the centre gap.
+    Right,
+    /// Left-aligned after the centre gap.
+    Left,
+}
+
 struct Line<'a> {
     text: &'a str,
     font: &'a FontVec,
     scale: PxScale,
     /// Index of this line's first word in the title's word list.
     first_word: usize,
+    row: usize,
+    col: Col,
 }
 
 fn line_width(l: &Line, tracking: f32) -> f32 {
@@ -198,10 +212,15 @@ fn place(l: &Line, tracking: f32) -> Vec<Placed> {
 }
 
 /// Lay out and rasterise a title for a `frame_w × frame_h` frame with its
-/// animation state (typewriter, tracking, highlighted word + pop).
+/// animation state (typewriter, tracking, highlighted word + pop). `\n`
+/// starts a new line, `Role | Name` makes a two-column credits row, and a
+/// rolling title rasterises only the part inside the frame.
 pub fn rasterize(p: &TitleParams, anim: &TitleAnim, frame_w: u32, frame_h: u32, fonts: &FontBook) -> Option<TextMask> {
-    let regular = fonts.regular.as_ref()?;
     let k = frame_h as f32 / 1080.0;
+    if let Some(s) = &p.shape {
+        return Some(rasterize_shape(p, s, frame_w, frame_h, k));
+    }
+    let regular = fonts.regular.as_ref()?;
     let lower_third = p.style == TitleStyle::LowerThird;
     let heavy = p.font_family.trim().eq_ignore_ascii_case(nle_core::captions::HEAVY_FONT);
     let custom_main = if heavy { None } else { fonts.family(&p.font_family, lower_third) };
@@ -214,11 +233,26 @@ pub fn rasterize(p: &TitleParams, anim: &TitleAnim, frame_w: u32, frame_h: u32, 
     let sub_scale = PxScale::from((p.font_size * k * 0.55).max(4.0));
     let tracking = (p.tracking + anim.tracking_add) * k;
 
-    let main_words = p.text.split_whitespace().count();
-    let mut lines = vec![Line { text: p.text.as_str(), font: main_font, scale: main_scale, first_word: 0 }];
-    if !p.subtitle.is_empty() {
-        lines.push(Line { text: p.subtitle.as_str(), font: regular, scale: sub_scale, first_word: main_words });
+    let mut lines = Vec::new();
+    let (mut row, mut word) = (0usize, 0usize);
+    for (src, font, scale) in [(p.text.as_str(), main_font, main_scale), (p.subtitle.as_str(), regular, sub_scale)] {
+        if src.is_empty() && row > 0 {
+            continue;
+        }
+        for seg in src.split('\n') {
+            let seg = seg.trim_end_matches('\r');
+            let parts = match seg.split_once('|') {
+                Some((a, b)) => vec![(a.trim(), Col::Right), (b.trim(), Col::Left)],
+                None => vec![(seg, Col::Center)],
+            };
+            for (text, col) in parts {
+                lines.push(Line { text, font, scale, first_word: word, row, col });
+                word += text.split_whitespace().count();
+            }
+            row += 1;
+        }
     }
+    let rows = row;
     let widths: Vec<f32> = lines.iter().map(|l| line_width(l, tracking)).collect();
     let heights: Vec<f32> = lines
         .iter()
@@ -227,8 +261,23 @@ pub fn rasterize(p: &TitleParams, anim: &TitleAnim, frame_w: u32, frame_h: u32, 
             s.ascent() - s.descent() + s.line_gap()
         })
         .collect();
-    let block_w = widths.iter().copied().fold(1.0, f32::max).ceil();
-    let block_h = heights.iter().sum::<f32>().ceil().max(1.0);
+    let gap = main_scale.y * 0.6;
+    let (mut row_h, mut row_w) = (vec![0f32; rows], vec![0f32; rows]);
+    for (i, l) in lines.iter().enumerate() {
+        row_h[l.row] = row_h[l.row].max(heights[i]);
+        let w = if l.col == Col::Center { widths[i] } else { 2.0 * widths[i] + gap };
+        row_w[l.row] = row_w[l.row].max(w);
+    }
+    let row_y: Vec<f32> = row_h
+        .iter()
+        .scan(0.0, |acc, h| {
+            let y = *acc;
+            *acc += h;
+            Some(y)
+        })
+        .collect();
+    let block_w = row_w.iter().copied().fold(1.0, f32::max).ceil();
+    let block_h = row_h.iter().sum::<f32>().ceil().max(1.0);
 
     let (fw, fh) = (frame_w as f32, frame_h as f32);
     let anchor = [p.position[0] * fw, p.position[1] * fh];
@@ -238,7 +287,15 @@ pub fn rasterize(p: &TitleParams, anim: &TitleAnim, frame_w: u32, frame_h: u32, 
     let pop = (anim.word_scale - 1.0).max(0.0);
     let lift = anim.word_lift * k;
     let margin = (outline + main_scale.y * pop * 0.6 + lift.abs() + 2.0).ceil();
-    let (w, h) = ((block_w + 2.0 * margin) as u32, (block_h + 2.0 * margin) as u32);
+    // where the block sits in the frame (top-left), and the frame window
+    // the mask covers (x, y, w, h)
+    let (block, win) = match p.roll {
+        RollMode::None => (origin, [origin[0] - margin, origin[1] - margin, block_w + 2.0 * margin, block_h + 2.0 * margin]),
+        RollMode::Up => ([origin[0], fh - anim.roll * (fh + block_h)], [origin[0] - margin, 0.0, block_w + 2.0 * margin, fh]),
+        RollMode::Left => ([fw - anim.roll * (fw + block_w), origin[1]], [0.0, origin[1] - margin, fw, block_h + 2.0 * margin]),
+    };
+    let (w, h) = (win[2].ceil().max(1.0) as u32, win[3].ceil().max(1.0) as u32);
+    let base = [block[0] - win[0], block[1] - win[1]];
     let mut data = vec![0u8; (w * h * 4) as usize];
 
     let mut visible = anim.visible_chars.unwrap_or(usize::MAX);
@@ -246,12 +303,23 @@ pub fn rasterize(p: &TitleParams, anim: &TitleAnim, frame_w: u32, frame_h: u32, 
     // word the pill glides from, for the sliding word pill
     let mut cur_box: Option<[f32; 4]> = None;
     let mut from_box: Option<[f32; 4]> = None;
-    let mut y = margin;
     for (i, l) in lines.iter().enumerate() {
+        let (top, rh) = (base[1] + row_y[l.row], row_h[l.row]);
+        // rolling: rows outside the window are not drawn
+        if top + rh < -margin || top > h as f32 + margin {
+            visible = visible.saturating_sub(l.text.chars().count());
+            continue;
+        }
         let sf = l.font.as_scaled(l.scale);
-        let x0 = if lower_third { margin } else { margin + (block_w - widths[i]) * 0.5 };
-        let baseline = y + sf.ascent();
-        let mid_y = y + heights[i] * 0.5;
+        let x0 = base[0]
+            + match l.col {
+                Col::Center if lower_third => 0.0,
+                Col::Center => (block_w - widths[i]) * 0.5,
+                Col::Right => block_w * 0.5 - gap * 0.5 - widths[i],
+                Col::Left => block_w * 0.5 + gap * 0.5,
+            };
+        let baseline = top + sf.ascent();
+        let mid_y = top + rh * 0.5;
         let placed = place(l, tracking);
         // extent of the highlighted word on this line (for the pop scale)
         let hw = anim.highlight_word;
@@ -263,7 +331,7 @@ pub fn rasterize(p: &TitleParams, anim: &TitleAnim, frame_w: u32, frame_h: u32, 
         };
         let span = word_span(hw);
         if p.word_pill {
-            let (top, bot) = (y, y + heights[i]);
+            let (top, bot) = (top, top + rh);
             if let Some((lo, hi)) = span {
                 // the popped, lifted word
                 let (cx, cy, s) = (x0 + (lo + hi) * 0.5, mid_y, anim.word_scale.max(1.0));
@@ -291,6 +359,10 @@ pub fn rasterize(p: &TitleParams, anim: &TitleAnim, frame_w: u32, frame_h: u32, 
                 }
                 _ => (x0 + g.x, baseline, l.scale),
             };
+            // crawl: glyphs outside the window are not drawn
+            if gx + g.advance * 2.0 < -margin || gx > w as f32 + margin {
+                continue;
+            }
             let id = l.font.glyph_id(g.c);
             let glyph = id.with_scale_and_position(scale, point(gx, gy));
             if let Some(og) = l.font.outline_glyph(glyph) {
@@ -311,11 +383,15 @@ pub fn rasterize(p: &TitleParams, anim: &TitleAnim, frame_w: u32, frame_h: u32, 
                 });
             }
         }
-        y += heights[i];
     }
     let pad = p.pill_padding * k;
-    let rect = [origin[0] - margin, origin[1] - margin, w as f32, h as f32];
-    let mut pill = [origin[0] - pad, origin[1] - pad * 0.6, origin[0] + block_w + pad, origin[1] + block_h + pad * 0.6];
+    let rect = [win[0], win[1], w as f32, h as f32];
+    let mut pill = [block[0] - pad, block[1] - pad * 0.6, block[0] + block_w + pad, block[1] + block_h + pad * 0.6];
+    if p.roll == RollMode::Left {
+        // a crawl's bar spans the frame
+        pill[0] = -pad;
+        pill[2] = fw + pad;
+    }
     if p.word_pill {
         pill = match cur_box {
             Some(cur) => {
@@ -329,6 +405,103 @@ pub fn rasterize(p: &TitleParams, anim: &TitleAnim, frame_w: u32, frame_h: u32, 
         };
     }
     Some(TextMask { width: w, height: h, data, rect, pill })
+}
+
+fn sd_box(q: [f32; 2], b: [f32; 2], r: f32) -> f32 {
+    let r = r.min(b[0]).min(b[1]).max(0.0);
+    let (qx, qy) = (q[0].abs() - b[0] + r, q[1].abs() - b[1] + r);
+    qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - r
+}
+
+/// Signed distance to a closed polygon (negative inside).
+fn sd_polygon(p: [f32; 2], v: &[[f32; 2]]) -> f32 {
+    let sub = |a: [f32; 2], b: [f32; 2]| [a[0] - b[0], a[1] - b[1]];
+    let dot = |a: [f32; 2], b: [f32; 2]| a[0] * b[0] + a[1] * b[1];
+    let mut d = dot(sub(p, v[0]), sub(p, v[0]));
+    let mut s = 1.0;
+    let mut j = v.len() - 1;
+    for i in 0..v.len() {
+        let e = sub(v[j], v[i]);
+        let w = sub(p, v[i]);
+        let t = (dot(w, e) / dot(e, e).max(1e-9)).clamp(0.0, 1.0);
+        let b = [w[0] - e[0] * t, w[1] - e[1] * t];
+        d = d.min(dot(b, b));
+        let c = [p[1] >= v[i][1], p[1] < v[j][1], e[0] * w[1] > e[1] * w[0]];
+        if c.iter().all(|&x| x) || c.iter().all(|&x| !x) {
+            s = -s;
+        }
+        j = i;
+    }
+    s * d.sqrt()
+}
+
+/// Outline of a polygonal shape with half-extents `b`.
+fn shape_polygon(s: &ShapeSpec, b: [f32; 2]) -> Vec<[f32; 2]> {
+    match s.kind {
+        ShapeKind::Triangle => vec![[0.0, -b[1]], [b[0], b[1]], [-b[0], b[1]]],
+        ShapeKind::Star => {
+            let n = s.points.clamp(3, 64) as usize;
+            (0..2 * n)
+                .map(|i| {
+                    let a = -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / n as f32;
+                    let r = if i % 2 == 0 { 1.0 } else { s.inner.clamp(0.05, 1.0) };
+                    [a.cos() * b[0] * r, a.sin() * b[1] * r]
+                })
+                .collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn shape_sdf(s: &ShapeSpec, b: [f32; 2], poly: &[[f32; 2]], q: [f32; 2]) -> f32 {
+    match s.kind {
+        ShapeKind::Rectangle => sd_box(q, b, 0.0),
+        ShapeKind::RoundedRect => sd_box(q, b, s.radius),
+        ShapeKind::Ellipse => {
+            // first-order ellipse distance (exact on the axes)
+            let k0 = ((q[0] / b[0]).powi(2) + (q[1] / b[1]).powi(2)).sqrt();
+            let k1 = ((q[0] / (b[0] * b[0])).powi(2) + (q[1] / (b[1] * b[1])).powi(2)).sqrt();
+            if k1 < 1e-9 {
+                -b[0].min(b[1])
+            } else {
+                k0 * (k0 - 1.0) / k1
+            }
+        }
+        ShapeKind::Line => {
+            let r = b[1];
+            let hx = (b[0] - r).max(0.0);
+            (q[0].abs() - hx).max(0.0).hypot(q[1]) - r
+        }
+        ShapeKind::Triangle | ShapeKind::Star => sd_polygon(q, poly),
+    }
+}
+
+/// Rasterise a generator shape (anti-aliased coverage) centred on the
+/// title position.
+fn rasterize_shape(p: &TitleParams, s: &ShapeSpec, frame_w: u32, frame_h: u32, k: f32) -> TextMask {
+    let r = s.radius * k;
+    let b = [(s.size[0] * k * 0.5).max(0.5), (s.size[1] * k * 0.5).max(0.5)];
+    let outline = if p.outline_enabled { p.outline_width * k } else { 0.0 };
+    let margin = (outline + 2.0).ceil();
+    let ext = if s.rotation.rem_euclid(180.0) == 0.0 { b } else { [b[0].hypot(b[1]); 2] };
+    let (w, h) = ((2.0 * (ext[0] + margin)).ceil() as u32, (2.0 * (ext[1] + margin)).ceil() as u32);
+    let centre = [p.position[0] * frame_w as f32, p.position[1] * frame_h as f32];
+    let (sn, cs) = (-s.rotation.to_radians()).sin_cos();
+    let spec = ShapeSpec { radius: r, ..s.clone() };
+    let poly = shape_polygon(&spec, b);
+    let mut data = vec![0u8; (w * h * 4) as usize];
+    for y in 0..h {
+        for x in 0..w {
+            let (dx, dy) = (x as f32 + 0.5 - w as f32 * 0.5, y as f32 + 0.5 - h as f32 * 0.5);
+            let q = [dx * cs - dy * sn, dx * sn + dy * cs];
+            let cov = (0.5 - shape_sdf(&spec, b, &poly, q)).clamp(0.0, 1.0);
+            data[((y * w + x) * 4) as usize] = (cov * 255.0) as u8;
+        }
+    }
+    let pad = p.pill_padding * k;
+    let rect = [centre[0] - w as f32 * 0.5, centre[1] - h as f32 * 0.5, w as f32, h as f32];
+    let pill = [centre[0] - ext[0] - pad, centre[1] - ext[1] - pad, centre[0] + ext[0] + pad, centre[1] + ext[1] + pad];
+    TextMask { width: w, height: h, data, rect, pill }
 }
 
 /// Sliding word pill: exponential glide (`glide` 0..1) of the box from the
@@ -398,6 +571,78 @@ mod tests {
         // without a dim colour nothing is dimmed
         let plain = rasterize(&p, &a, 1920, 1080, &fonts).unwrap();
         assert!((0..plain.height).all(|y| (0..plain.width).all(|x| plain.dimmed(x, y) == 0)));
+    }
+
+    #[test]
+    fn shapes_are_filled_where_they_should_be() {
+        let fonts = FontBook { regular: None, bold: None, heavy: None, dirs: Vec::new() };
+        let mk = |kind: ShapeKind, rot: f32| {
+            let p = TitleParams { shape: Some(ShapeSpec { rotation: rot, ..ShapeSpec::new(kind) }), ..Default::default() };
+            rasterize(&p, &TitleAnim::default(), 1920, 1080, &fonts).unwrap()
+        };
+        for kind in ShapeKind::ALL {
+            let m = mk(kind, 0.0);
+            assert_eq!(m.coverage(m.width / 2, m.height / 2), 255, "{kind:?} centre is filled");
+            assert_eq!(m.coverage(0, 0), 0, "{kind:?} corner is empty");
+        }
+        // the square's corner is filled, the ellipse's and the star's are not
+        let at = |m: &TextMask, fx: f32, fy: f32| m.coverage((m.width as f32 * fx) as u32, (m.height as f32 * fy) as u32);
+        assert_eq!(at(&mk(ShapeKind::Rectangle, 0.0), 0.1, 0.1), 255);
+        assert_eq!(at(&mk(ShapeKind::Ellipse, 0.0), 0.1, 0.1), 0);
+        assert_eq!(at(&mk(ShapeKind::Star, 0.0), 0.15, 0.6), 0);
+        // the triangle points up: filled bottom corners, empty top corners
+        let tri = mk(ShapeKind::Triangle, 0.0);
+        assert!(at(&tri, 0.1, 0.95) > 0 && at(&tri, 0.1, 0.1) == 0);
+        // rotated 45°: the mask grows to hold the diagonal, the old corner is empty
+        let rot = mk(ShapeKind::Rectangle, 45.0);
+        assert!(rot.width > mk(ShapeKind::Rectangle, 0.0).width);
+        assert_eq!(at(&rot, 0.02, 0.5), 0);
+        // centred on the title position
+        let m = mk(ShapeKind::Ellipse, 0.0);
+        assert!((m.rect[0] + m.rect[2] * 0.5 - 960.0).abs() < 1.0 && (m.rect[1] + m.rect[3] * 0.5 - 540.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn multi_line_columns_and_rolling_credits() {
+        let fonts = FontBook::system();
+        if !fonts.has_fonts() {
+            return;
+        }
+        let lit_rows = |m: &TextMask| (0..m.height).filter(|&y| (0..m.width).any(|x| m.coverage(x, y) > 0)).count();
+        let one = rasterize(&TitleParams { text: "Hello".into(), ..Default::default() }, &TitleAnim::default(), 1920, 1080, &fonts).unwrap();
+        let two = rasterize(&TitleParams { text: "Hello\nWorld".into(), ..Default::default() }, &TitleAnim::default(), 1920, 1080, &fonts).unwrap();
+        assert!(two.height as f32 > one.height as f32 * 1.6, "two lines: {} vs {}", two.height, one.height);
+        assert!(lit_rows(&two) > lit_rows(&one));
+        // "Role | Name": the two halves sit either side of an empty centre gap
+        let cols = rasterize(&TitleParams { text: "Director | Name".into(), ..Default::default() }, &TitleAnim::default(), 1920, 1080, &fonts).unwrap();
+        let col_lit = |x: u32| (0..cols.height).any(|y| cols.coverage(x, y) > 0);
+        let mid = cols.width / 2;
+        assert!(!col_lit(mid), "centre gap");
+        assert!((0..mid).any(col_lit) && (mid..cols.width).any(col_lit));
+        assert!(!(0..cols.width).any(|x| (0..cols.height).any(|y| cols.coverage(x, y) > 0) && x > mid - 3 && x < mid + 3));
+
+        // rolling credits: a frame-tall window; below the frame at 0, inside at 0.5, gone at 1
+        let credits =
+            TitleParams { text: (0..40).map(|i| format!("Role {i} | Name {i}")).collect::<Vec<_>>().join("\n"), font_size: 48.0, roll: RollMode::Up, ..Default::default() };
+        let at = |roll: f32| rasterize(&credits, &TitleAnim { roll, ..Default::default() }, 1920, 1080, &fonts).unwrap();
+        let (start, mid, end) = (at(0.0), at(0.5), at(1.0));
+        assert_eq!(mid.height, 1080);
+        assert_eq!(mid.rect[1], 0.0);
+        assert_eq!(lit_rows(&start), 0);
+        assert_eq!(lit_rows(&end), 0);
+        assert!(lit_rows(&mid) > 500, "frame full of credits: {}", lit_rows(&mid));
+        // it moves up
+        let first_lit = |m: &TextMask| (0..m.height).find(|&y| (0..m.width).any(|x| m.coverage(x, y) > 0));
+        let (a, b) = (at(0.05), at(0.06));
+        assert!(first_lit(&b).unwrap() < first_lit(&a).unwrap());
+
+        // crawl: a frame-wide window, text enters from the right
+        let crawl = TitleParams { text: "Breaking news headline".into(), roll: RollMode::Left, ..Default::default() };
+        let c = rasterize(&crawl, &TitleAnim { roll: 0.1, ..Default::default() }, 1920, 1080, &fonts).unwrap();
+        assert_eq!(c.width, 1920);
+        let xs: Vec<u32> = (0..c.width).filter(|&x| (0..c.height).any(|y| c.coverage(x, y) > 0)).collect();
+        assert!(!xs.is_empty() && xs[0] > 960, "enters from the right: {}", xs[0]);
+        assert!(c.pill[0] <= 0.0 && c.pill[2] >= 1920.0, "the crawl bar spans the frame");
     }
 
     #[test]

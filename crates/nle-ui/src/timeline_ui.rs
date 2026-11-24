@@ -1195,6 +1195,7 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
                 }
                 ui.toggle_value(&mut app.show_captions, "CC Captions").on_hover_text("Auto captions & Whisper transcription");
                 ui.toggle_value(&mut app.transcript.open, "Transcript").on_hover_text(app.keymap.tip("Edit by text: delete words, fillers and pauses", Action::ToggleTranscript));
+                ui.toggle_value(&mut app.graph.open, "Graph").on_hover_text(app.keymap.tip("Keyframe curves with Bézier handles", Action::ToggleGraphEditor));
                 let lanes_tip = format!("Group the audio below the storyline into Dialogue / Music / SFX / General lanes ({})", app.keymap.hint(Action::ToggleAudioLanes));
                 ui.toggle_value(&mut app.tl.audio_lanes, "Audio Lanes").on_hover_text(lanes_tip);
                 ui.toggle_value(&mut app.tl.show_retime, "Retime").on_hover_text(app.keymap.tip("Retime editor", Action::ToggleRetime));
@@ -1682,37 +1683,7 @@ fn pps_of(rect: Rect, c: &Clip) -> f32 {
 
 /// Animated video and effect parameters of a clip, for the animation lane.
 fn video_params(c: &Clip) -> Vec<(Cow<'static, str>, &Param)> {
-    let v = &c.video;
-    let col = &c.color;
-    let mut out = vec![
-        (Cow::Borrowed("Opacity"), &v.opacity),
-        (Cow::Borrowed("Position X"), &v.position_x),
-        (Cow::Borrowed("Position Y"), &v.position_y),
-        (Cow::Borrowed("Scale X"), &v.scale_x),
-        (Cow::Borrowed("Scale Y"), &v.scale_y),
-        (Cow::Borrowed("Rotation"), &v.rotation),
-        (Cow::Borrowed("Anchor X"), &v.anchor_x),
-        (Cow::Borrowed("Anchor Y"), &v.anchor_y),
-        (Cow::Borrowed("Crop L"), &v.crop_left),
-        (Cow::Borrowed("Crop R"), &v.crop_right),
-        (Cow::Borrowed("Crop T"), &v.crop_top),
-        (Cow::Borrowed("Crop B"), &v.crop_bottom),
-        (Cow::Borrowed("Exposure"), &col.exposure),
-        (Cow::Borrowed("Brightness"), &col.brightness),
-        (Cow::Borrowed("Contrast"), &col.contrast),
-        (Cow::Borrowed("Saturation"), &col.saturation),
-        (Cow::Borrowed("Temperature"), &col.temperature),
-        (Cow::Borrowed("Tint"), &col.tint),
-        (Cow::Borrowed("Volume"), &c.audio.volume_db),
-        (Cow::Borrowed("Pan"), &c.audio.pan),
-    ];
-    for e in &c.effects {
-        let defs = e.kind.params();
-        for (d, p) in defs.iter().zip(&e.params) {
-            out.push((Cow::Owned(format!("{}: {}", e.kind.label(), d.name)), p));
-        }
-    }
-    out
+    c.animatable_params()
 }
 
 fn key_times(c: &Clip) -> Vec<Time> {
