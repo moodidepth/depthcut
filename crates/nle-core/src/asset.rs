@@ -141,6 +141,10 @@ pub struct MediaAsset {
     /// `start_timecode` from them and clears this.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub source_tc_pending: bool,
+    /// A subclip: the part of the file `(in, out)` this browser item stands
+    /// for. The file, proxy and streams are the parent's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subclip: Option<(Time, Time)>,
 }
 
 /// Credit line for Creative Commons / public-domain media.
@@ -207,7 +211,22 @@ impl MediaAsset {
             attribution: None,
             start_timecode: None,
             source_tc_pending: false,
+            subclip: None,
         }
+    }
+
+    /// Source media this item stands for: a subclip's range, else the file.
+    pub fn bounds(&self) -> (Time, Time) {
+        match self.subclip {
+            Some((a, b)) if b > a => (a.max(Time::ZERO), b.min(self.duration).max(a)),
+            _ => (Time::ZERO, self.duration),
+        }
+    }
+
+    /// Length of the media this item stands for.
+    pub fn span(&self) -> Time {
+        let (a, b) = self.bounds();
+        b - a
     }
 
     pub fn has_video(&self) -> bool {

@@ -1089,7 +1089,9 @@ impl Clip {
 
     /// A clip covering the whole of `asset`.
     pub fn from_asset(asset: &MediaAsset) -> Self {
-        let mut c = Clip::new(asset.name.clone(), ClipKind::Asset { asset: asset.id }, asset.duration);
+        let (lo, hi) = asset.bounds();
+        let mut c = Clip::new(asset.name.clone(), ClipKind::Asset { asset: asset.id }, hi - lo);
+        c.source_in = lo;
         c.media_duration = Some(asset.duration);
         c.av = AvFlags { video: asset.has_video(), audio: asset.has_audio() };
         if asset.has_audio() {

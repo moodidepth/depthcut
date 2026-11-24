@@ -219,8 +219,8 @@ pub fn rule_matches(rule: &SmartRule, a: &MediaAsset, cx: &MatchContext) -> bool
         SmartRule::Keyword { keyword, has } => a.tags.iter().any(|k| k.eq_ignore_ascii_case(keyword)) == *has,
         SmartRule::Kind(k) => k.matches(a),
         SmartRule::Rating(r) => a.rating() == *r,
-        SmartRule::MinDuration(t) => a.duration >= *t,
-        SmartRule::MaxDuration(t) => a.duration <= *t,
+        SmartRule::MinDuration(t) => a.span() >= *t,
+        SmartRule::MaxDuration(t) => a.span() <= *t,
         SmartRule::MinHeight(h) => a.video.as_ref().is_some_and(|v| v.height >= *h),
         SmartRule::MinFrameRate(f) => a.video.as_ref().is_some_and(|v| v.frame_rate.fps() + 1e-3 >= *f),
         SmartRule::Codec(c) => {

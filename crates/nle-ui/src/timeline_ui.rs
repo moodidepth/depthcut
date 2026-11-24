@@ -563,6 +563,15 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         painter.rect_stroke(r, CornerRadius::ZERO, Stroke::new(1.5_f32, theme::SELECTION), StrokeKind::Inside);
         painter.text(r.left_top() + Vec2::new(4.0, 4.0), egui::Align2::LEFT_TOP, crate::widgets::secs_label(e - s), egui::FontId::proportional(11.0), theme::SELECTION);
     }
+    // a lone In or Out mark (I / O)
+    for (t, label, align) in [(app.source.record.mark_in, "IN", egui::Align2::LEFT_TOP), (app.source.record.mark_out, "OUT", egui::Align2::RIGHT_TOP)] {
+        if let Some(t) = t {
+            let x = geo.x(t);
+            painter.line_segment([Pos2::new(x, area.top() + header_h), Pos2::new(x, area.bottom())], Stroke::new(1.5_f32, theme::SELECTION));
+            let dx = if label == "IN" { 4.0 } else { -4.0 };
+            painter.text(Pos2::new(x + dx, area.top() + header_h + 4.0), align, label, egui::FontId::proportional(10.0), theme::SELECTION);
+        }
+    }
 
     // ----- interaction
     let pointer = resp.hover_pos().or_else(|| resp.interact_pointer_pos());
@@ -2006,7 +2015,8 @@ fn drop_target(app: &App, p: Pos2, geo: &Geo, lane_at: &dyn Fn(f32) -> i32, snap
 
 fn drop_asset(app: &mut App, asset: AssetId, lane: i32, at: Time) {
     let Some(a) = app.project.asset(asset).cloned() else { return };
-    let clip = Clip::from_asset(&a);
+    // a browser clip with In / Out marks brings only the marked part
+    let clip = app.marked_clip(&a);
     let cmd = if lane == 0 {
         if at >= app.project.timeline.duration() {
             Command::Append { clip }

@@ -400,7 +400,7 @@ fn sort_assets(v: &mut [&MediaAsset], key: SortKey, desc: bool) {
     match key {
         SortKey::Added => {}
         SortKey::Name => v.sort_by_key(|a| a.name.to_lowercase()),
-        SortKey::Duration => v.sort_by_key(|a| a.duration),
+        SortKey::Duration => v.sort_by_key(|a| a.span()),
         SortKey::Resolution => v.sort_by_key(|a| height(a)),
         SortKey::FrameRate => v.sort_by(|a, b| a.frame_rate().fps().total_cmp(&b.frame_rate().fps())),
         SortKey::Codec => v.sort_by_key(|a| codec(a)),
@@ -541,7 +541,10 @@ fn card(app: &mut App, ui: &mut egui::Ui, a: &MediaAsset, used: bool) -> Option<
 
     let mut skim = None;
     let hover_frac = resp.hover_pos().filter(|pos| thumb.contains(*pos)).map(|pos| ((pos.x - thumb.left()) / thumb.width()).clamp(0.0, 0.999));
-    let t = hover_frac.map(|f| a.duration.mul_f64(f as f64)).unwrap_or(Time::ZERO);
+    // a subclip skims only its own part of the file
+    let (lo, hi) = a.bounds();
+    let span = (hi - lo).max(Time(1));
+    let t = lo + hover_frac.map(|f| span.mul_f64(f as f64)).unwrap_or(Time::ZERO);
     match strip.and_then(|s| s.at(t)) {
         Some(tex) => {
             p.image(tex.id(), thumb, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
@@ -587,6 +590,17 @@ fn card(app: &mut App, ui: &mut egui::Ui, a: &MediaAsset, used: bool) -> Option<
     if used {
         p.text(thumb.right_bottom() + Vec2::new(-5.0, -6.0), egui::Align2::RIGHT_BOTTOM, "●", egui::FontId::proportional(9.0), theme::SNAP);
     }
+    // In / Out marks as a range bar along the bottom
+    let marks = app.asset_marks(a.id);
+    if !marks.is_empty() {
+        let fx = |t: Time| thumb.left() + ((t - lo).as_secs_f64() / span.as_secs_f64()).clamp(0.0, 1.0) as f32 * w;
+        let (x0, x1) = (fx(marks.mark_in.unwrap_or(lo)), fx(marks.mark_out.unwrap_or(hi)));
+        let bar = egui::Rect::from_min_max(egui::pos2(x0, thumb.bottom() - 6.0), egui::pos2(x1.max(x0 + 2.0), thumb.bottom() - 3.0));
+        p.rect_filled(bar, CornerRadius::ZERO, theme::SELECTION);
+    }
+    if a.subclip.is_some() {
+        p.text(thumb.left_bottom() + Vec2::new(5.0, -8.0), egui::Align2::LEFT_BOTTOM, "SUBCLIP", egui::FontId::proportional(9.0), theme::SELECTION);
+    }
     match app.library.proxy_status(a.id) {
         Some(ProxyStatus::Running { progress, .. }) => {
             let bar = egui::Rect::from_min_size(thumb.left_top() + Vec2::new(4.0, 6.0), Vec2::new((w - 8.0) * progress, 3.0));
@@ -599,7 +613,7 @@ fn card(app: &mut App, ui: &mut egui::Ui, a: &MediaAsset, used: bool) -> Option<
     }
     let name_pos = egui::pos2(rect.left() + 4.0, thumb.bottom() + 3.0);
     p.text(name_pos, egui::Align2::LEFT_TOP, truncate(&a.name, (w / 6.5) as usize), egui::FontId::proportional(12.0), theme::TEXT);
-    let dur = format_timecode(a.duration, a.frame_rate());
+    let dur = format_timecode(a.span(), a.frame_rate());
     p.text(name_pos + Vec2::new(0.0, 15.0), egui::Align2::LEFT_TOP, dur, egui::FontId::monospace(10.0), theme::TEXT_DIM);
     if selected {
         p.rect_stroke(rect, CornerRadius::same(6), Stroke::new(2.0_f32, theme::SELECTION), StrokeKind::Inside);
@@ -628,7 +642,7 @@ fn asset_interaction(app: &mut App, resp: &egui::Response, id: AssetId, used: bo
         app.browser.selected = Some(id);
     }
     if resp.double_clicked() {
-        app.add_asset_to_timeline(id, EditMode::Append);
+        app.open_in_source(id, None);
     }
     resp.context_menu(|ui| {
         app.browser.selected = Some(id);
@@ -637,6 +651,11 @@ fn asset_interaction(app: &mut App, resp: &egui::Response, id: AssetId, used: bo
 }
 
 fn asset_menu(app: &mut App, ui: &mut egui::Ui, id: AssetId, used: bool) {
+    if ui.button(app.menu_label("Open in Source Viewer", nle_core::keymap::Action::ToggleSourceViewer)).clicked() {
+        app.open_in_source(id, None);
+        ui.close_menu();
+    }
+    ui.separator();
     for (label, action, mode) in [
         ("Append to Storyline", nle_core::keymap::Action::AppendClip, EditMode::Append),
         ("Insert at Playhead", nle_core::keymap::Action::InsertClip, EditMode::Insert),
@@ -757,7 +776,7 @@ fn list_view(app: &mut App, ui: &mut egui::Ui, shown: &[MediaAsset], used: &Hash
             asset_interaction(app, &resp, a.id, is_used);
             resp.on_hover_text(hover_summary(app, a, is_used));
             let dim = |s: String| egui::RichText::new(s).color(theme::TEXT_DIM);
-            ui.label(egui::RichText::new(format_timecode(a.duration, a.frame_rate())).monospace());
+            ui.label(egui::RichText::new(format_timecode(a.span(), a.frame_rate())).monospace());
             match &a.video {
                 Some(v) => {
                     ui.label(format!("{}×{}", v.width, v.height));
@@ -823,7 +842,10 @@ fn metadata(app: &mut App, ui: &mut egui::Ui, a: &MediaAsset) {
                 ui.add(egui::Label::new(v).truncate());
                 ui.end_row();
             };
-            row("Duration", format_timecode(a.duration, a.frame_rate()));
+            row("Duration", format_timecode(a.span(), a.frame_rate()));
+            if let Some((i, o)) = a.subclip {
+                row("Subclip of file", format!("{} - {}", format_timecode(i, a.frame_rate()), format_timecode(o, a.frame_rate())));
+            }
             if let Some(v) = &a.video {
                 row("Video", format!("{}×{} · {} · {}", v.width, v.height, v.frame_rate.label(), v.codec));
                 row("Format", format!("{} · {}-bit", v.pix_fmt, v.bit_depth));

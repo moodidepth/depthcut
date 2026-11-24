@@ -9,6 +9,7 @@
 use crate::asset::MediaAsset;
 use crate::ids::{AssetId, ClipId};
 use crate::library::Library;
+use crate::time::Time;
 use crate::timeline::Timeline;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -64,6 +65,27 @@ impl Project {
         let id = asset.id;
         self.assets.push(asset);
         id
+    }
+
+    /// Add a subclip of `parent` covering source `(a, b)` right after it in
+    /// the browser. It shares the parent's file, keywords and bin.
+    pub fn add_subclip(&mut self, parent: AssetId, a: Time, b: Time, name: Option<String>) -> Option<AssetId> {
+        let i = self.assets.iter().position(|x| x.id == parent)?;
+        let p = &self.assets[i];
+        let (a, b) = (a.max(Time::ZERO), b.min(p.duration));
+        if b <= a {
+            return None;
+        }
+        let n = self.assets.iter().filter(|x| x.path == p.path && x.subclip.is_some()).count() + 1;
+        let mut s = p.clone();
+        s.id = AssetId::new();
+        s.name = name.unwrap_or_else(|| format!("{} Subclip {n}", p.name));
+        s.subclip = Some((a, b));
+        s.favorite = false;
+        s.rejected = false;
+        let id = s.id;
+        self.assets.insert(i + 1, s);
+        Some(id)
     }
 
     pub fn to_json(&self) -> serde_json::Result<String> {
@@ -295,5 +317,21 @@ mod tests {
         let mut bad: serde_json::Value = serde_json::from_str(&Project::new("X").to_json().unwrap()).unwrap();
         bad["active_timeline"] = 7.into();
         assert_eq!(Project::from_json(&bad.to_string()).unwrap().active_timeline, 0);
+    }
+
+    #[test]
+    fn subclips_cover_part_of_their_parent() {
+        let mut p = Project::default();
+        let parent = p.add_asset(MediaAsset::new("Shot", "shot.mp4", Time::from_secs(10)));
+        let other = p.add_asset(MediaAsset::new("Other", "other.mp4", Time::from_secs(3)));
+        let sub = p.add_subclip(parent, Time::from_secs(2), Time::from_secs(12), None).unwrap();
+        assert_eq!(p.assets.iter().map(|a| a.id).collect::<Vec<_>>(), vec![parent, sub, other]);
+        let s = p.asset(sub).unwrap();
+        assert_eq!(s.name, "Shot Subclip 1");
+        // clamped to the file
+        assert_eq!(s.bounds(), (Time::from_secs(2), Time::from_secs(10)));
+        let c = crate::clip::Clip::from_asset(s);
+        assert_eq!((c.source_in, c.duration), (Time::from_secs(2), Time::from_secs(8)));
+        assert!(p.add_subclip(parent, Time::from_secs(4), Time::from_secs(4), None).is_none());
     }
 }

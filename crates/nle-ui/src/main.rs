@@ -26,6 +26,7 @@ mod motion_ui;
 mod online_ui;
 mod presets_ui;
 mod shortcuts_ui;
+mod source;
 mod theme;
 mod timeline_ui;
 mod track_headers;

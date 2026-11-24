@@ -122,6 +122,17 @@ actions! {
     RateFavorite => "Rate Favorite", "Library";
     RateReject => "Rate Reject", "Library";
     RateClear => "Clear Rating", "Library";
+    MakeSubclip => "Make Subclip from In/Out", "Library";
+    MarkIn => "Mark In", "Marking";
+    MarkOut => "Mark Out", "Marking";
+    MarkClip => "Mark Clip (In/Out around clip)", "Marking";
+    ClearInOut => "Clear In and Out", "Marking";
+    GoToIn => "Go to In", "Marking";
+    GoToOut => "Go to Out", "Marking";
+    ToggleSourceViewer => "Source / Timeline Viewer", "Marking";
+    MatchFrame => "Match Frame (open source at this frame)", "Marking";
+    ReplaceEdit => "Replace Edit", "Edit";
+    FitToFill => "Fit to Fill Edit", "Edit";
 }
 
 macro_rules! keys {
@@ -445,6 +456,17 @@ impl ActionMap {
                 (RateFavorite, &[B::key(K::F)]),
                 (RateReject, &[B::alt(K::Delete)]),
                 (RateClear, &[B::key(K::U)]),
+                (MakeSubclip, &[B::ctrl(K::U)]),
+                (MarkIn, &[B::key(K::I)]),
+                (MarkOut, &[B::key(K::O)]),
+                (MarkClip, &[B::key(K::X)]),
+                (ClearInOut, &[B::alt(K::X)]),
+                (GoToIn, &[B::shift(K::I)]),
+                (GoToOut, &[B::shift(K::O)]),
+                (MatchFrame, &[B::shift(K::F)]),
+                (FitToFill, &[B::shift(K::F11)]),
+                (ToggleSourceViewer, &[B::shift(K::Q)]),
+                (ReplaceEdit, &[B::shift(K::R)]),
             ],
         )
     }
@@ -541,6 +563,17 @@ impl ActionMap {
                 (RateFavorite, &[B::key(K::F)]),
                 (RateReject, &[B::alt(K::Delete)]),
                 (RateClear, &[B::key(K::U)]),
+                (MakeSubclip, &[B::ctrl(K::U)]),
+                (MarkIn, &[B::key(K::I)]),
+                (MarkOut, &[B::key(K::O)]),
+                (MarkClip, &[B::key(K::X)]),
+                (ClearInOut, &[B::alt(K::X)]),
+                (GoToIn, &[B::shift(K::I)]),
+                (GoToOut, &[B::shift(K::O)]),
+                (MatchFrame, &[B::shift(K::F)]),
+                (FitToFill, &[B::shift(K::F11)]),
+                (ToggleSourceViewer, &[B::shift(K::Q)]),
+                (ReplaceEdit, &[B::shift(K::R)]),
             ],
         )
     }
@@ -637,6 +670,17 @@ impl ActionMap {
                 (RateFavorite, &[B::key(K::F)]),
                 (RateReject, &[B::alt(K::Delete)]),
                 (RateClear, &[B::key(K::U)]),
+                (MakeSubclip, &[B::ctrl(K::U)]),
+                (MarkIn, &[B::key(K::I)]),
+                (MarkOut, &[B::key(K::O)]),
+                (MarkClip, &[B::key(K::X)]),
+                (ClearInOut, &[B::alt(K::X)]),
+                (GoToIn, &[B::shift(K::I)]),
+                (GoToOut, &[B::shift(K::O)]),
+                (MatchFrame, &[B::shift(K::F)]),
+                (FitToFill, &[B::shift(K::F11)]),
+                (ToggleSourceViewer, &[B::key(K::Q)]),
+                (ReplaceEdit, &[B::key(K::F11)]),
             ],
         )
     }

@@ -253,6 +253,10 @@ pub struct App {
     parked: Vec<ParkedTimeline>,
     /// Timeline being renamed in the timeline tabs: (index, new name).
     pub timeline_rename: Option<(usize, String)>,
+    /// Source viewer, its marks and the timeline's single In / Out mark.
+    pub source: crate::source::SourceView,
+    /// Source clip whose audio the engine is set up to play (None = timeline).
+    audio_source: Option<AssetId>,
     /// Relink search / consolidate copy in progress.
     pub media_job: Option<crate::media_manage::MediaJob>,
     /// A project switch (or quit) waiting on the "Save changes?" answer.
@@ -392,6 +396,8 @@ impl App {
             assets_changed: false,
             parked: Vec::new(),
             timeline_rename: None,
+            source: Default::default(),
+            audio_source: None,
             media_job: None,
             pending_switch: None,
             allow_close: false,
@@ -409,6 +415,7 @@ impl App {
         self.focus.reset();
         self.parked = (0..self.project.timeline_count()).map(|_| ParkedTimeline::default()).collect();
         self.timeline_rename = None;
+        self.source = Default::default();
         // asset and clip ids restart in every project, so nothing that is
         // stored under one, or still on its way, may outlive a project switch
         self.library.reset();
@@ -787,6 +794,7 @@ impl App {
         self.stop();
         self.selection.clear();
         self.tl.range = None;
+        self.source.record = nle_core::three_point::Marks::NONE;
         self.tl.selected_key = None;
         self.tl.fit_pending = true;
         // the shown timeline changed without a history revision
@@ -818,20 +826,11 @@ impl App {
         (self.playhead - start).max(Time::ZERO).min((dur - Time(1)).max(Time::ZERO))
     }
 
+    /// Edit a browser clip into the timeline from its In / Out marks and
+    /// the timeline's (three-point editing; no marks = whole clip at the
+    /// playhead).
     pub fn add_asset_to_timeline(&mut self, asset: AssetId, mode: EditMode) {
-        let Some(a) = self.project.asset(asset).cloned() else { return };
-        let clip = Clip::from_asset(&a);
-        let audio_only = !a.has_video();
-        let at = self.playhead;
-        let cmd = match mode {
-            EditMode::Append => Command::Append { clip },
-            EditMode::Insert => Command::Insert { at, clip },
-            EditMode::Overwrite => Command::Overwrite { at, clip },
-            EditMode::Connect => Command::Connect { clip, at, lane: if audio_only { -1 } else { 1 } },
-        };
-        if self.exec(cmd) && mode == EditMode::Append {
-            self.playhead = self.project.timeline.duration();
-        }
+        self.three_point_edit(asset, mode);
     }
 
     pub fn add_title(&mut self, lower_third: bool) {
@@ -1640,8 +1639,8 @@ impl App {
         if self.playback.playing {
             self.stop();
         } else {
-            if self.playhead >= self.project.timeline.extent() {
-                self.playhead = Time::ZERO;
+            if self.cursor() >= self.transport_end() {
+                self.set_cursor(Time::ZERO);
             }
             self.play(1.0);
         }
@@ -1658,13 +1657,30 @@ impl App {
                 1.0
             };
         }
-        self.audio.play(self.playhead, speed);
+        self.audio.play(self.cursor(), speed);
+    }
+
+    /// Frame rate the transport steps on (the source clip's in the source viewer).
+    fn transport_rate(&self) -> nle_core::FrameRate {
+        match self.source.asset.and_then(|a| self.project.asset(a)) {
+            Some(a) if self.source_active() && a.has_video() => a.frame_rate(),
+            _ => self.project.timeline.format.rate,
+        }
+    }
+
+    /// Move the playhead, or the source viewer's position while it is shown.
+    fn set_cursor(&mut self, t: Time) {
+        if self.source_active() {
+            self.source.pos = t.clamp(Time::ZERO, self.transport_end());
+        } else {
+            self.playhead = t;
+        }
     }
 
     pub fn stop(&mut self) {
         if self.playback.playing {
-            self.playhead = self.audio.pause().max(Time::ZERO);
-            self.playhead = self.playhead.snap_to_frame(self.project.timeline.format.rate);
+            let t = self.audio.pause().max(Time::ZERO).snap_to_frame(self.transport_rate());
+            self.set_cursor(t);
         }
         if let Some(p) = &mut self.preview {
             p.renderer.shuttle_proxy_scale = 1.0;
@@ -1678,7 +1694,8 @@ impl App {
         let cur = if self.playback.playing { self.playback.speed } else { 0.0 };
         let next = if cur * dir > 0.0 { (cur * 2.0).clamp(-MAX_SHUTTLE, MAX_SHUTTLE) } else { dir.signum() };
         if self.playback.playing {
-            self.playhead = self.audio.pause();
+            let t = self.audio.pause();
+            self.set_cursor(t);
         }
         self.play(next);
     }
@@ -1686,12 +1703,14 @@ impl App {
     pub fn step(&mut self, frames: i64) {
         self.stop();
         // Step on the exact frame grid so repeated steps never drift off it.
-        let rate = self.project.timeline.format.rate;
-        self.playhead = Time::from_frames((self.playhead.frames_round(rate) + frames).max(0), rate);
+        let rate = self.transport_rate();
+        let t = Time::from_frames((self.cursor().frames_round(rate) + frames).max(0), rate);
+        self.set_cursor(t);
     }
 
     /// Move the playhead while dragging it, sounding the audio under it.
     pub fn scrub_to(&mut self, t: Time) {
+        self.show_source(false);
         let t = t.max(Time::ZERO);
         if t != self.playhead {
             self.playhead = t;
@@ -1699,7 +1718,9 @@ impl App {
         }
     }
 
+    /// Move the timeline playhead (the viewer goes back to the timeline).
     pub fn seek(&mut self, t: Time) {
+        self.show_source(false);
         let t = t.max(Time::ZERO);
         self.playhead = t;
         if self.playback.playing {
@@ -1722,6 +1743,9 @@ impl App {
 
     /// Time shown in the viewer: the skimmer wins over the playhead.
     pub fn view_time(&self) -> Time {
+        if self.source_active() {
+            return self.source.pos;
+        }
         if self.playback.playing {
             return self.playhead;
         }
@@ -1801,7 +1825,9 @@ impl App {
         // export renders whole frames: show the same ones
         let rate = self.project.timeline.format.rate;
         let t = Time::from_frames(self.view_time().frames_floor(rate), rate);
-        let comp = match self.browser.skim {
+        // a skimmed browser clip, else the source viewer's clip
+        let src = self.browser.skim.or_else(|| self.source_frame());
+        let comp = match src {
             Some((a, st)) => self.browser_composition(a, st),
             None => eval::evaluate(&self.project.timeline, t),
         };
@@ -1840,7 +1866,7 @@ impl App {
             (Some(&clip), Some((node, matte))) if self.inspector_tab == InspectorTab::Color => Some(nle_render::Highlight { clip, node, matte }),
             _ => None,
         };
-        let key = (self.history.revision(), t, self.viewer.wipe, proxy, self.browser.skim, highlight);
+        let key = (self.history.revision(), t, self.viewer.wipe, proxy, src, highlight);
         if p.last != Some(key) || p.pending_uploads {
             let opts = RenderOptions { wipe: self.viewer.wipe, color: true, highlight, transparent: false };
             p.renderer.render(&comp, &mut NoBlock(&self.project), opts);
@@ -1851,12 +1877,23 @@ impl App {
 
     fn sync_audio(&mut self) {
         let rev = self.history.revision();
-        let changed = rev != self.audio_revision;
+        let want = if self.source_active() { self.source.asset } else { None };
+        let changed = rev != self.audio_revision || want != self.audio_source;
         if changed {
-            let spans = eval::audio_spans(&self.project.timeline);
-            self.refresh_duck_envelope(&spans);
-            self.audio.set_spans(spans);
+            match want.and_then(|a| self.project.asset(a)) {
+                // the source viewer plays one clip whose time is the source time
+                Some(a) => {
+                    let spans = eval::audio_spans(&crate::source::source_timeline(a, self.project.timeline.format));
+                    self.audio.set_spans(spans);
+                }
+                None => {
+                    let spans = eval::audio_spans(&self.project.timeline);
+                    self.refresh_duck_envelope(&spans);
+                    self.audio.set_spans(spans);
+                }
+            }
             self.audio_revision = rev;
+            self.audio_source = want;
         }
         // busses live on the project timeline, also while stepped into a compound
         self.audio.set_mixer(&self.focus.root(&self.project.timeline).mixer);
@@ -2085,7 +2122,7 @@ impl App {
         ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Paste(_))))
     }
 
-    fn dispatch_action(&mut self, action: Action) {
+    pub(crate) fn dispatch_action(&mut self, action: Action) {
         match action {
             Action::PlayPause => self.toggle_play(),
             Action::ShuttleLeft => self.shuttle(-1.0),
@@ -2097,10 +2134,10 @@ impl App {
             Action::StepForward10 => self.step(10),
             Action::PrevEdit => self.jump_edit(false),
             Action::NextEdit => self.jump_edit(true),
-            Action::GoToStart => self.seek(Time::ZERO),
+            Action::GoToStart => self.seek_cursor(Time::ZERO),
             Action::GoToEnd => {
-                let end = self.project.timeline.extent();
-                self.seek(end);
+                let end = self.transport_end();
+                self.seek_cursor(end);
             }
             Action::SelectTool => self.tool = Tool::Select,
             Action::TrimTool => self.tool = Tool::Trim,
@@ -2150,26 +2187,22 @@ impl App {
             Action::FinalizeAudition => self.finalize_audition(),
             Action::ToggleAudioLanes => self.tl.audio_lanes = !self.tl.audio_lanes,
             Action::HoldFrame => self.freeze_frame(),
-            Action::AppendClip => {
-                if let Some(asset) = self.browser.selected {
-                    self.add_asset_to_timeline(asset, EditMode::Append);
-                }
-            }
-            Action::InsertClip => {
-                if let Some(asset) = self.browser.selected {
-                    self.add_asset_to_timeline(asset, EditMode::Insert);
-                }
-            }
-            Action::ConnectClip => {
-                if let Some(asset) = self.browser.selected {
-                    self.add_asset_to_timeline(asset, EditMode::Connect);
-                }
-            }
-            Action::OverwriteClip => {
-                if let Some(asset) = self.browser.selected {
-                    self.add_asset_to_timeline(asset, EditMode::Overwrite);
-                }
-            }
+            Action::AppendClip => match self.edit_asset() {
+                Some(asset) => self.three_point_edit(asset, EditMode::Append),
+                None => self.status("Select a browser clip or open one in the source viewer"),
+            },
+            Action::InsertClip => match self.edit_asset() {
+                Some(asset) => self.three_point_edit(asset, EditMode::Insert),
+                None => self.status("Select a browser clip or open one in the source viewer"),
+            },
+            Action::ConnectClip => match self.edit_asset() {
+                Some(asset) => self.three_point_edit(asset, EditMode::Connect),
+                None => self.status("Select a browser clip or open one in the source viewer"),
+            },
+            Action::OverwriteClip => match self.edit_asset() {
+                Some(asset) => self.three_point_edit(asset, EditMode::Overwrite),
+                None => self.status("Select a browser clip or open one in the source viewer"),
+            },
             Action::AddKeyframe => self.add_keyframe_at_playhead(),
             Action::ToggleAnimation => self.tl.show_animation = !self.tl.show_animation,
             Action::ToggleRetime => self.tl.show_retime = !self.tl.show_retime,
@@ -2209,6 +2242,17 @@ impl App {
             Action::RateFavorite => self.rate_targets(nle_core::Rating::Favorite),
             Action::RateReject => self.rate_targets(nle_core::Rating::Rejected),
             Action::RateClear => self.rate_targets(nle_core::Rating::None),
+            Action::MakeSubclip => self.make_subclip(),
+            Action::MarkIn => self.mark(false),
+            Action::MarkOut => self.mark(true),
+            Action::MarkClip => self.mark_clip(),
+            Action::ClearInOut => self.clear_marks(),
+            Action::GoToIn => self.go_to_mark(false),
+            Action::GoToOut => self.go_to_mark(true),
+            Action::ToggleSourceViewer => self.toggle_source_viewer(),
+            Action::MatchFrame => self.match_frame(),
+            Action::ReplaceEdit => self.replace_edit(),
+            Action::FitToFill => self.fit_to_fill(),
         }
     }
 
@@ -2897,13 +2941,13 @@ impl App {
             return;
         }
         let t = self.audio.position();
-        let end = self.project.timeline.extent();
+        let end = self.transport_end();
         if (self.playback.speed > 0.0 && t >= end) || (self.playback.speed < 0.0 && t <= Time::ZERO) {
-            self.playhead = t.clamp(Time::ZERO, end);
+            self.set_cursor(t.clamp(Time::ZERO, end));
             self.audio.pause();
             self.playback = Playback { playing: false, speed: 0.0 };
         } else {
-            self.playhead = t;
+            self.set_cursor(t);
         }
         ctx.request_repaint();
     }

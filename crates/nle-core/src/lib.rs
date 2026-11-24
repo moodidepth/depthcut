@@ -47,6 +47,7 @@ pub mod presets;
 pub mod project;
 pub mod speed;
 pub mod text_anim;
+pub mod three_point;
 pub mod time;
 pub mod timeline;
 pub mod tracks;

@@ -53,10 +53,21 @@ pub struct GizmoDrag {
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     // ----- top bar
     ui.horizontal(|ui| {
-        let title = match app.browser.skim {
-            Some((a, _)) => app.project.asset(a).map(|a| a.name.clone()).unwrap_or_default(),
+        let source = app.source_active();
+        let title = match app.browser.skim.map(|s| s.0).or_else(|| app.source.asset.filter(|_| source)) {
+            Some(a) => app.project.asset(a).map(|a| a.name.clone()).unwrap_or_default(),
             None => app.project.timeline.name.clone(),
         };
+        if app.source.asset.is_some() {
+            let tip = app.keymap.tip("Switch the viewer between the source clip and the timeline", nle_core::Action::ToggleSourceViewer);
+            if ui.selectable_label(source, "Source").on_hover_text(&tip).clicked() {
+                app.show_source(true);
+            }
+            if ui.selectable_label(!source, "Timeline").on_hover_text(&tip).clicked() {
+                app.show_source(false);
+            }
+            ui.separator();
+        }
         ui.label(egui::RichText::new(title).strong());
         ui.label(egui::RichText::new(app.project.timeline.format.label()).small().color(theme::TEXT_DIM));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -105,7 +116,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     });
 
     // ----- image area
-    let transport_h = 46.0;
+    let source = app.source_active();
+    let transport_h = if source { 46.0 + 52.0 } else { 46.0 };
     let scopes_h = if app.viewer.scopes { (ui.available_height() * 0.38).clamp(150.0, 330.0) } else { 0.0 };
     let area = Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), (ui.available_height() - transport_h - scopes_h).max(80.0)));
     let resp = ui.allocate_rect(area, Sense::click_and_drag());
@@ -183,7 +195,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 
     if app.punch.picking {
         pick_punch_anchor(app, ui, &resp, img, (fw, fh));
-    } else if app.browser.skim.is_none() && !app.playback.playing && !wipe_drag && !crate::motion_ui::overlay(app, ui, img) && !crate::color_ui::mask_gizmo(app, ui, img, (fw, fh))
+    } else if app.browser.skim.is_none()
+        && !source
+        && !app.playback.playing
+        && !wipe_drag
+        && !crate::motion_ui::overlay(app, ui, img)
+        && !crate::color_ui::mask_gizmo(app, ui, img, (fw, fh))
     {
         gizmo(app, ui, &resp, img, (fw, fh), &to_screen);
     } else if app.viewer.drag.take().is_some() {
@@ -197,6 +214,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     // ----- video scopes drawer
     if app.viewer.scopes {
         scopes_drawer(app, ui, scopes_h);
+    }
+
+    // ----- source clip strip: marks and edit buttons
+    if source {
+        ui.add_space(4.0);
+        crate::source::source_controls(app, ui);
     }
 
     // ----- transport bar
@@ -585,7 +608,7 @@ fn transport(app: &mut App, ui: &mut egui::Ui) {
         ui.spacing_mut().button_padding = Vec2::new(10.0, 4.0);
         let big = |s: &str| egui::RichText::new(s).size(16.0);
         if ui.button(big("⏮")).on_hover_text("Go to start (Home)").clicked() {
-            app.seek(Time::ZERO);
+            app.seek_cursor(Time::ZERO);
         }
         if ui.button(big("⏪")).on_hover_text(app.keymap.tip("Play reverse", nle_core::Action::ShuttleLeft)).clicked() {
             app.shuttle(-1.0);
@@ -598,8 +621,8 @@ fn transport(app: &mut App, ui: &mut egui::Ui) {
             app.shuttle(1.0);
         }
         if ui.button(big("⏭")).on_hover_text("Go to end (End)").clicked() {
-            let end = app.project.timeline.extent();
-            app.seek(end);
+            let end = app.transport_end();
+            app.seek_cursor(end);
         }
         if app.playback.playing && (app.playback.speed - 1.0).abs() > 1e-6 {
             ui.label(egui::RichText::new(format!("{:+.0}×", app.playback.speed)).color(theme::SNAP));
@@ -627,18 +650,18 @@ fn transport(app: &mut App, ui: &mut egui::Ui) {
                 };
                 ui.painter().rect_filled(Rect::from_min_size(bar.min, Vec2::new(bar.width() * f, 5.0)), CornerRadius::same(1), col);
             }
-            let dur = format_timecode(app.project.timeline.extent(), rate);
+            let dur = format_timecode(app.transport_end(), rate);
             ui.label(egui::RichText::new(format!("/ {dur}")).monospace().color(theme::TEXT_DIM));
 
             // big timecode — click to type a new position
-            let shown = if app.viewer.editing_tc.is_some() { app.playhead } else { app.view_time() };
+            let shown = if app.viewer.editing_tc.is_some() { app.cursor() } else { app.view_time() };
             match &mut app.viewer.editing_tc {
                 Some(text) => {
                     let r = ui.add(egui::TextEdit::singleline(text).font(egui::FontId::monospace(18.0)).desired_width(130.0));
                     r.request_focus();
                     if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                         if let Some(t) = parse_timecode(text, rate) {
-                            app.seek(t);
+                            app.seek_cursor(t);
                         }
                         app.viewer.editing_tc = None;
                     } else if ui.input(|i| i.key_pressed(egui::Key::Escape)) || r.lost_focus() {
