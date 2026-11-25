@@ -302,6 +302,10 @@ pub struct ColorParams {
     /// Stacked corrections applied after the primary, in order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub corrections: Vec<crate::color::ColorCorrection>,
+    /// Node compositor wiring of the corrections (plus effects, media,
+    /// mixers). `None`: the corrections run in series.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph: Option<crate::node_graph::NodeGraph>,
 }
 
 impl Default for ColorParams {
@@ -322,6 +326,7 @@ impl Default for ColorParams {
             working: Default::default(),
             input_lut: None,
             corrections: Vec::new(),
+            graph: None,
         }
     }
 }
@@ -351,7 +356,8 @@ impl ColorParams {
                 && self.lut.is_none()
                 && self.input_space == crate::color::ColorSpace::Rec709
                 && self.input_lut.is_none()
-                && self.corrections.iter().all(|n| n.is_identity()))
+                && self.corrections.iter().all(|n| n.is_identity())
+                && self.graph.as_ref().is_none_or(|g| g.only_correctors()))
     }
 }
 
@@ -1520,6 +1526,9 @@ impl Clip {
                 f(p);
             }
         }
+        if let Some(g) = &mut self.color.graph {
+            g.for_each_param_mut(&mut f);
+        }
     }
 
     /// Frame-synthesis quality for this clip (retime quality when retimed).
@@ -1598,6 +1607,7 @@ impl Clip {
         if let Some(a) = self.asset_id() {
             out.insert(a);
         }
+        out.extend(self.color.graph.iter().flat_map(|g| g.media()));
         for c in self.connected.iter().chain(self.audition.iter()) {
             c.collect_assets(out);
         }

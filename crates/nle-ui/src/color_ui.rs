@@ -179,6 +179,12 @@ pub fn corrections(ui: &mut egui::Ui, col: &mut ColorParams, view: &mut ColorVie
             col.corrections.swap(a, b);
         } else if let Some(i) = remove {
             let gone = col.corrections.remove(i).id;
+            if let Some(g) = &mut col.graph {
+                let ids: Vec<u64> = g.nodes.iter().filter(|n| matches!(n.kind, nle_core::node_graph::NodeKind::Corrector { node } if node == gone)).map(|n| n.id).collect();
+                for id in ids {
+                    g.remove(id);
+                }
+            }
             if view.highlight.is_some_and(|h| h.0 == gone) {
                 view.highlight = None;
             }

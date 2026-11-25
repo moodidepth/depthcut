@@ -83,6 +83,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let motion_cx = crate::motion_ui::tab_ctx(app, id, local);
     let mut motion_action = None;
     let motion_ui = &mut app.motion;
+    let video_assets: Vec<(nle_core::AssetId, String)> = app.project.assets.iter().filter(|a| a.video.is_some()).map(|a| (a.id, a.name.clone())).collect();
     let color_view = &mut app.color_view;
     let stills = &app.project.stills;
     let grade_ui = &mut app.grade;
@@ -90,7 +91,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match app.inspector_tab {
         InspectorTab::Video => video_tab(ui, &mut c, local, frame, layer, &mut retime_action, &mut toggle_reframe_916, &mut app.punch, &mut punch_request, color_view),
         InspectorTab::Color => {
-            color_tab(ui, &mut c, local, frame, detected_space, color_view);
+            color_tab(ui, &mut c, local, frame, detected_space, color_view, &video_assets);
             ui.add_space(6.0);
             gallery_action = crate::grade_ui::gallery(ui, stills, grade_ui);
         }
@@ -737,7 +738,7 @@ fn effects_section(ui: &mut egui::Ui, effects: &mut Vec<Effect>, t: Time, f: Tim
 
 // ---------------------------------------------------------------------------
 
-fn color_tab(ui: &mut egui::Ui, c: &mut Clip, t: Time, f: Time, detected: Option<nle_core::color::ColorSpace>, view: &mut ColorView) {
+fn color_tab(ui: &mut egui::Ui, c: &mut Clip, t: Time, f: Time, detected: Option<nle_core::color::ColorSpace>, view: &mut ColorView, assets: &[(nle_core::AssetId, String)]) {
     if matches!(c.kind, ClipKind::Gap) || !c.has_video() && !matches!(c.kind, ClipKind::Adjustment | ClipKind::Title(_)) {
         ui.label(egui::RichText::new("No video in this clip.").color(theme::TEXT_DIM));
         return;
@@ -800,6 +801,7 @@ fn color_tab(ui: &mut egui::Ui, c: &mut Clip, t: Time, f: Time, detected: Option
             }
         });
         corrections(ui, col, view, t, f);
+        crate::node_ui::node_graph(ui, col, assets, t, f);
     });
 }
 

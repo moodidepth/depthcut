@@ -17,7 +17,8 @@ use crate::text::{self, FontBook};
 use crate::transform::{layer_to_output, Affine};
 use bytemuck::{Pod, Zeroable};
 use nle_core::color::{ColorCorrection, MaskShape, ResolvedMask, WorkingSpace};
-use nle_core::eval::{Layer, LayerSource, RenderNode, ResolvedColor, ResolvedTransition};
+use nle_core::eval::{Layer, LayerSource, RenderNode, ResolvedColor, ResolvedTransition, ResolvedVideo};
+use nle_core::node_graph::{Op as GraphOp, ResolvedGraph};
 use nle_core::ClipId;
 use nle_core::{AssetId, Composition, EffectKind, FrameBlendMode, FrameRate, MatteKind, ResolvedEffect, TitleAnim, TitleParams};
 use nle_media::{PixelFormat, VideoFrame};
@@ -1129,8 +1130,32 @@ impl Renderer {
     /// The full colour pipeline of a layer: the primary grade (with colour
     /// management), then each correction node. The wipe compares against the
     /// ungraded source.
-    fn color_pipeline(&mut self, enc: &mut wgpu::CommandEncoder, src: &wgpu::TextureView, size: (u32, u32), c: &ResolvedColor, clip: ClipId, opts: RenderOptions) -> Target {
+    #[allow(clippy::too_many_arguments)] // one GPU pass chain: encoder, targets and per-pass state
+    fn color_pipeline(
+        &mut self,
+        enc: &mut wgpu::CommandEncoder,
+        src: &wgpu::TextureView,
+        size: (u32, u32),
+        c: &ResolvedColor,
+        clip: ClipId,
+        opts: RenderOptions,
+        frames: &mut dyn FrameSource,
+        time: f32,
+    ) -> Target {
         let hl = opts.highlight.filter(|h| h.clip == clip);
+        if let Some(g) = &c.graph {
+            // the node compositor decides the order and wiring
+            if g.is_identity() {
+                return self.grade(enc, src, size, c, opts.wipe, opts.hdr.headroom());
+            }
+            let graded = self.grade(enc, src, size, c, None, opts.hdr.headroom());
+            let mut cur = self.run_graph(enc, graded, size, g, c.working, hl, frames, time);
+            if let Some(w) = opts.wipe {
+                let next = self.mask_mix(enc, src, &cur.view, size, None, Some(w));
+                self.pool.put(std::mem::replace(&mut cur, next));
+            }
+            return cur;
+        }
         let run: Vec<&ColorCorrection> = c.nodes.iter().filter(|n| !n.is_identity() || hl.is_some_and(|h| h.node == n.id)).collect();
         if run.is_empty() {
             return self.grade(enc, src, size, c, opts.wipe, opts.hdr.headroom());
@@ -1149,6 +1174,168 @@ impl Renderer {
             self.pool.put(std::mem::replace(&mut cur, next));
         }
         cur
+    }
+
+    /// The node compositor: `source` (the primary-graded picture) through
+    /// the graph's steps. Every step works at `size`; media is fitted in.
+    #[allow(clippy::too_many_arguments)] // one GPU pass chain: encoder, targets and per-pass state
+    fn run_graph(
+        &mut self,
+        enc: &mut wgpu::CommandEncoder,
+        source: Target,
+        size: (u32, u32),
+        g: &ResolvedGraph,
+        working: WorkingSpace,
+        hl: Option<Highlight>,
+        frames: &mut dyn FrameSource,
+        time: f32,
+    ) -> Target {
+        let last = g.last_use();
+        let mut outs: Vec<Option<Target>> = Vec::with_capacity(g.steps.len());
+        outs.push(Some(source));
+        for (i, step) in g.steps.iter().enumerate().skip(1) {
+            let out = self.graph_step(enc, &step.op, &step.inputs, &outs, size, working, hl, frames, time);
+            outs.push(Some(out));
+            // release what nothing later reads
+            for j in step.inputs.iter().flatten() {
+                if last[*j] == i {
+                    if let Some(t) = outs[*j].take() {
+                        self.pool.put(t);
+                    }
+                }
+            }
+        }
+        let result = g.output.and_then(|o| outs[o].take());
+        for t in outs.into_iter().flatten() {
+            self.pool.put(t);
+        }
+        result.unwrap_or_else(|| self.blank(enc, size))
+    }
+
+    /// A transparent target.
+    fn blank(&mut self, enc: &mut wgpu::CommandEncoder, size: (u32, u32)) -> Target {
+        let t = self.pool.get(&self.gpu.device, size.0, size.1);
+        self.fill(enc, &t, [0.0; 4]);
+        t
+    }
+
+    /// A copy of `src` (a pass-through step needs its own target).
+    fn copy_of(&mut self, enc: &mut wgpu::CommandEncoder, src: &wgpu::TextureView, size: (u32, u32)) -> Target {
+        self.mask_mix(enc, src, src, size, None, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn graph_step(
+        &mut self,
+        enc: &mut wgpu::CommandEncoder,
+        op: &GraphOp,
+        inputs: &[Option<usize>],
+        outs: &[Option<Target>],
+        size: (u32, u32),
+        working: WorkingSpace,
+        hl: Option<Highlight>,
+        frames: &mut dyn FrameSource,
+        time: f32,
+    ) -> Target {
+        let input = |k: usize| inputs.get(k).copied().flatten().and_then(|j| outs[j].as_ref());
+        match op {
+            GraphOp::Source => match input(0) {
+                Some(t) => self.copy_of(enc, &t.view, size),
+                None => self.blank(enc, size),
+            },
+            GraphOp::Correct(n) => {
+                let Some(src) = input(0) else { return self.blank(enc, size) };
+                let mode = match hl {
+                    Some(h) if h.node == n.id => 1 + h.matte as u32,
+                    _ => 0,
+                };
+                self.correct(enc, &src.view, size, n, working, mode)
+            }
+            GraphOp::Effect(e) => {
+                let Some(src) = input(0) else { return self.blank(enc, size) };
+                match self.apply_effect(enc, &src.view, size, e, None, 1.0, time, false) {
+                    Some(t) if (t.width, t.height) == size => t,
+                    other => {
+                        if let Some(t) = other {
+                            self.pool.put(t);
+                        }
+                        self.copy_of(enc, &src.view, size)
+                    }
+                }
+            }
+            GraphOp::Media { asset, source_time } => {
+                let idx = source_time.frames_floor(frames.frame_rate(*asset));
+                let Some(f) = self.media_frame(enc, *asset, idx, frames, false) else { return self.blank(enc, size) };
+                let bg = self.blank(enc, size);
+                let v = ResolvedVideo::default();
+                let out = match layer_to_output(&v, [f.width as f32, f.height as f32], [size.0 as f32, size.1 as f32]).inverse() {
+                    Some(inv) => self.composite_with(enc, &bg, &f.view, inv, &v),
+                    None => self.copy_of(enc, &bg.view, size),
+                };
+                self.pool.put(f);
+                self.pool.put(bg);
+                out
+            }
+            GraphOp::Solid(c) => {
+                let t = self.pool.get(&self.gpu.device, size.0, size.1);
+                self.fill(enc, &t, *c);
+                t
+            }
+            GraphOp::Merge(m) => {
+                let Some(fg) = input(1) else {
+                    return match input(0) {
+                        Some(b) => self.copy_of(enc, &b.view, size),
+                        None => self.blank(enc, size),
+                    };
+                };
+                let v = ResolvedVideo { position: m.position, scale: [m.scale; 2], rotation: m.rotation, opacity: m.opacity, blend: m.blend, ..ResolvedVideo::default() };
+                let own_bg = if input(0).is_none() { Some(self.blank(enc, size)) } else { None };
+                let bg = input(0).or(own_bg.as_ref()).expect("background");
+                let out = match layer_to_output(&v, [size.0 as f32, size.1 as f32], [size.0 as f32, size.1 as f32]).inverse() {
+                    Some(inv) => self.composite_with(enc, bg, &fg.view, inv, &v),
+                    None => self.copy_of(enc, &bg.view, size),
+                };
+                if let Some(t) = own_bg {
+                    self.pool.put(t);
+                }
+                out
+            }
+            GraphOp::Parallel => {
+                let Some(base) = input(0) else { return self.blank(enc, size) };
+                let mut acc: Option<Target> = None;
+                for k in 1..inputs.len() {
+                    let Some(i) = input(k) else { continue };
+                    let out = self.pool.get(&self.gpu.device, size.0, size.1);
+                    let a = acc.as_ref().map_or(&base.view, |t| &t.view);
+                    self.dispatch(
+                        enc,
+                        &self.p.node_mix,
+                        &[entry(0, tv(a)), entry(1, tv(&i.view)), entry(2, tv(&base.view)), entry(3, tv(&out.view))],
+                        ceil8(size.0),
+                        ceil8(size.1),
+                    );
+                    if let Some(old) = acc.replace(out) {
+                        self.pool.put(old);
+                    }
+                }
+                acc.unwrap_or_else(|| self.copy_of(enc, &base.view, size))
+            }
+            GraphOp::Layer(blend) => {
+                let Some(bottom) = input(0) else { return self.blank(enc, size) };
+                // output pixel â†’ uv of a same-size layer
+                let inv = Affine { m: [[1.0 / size.0 as f32, 0.0, 0.0], [0.0, 1.0 / size.1 as f32, 0.0]] };
+                let v = ResolvedVideo { blend: *blend, ..ResolvedVideo::default() };
+                let mut acc: Option<Target> = None;
+                for k in 1..inputs.len() {
+                    let Some(i) = input(k) else { continue };
+                    let out = self.composite_with(enc, acc.as_ref().unwrap_or(bottom), &i.view, inv, &v);
+                    if let Some(old) = acc.replace(out) {
+                        self.pool.put(old);
+                    }
+                }
+                acc.unwrap_or_else(|| self.copy_of(enc, &bottom.view, size))
+            }
+        }
     }
 
     fn correct(&mut self, enc: &mut wgpu::CommandEncoder, src: &wgpu::TextureView, size: (u32, u32), n: &ColorCorrection, working: WorkingSpace, highlight: u32) -> Target {
@@ -1275,8 +1462,13 @@ impl Renderer {
     }
 
     fn composite(&mut self, enc: &mut wgpu::CommandEncoder, bg: &Target, img: &wgpu::TextureView, inv: Affine, layer: &Layer) -> Target {
+        self.composite_with(enc, bg, img, inv, &layer.video)
+    }
+
+    /// `img` over `bg` placed by `inv` (output pixel → image uv), with `v`'s
+    /// crop, source rect, opacity and blend mode.
+    fn composite_with(&mut self, enc: &mut wgpu::CommandEncoder, bg: &Target, img: &wgpu::TextureView, inv: Affine, v: &ResolvedVideo) -> Target {
         let out = self.pool.get(&self.gpu.device, bg.width, bg.height);
-        let v = &layer.video;
         let u = self.uniform(&CompU {
             inv_row0: [inv.m[0][0], inv.m[0][1], inv.m[0][2], 0.0],
             inv_row1: [inv.m[1][0], inv.m[1][1], inv.m[1][2], 0.0],
@@ -1986,7 +2178,7 @@ impl Renderer {
             }
             None => img,
         };
-        let img = self.maybe_grade(enc, img, layer, opts);
+        let img = self.maybe_grade(enc, img, layer, opts, src, ctx.time);
         let warped_mattes = self.bind_mattes(enc, layer, src);
         let out = if layer.effects.is_empty() {
             img
@@ -2068,10 +2260,10 @@ impl Renderer {
         Some(t)
     }
 
-    fn maybe_grade(&mut self, enc: &mut wgpu::CommandEncoder, img: Img, layer: &Layer, opts: RenderOptions) -> Img {
+    fn maybe_grade(&mut self, enc: &mut wgpu::CommandEncoder, img: Img, layer: &Layer, opts: RenderOptions, frames: &mut dyn FrameSource, time: f32) -> Img {
         if opts.color && (layer.color.enabled || opts.highlight.is_some_and(|h| h.clip == layer.clip)) {
             let size = img.size();
-            let graded = self.color_pipeline(enc, img.view(), size, &layer.color, layer.clip, opts);
+            let graded = self.color_pipeline(enc, img.view(), size, &layer.color, layer.clip, opts, frames, time);
             let Img::Pooled(t) = img;
             {
                 self.pool.put(t);
@@ -2104,7 +2296,7 @@ impl Renderer {
             return bg;
         }
         let size = (bg.width, bg.height);
-        let graded = if grade { Some(self.color_pipeline(enc, &bg.view, size, &layer.color, layer.clip, opts)) } else { None };
+        let graded = if grade { Some(self.color_pipeline(enc, &bg.view, size, &layer.color, layer.clip, opts, src, ctx.time)) } else { None };
         // motion vectors of the composite: previous frame → this one
         let flow = match ctx.prev {
             Some(prev) if layer.has_effect(EffectKind::MotionBlur) && depth < 16 => {

@@ -25,6 +25,7 @@ pub fn used_assets(project: &Project) -> BTreeSet<AssetId> {
             ClipKind::Compound(cc) => cc.spine.iter().for_each(|ch| walk(ch, out)),
             _ => {}
         }
+        out.extend(c.color.graph.iter().flat_map(|g| g.media()));
         c.connected.iter().for_each(|ch| walk(ch, out));
         c.audition.iter().for_each(|ch| walk(ch, out));
     }

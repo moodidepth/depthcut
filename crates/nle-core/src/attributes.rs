@@ -81,12 +81,21 @@ fn stretch_nodes(nodes: &mut [ColorCorrection], k: f64) {
 /// keys scaled by `k`.
 fn grade_copy(src: &ColorParams, k: f64) -> ColorParams {
     let mut g = src.clone();
+    let mut ids = std::collections::HashMap::new();
     for n in &mut g.corrections {
+        let old = n.id;
         *n = n.duplicate();
+        ids.insert(old, n.id);
+    }
+    if let Some(graph) = &mut g.graph {
+        graph.remap_correctors(&ids);
     }
     if k != 1.0 {
         g.params_mut().into_iter().for_each(|p| stretch_param(p, k));
         stretch_nodes(&mut g.corrections, k);
+        if let Some(graph) = &mut g.graph {
+            graph.for_each_param_mut(|p| stretch_param(p, k));
+        }
     }
     g
 }

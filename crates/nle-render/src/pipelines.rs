@@ -23,6 +23,7 @@ pub const SHADER_PACK: &str = include_str!("shaders/pack.wgsl");
 pub const SHADER_FILL: &str = include_str!("shaders/fill.wgsl");
 pub const SHADER_SCOPES: &str = include_str!("shaders/scopes.wgsl");
 pub const SHADER_WARP: &str = include_str!("shaders/warp.wgsl");
+pub const SHADER_NODE_MIX: &str = include_str!("shaders/node_mix.wgsl");
 
 /// Every shader with its entry point (used by the WGSL validation test).
 pub const ALL_SHADERS: &[(&str, &str, &str)] = &[
@@ -45,6 +46,7 @@ pub const ALL_SHADERS: &[(&str, &str, &str)] = &[
     ("correct", SHADER_CORRECT, "main"),
     ("mask", SHADER_MASK, "mask_mix"),
     ("warp", SHADER_WARP, "main"),
+    ("node_mix", SHADER_NODE_MIX, "main"),
     ("optical_flow_median", SHADER_OPTICAL_FLOW, "vec_median"),
 ];
 
@@ -217,6 +219,8 @@ pub struct Pipelines {
     pub pack_p010: Pipe,
     pub pack_rgba64: Pipe,
     pub fill: Pipe,
+    /// Node compositor parallel mixer.
+    pub node_mix: Pipe,
     /// Video scopes: clear, accumulate, histogram max, then one draw pass per scope.
     pub scope_clear: Pipe,
     pub scope_accumulate: Pipe,
@@ -295,6 +299,7 @@ impl Pipelines {
             pack_p010: pipe(device, cache, "pack_p010", SHADER_PACK, "p010", &[B::Tex, B::Uniform, B::StorageRw]),
             pack_rgba64: pipe(device, cache, "pack_rgba64", SHADER_PACK, "rgba64", &[B::Tex, B::Uniform, B::StorageRw]),
             fill: pipe(device, cache, "fill", SHADER_FILL, "main", &[B::Uniform, w]),
+            node_mix: pipe(device, cache, "node_mix", SHADER_NODE_MIX, "main", &[B::Tex, B::Tex, B::Tex, w]),
             scope_clear: pipe_m(device, cache, "scope_clear", &sc, "clear", &sspec),
             scope_accumulate: pipe_m(device, cache, "scope_accumulate", &sc, "accumulate", &sspec),
             scope_hist_max: pipe_m(device, cache, "scope_hist_max", &sc, "hist_max", &sspec),

@@ -45,6 +45,7 @@ mod links;
 pub mod media_mgmt;
 pub mod motion;
 pub mod multicam;
+pub mod node_graph;
 pub mod otio;
 pub mod presets;
 pub mod project;

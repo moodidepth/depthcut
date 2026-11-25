@@ -63,6 +63,8 @@ pub struct ResolvedColor {
     /// Enabled correction nodes in order (identity ones included, so a
     /// node's qualifier can still be previewed).
     pub nodes: Vec<crate::color::ColorCorrection>,
+    /// The node compositor's steps (replace the serial `nodes` chain).
+    pub graph: Option<crate::node_graph::ResolvedGraph>,
 }
 
 impl Default for ResolvedColor {
@@ -83,6 +85,7 @@ impl Default for ResolvedColor {
             working: Default::default(),
             input_lut: None,
             nodes: Vec::new(),
+            graph: None,
         }
     }
 }
@@ -220,6 +223,9 @@ impl Composition {
                 LayerSource::Compound(c) => out.extend(c.media_requests()),
                 _ => {}
             }
+            if let Some(g) = &l.color.graph {
+                out.extend(g.media());
+            }
         }
         for n in &self.nodes {
             match n {
@@ -296,6 +302,7 @@ fn resolve_color(c: &Clip, t: Time) -> ResolvedColor {
         working: k.working,
         input_lut: k.input_lut.clone(),
         nodes: if k.enabled { k.corrections.iter().filter(|n| n.enabled).map(|n| n.at(t)).filter(|n| n.mix > 0.0).collect() } else { Vec::new() },
+        graph: None,
     }
 }
 
@@ -331,6 +338,9 @@ pub fn clip_layer(c: &Clip, local: Time, lane: i32) -> Option<Layer> {
                 *m = tracked_mask(c, m, s);
             }
         }
+    }
+    if c.color.enabled {
+        color.graph = c.color.graph.as_ref().map(|g| g.resolve(&color.nodes, local));
     }
     Some(Layer { clip: c.id, lane, source, video, color, adjustment: matches!(c.kind, ClipKind::Adjustment), effects: resolve_effects(c, local, src) })
 }
