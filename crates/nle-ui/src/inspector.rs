@@ -19,7 +19,9 @@ const SPEED_TAG: u64 = 0x2f;
 const RENAME_KEY: u64 = 0x3f;
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
+    // the panel keeps the width it was given: the tabs wrap and a wide tab
+    // scrolls sideways, where before the panel grew to fit each tab's widest row
+    ui.horizontal_wrapped(|ui| {
         for (tab, label) in [
             (InspectorTab::Video, "Video"),
             (InspectorTab::Color, "Color"),
@@ -88,7 +90,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let stills = &app.project.stills;
     let grade_ui = &mut app.grade;
     let mut gallery_action = None;
-    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match app.inspector_tab {
+    egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| match app.inspector_tab {
         InspectorTab::Video => video_tab(ui, &mut c, local, frame, layer, &mut retime_action, &mut toggle_reframe_916, &mut app.punch, &mut punch_request, color_view),
         InspectorTab::Color => {
             color_tab(ui, &mut c, local, frame, detected_space, color_view, &video_assets);

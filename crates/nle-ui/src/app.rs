@@ -189,6 +189,11 @@ pub struct App {
     /// The previous session ended abnormally (shown once at startup).
     pub previous_crash: Option<PreviousCrash>,
     pub selection: Vec<ClipId>,
+    /// The selection last seen at each history state, so undo / redo bring
+    /// back what was selected there instead of dropping clips they replace.
+    selection_at: std::collections::HashMap<u64, Vec<ClipId>>,
+    /// A File / Edit / … menu is open: keys go to it, not to shortcuts.
+    menubar_open: bool,
     pub playhead: Time,
     /// Compound clips / storylines stepped into (double-click). While any
     /// are open, `project.timeline` shows the innermost one's contents and
@@ -343,6 +348,8 @@ impl App {
             recovery,
             previous_crash: diagnostics::take_previous_crash(),
             selection: Vec::new(),
+            selection_at: Default::default(),
+            menubar_open: false,
             playhead: Time::ZERO,
             focus: Focus::default(),
             hold_connections: false,
@@ -449,6 +456,7 @@ impl App {
         self.copied.clear(); // its assets belong to the project being left
         self.playhead = Time::ZERO;
         self.history.clear();
+        self.selection_at.clear();
         self.mark_saved();
         for a in self.project.assets.clone() {
             self.library.ensure(&a);
@@ -582,6 +590,7 @@ impl App {
             self.status(format!("{label}: markers, captions, track controls and the mixer belong to the project timeline \u{2014} step out of the compound first"));
             return false;
         }
+        self.remember_selection();
         let result = self.focus.execute(&mut self.project.timeline, &mut self.history, cmd, key);
         self.after_focus_edit();
         match result {
@@ -599,12 +608,16 @@ impl App {
     pub fn undo(&mut self) {
         let label = self.history.undo_label();
         let named = self.project.name == self.root_timeline_name();
+        self.remember_selection();
         if self.focus.undo(&mut self.project.timeline, &mut self.history) {
             self.after_focus_edit();
             if named {
                 self.project.name = self.root_timeline_name().to_owned();
             }
             self.status(format!("Undo {}", label.unwrap_or("")));
+            if let Some(sel) = self.selection_at.get(&self.history.state_id()) {
+                self.selection.clone_from(sel);
+            }
             self.prune_selection();
         }
     }
@@ -612,12 +625,16 @@ impl App {
     pub fn redo(&mut self) {
         let label = self.history.redo_label();
         let named = self.project.name == self.root_timeline_name();
+        self.remember_selection();
         if self.focus.redo(&mut self.project.timeline, &mut self.history) {
             self.after_focus_edit();
             if named {
                 self.project.name = self.root_timeline_name().to_owned();
             }
             self.status(format!("Redo {}", label.unwrap_or("")));
+            if let Some(sel) = self.selection_at.get(&self.history.state_id()) {
+                self.selection.clone_from(sel);
+            }
             self.prune_selection();
         }
     }
@@ -823,6 +840,14 @@ impl App {
         }
     }
 
+    /// Note the selection for the current history state (see `selection_at`).
+    fn remember_selection(&mut self) {
+        if self.selection_at.len() > 2000 {
+            self.selection_at.clear();
+        }
+        self.selection_at.insert(self.history.state_id(), self.selection.clone());
+    }
+
     fn prune_selection(&mut self) {
         let tl = &self.project.timeline;
         self.selection.retain(|id| tl.clip(*id).is_some());
@@ -863,11 +888,12 @@ impl App {
         let dur = Time::from_secs(if params.roll == nle_core::RollMode::None { 4 } else { 12 });
         let mut clip = Clip::title(params, dur);
         clip.name = name.into();
+        let id = clip.id;
         let lane = self.free_lane_above(self.playhead, dur);
-        if self.project.timeline.spine.is_empty() {
-            self.exec(Command::Append { clip });
-        } else {
-            self.exec(Command::Connect { clip, at: self.playhead, lane });
+        let added = if self.project.timeline.spine.is_empty() { self.exec(Command::Append { clip }) } else { self.exec(Command::Connect { clip, at: self.playhead, lane }) };
+        // select it so the inspector shows what was just added
+        if added && self.project.timeline.clip(id).is_some() {
+            self.selection = vec![id];
         }
         self.inspector_tab = InspectorTab::TitlesTransitions;
     }
@@ -898,11 +924,12 @@ impl App {
     pub fn add_adjustment_clip(&mut self) {
         let dur = Time::from_secs(5);
         let clip = Clip::adjustment(dur);
+        let id = clip.id;
         let lane = self.free_lane_above(self.playhead, dur);
-        if self.project.timeline.spine.is_empty() {
-            self.exec(Command::Append { clip });
-        } else {
-            self.exec(Command::Connect { clip, at: self.playhead, lane });
+        let added = if self.project.timeline.spine.is_empty() { self.exec(Command::Append { clip }) } else { self.exec(Command::Connect { clip, at: self.playhead, lane }) };
+        // select it so the inspector shows what was just added
+        if added && self.project.timeline.clip(id).is_some() {
+            self.selection = vec![id];
         }
         if matches!(self.inspector_tab, InspectorTab::Audio | InspectorTab::TitlesTransitions) {
             self.inspector_tab = InspectorTab::Video;
@@ -1532,8 +1559,10 @@ impl App {
             return;
         }
         let ids = self.selection.clone();
+        let before: std::collections::HashSet<ClipId> = self.project.timeline.spine.iter().map(|c| c.id).collect();
         if self.exec(Command::MakeCompound { ids, name: "Compound Clip".into() }) {
-            self.selection.clear();
+            // select the new compound, like FCP, so it can be inspected or opened at once
+            self.selection = self.project.timeline.spine.iter().filter(|c| !before.contains(&c.id) && matches!(c.kind, ClipKind::Compound(_))).map(|c| c.id).take(1).collect();
         }
     }
 
@@ -2335,6 +2364,11 @@ impl App {
         if self.shortcuts_ui.recording.is_some() || ctx.wants_keyboard_input() {
             return;
         }
+        // an open menu or popup gets the keys: Esc closes it (instead of being
+        // eaten by Clear Selection), and nothing edits the timeline behind it
+        if self.menubar_open || ctx.is_context_menu_open() || ctx.memory(|m| m.any_popup_open()) {
+            return;
+        }
 
         // Alt+Left / Alt+Right nudge a caption block by one frame (unless rebound)
         for (code, key, dir) in [(KeyCode::ArrowLeft, egui::Key::ArrowLeft, -1), (KeyCode::ArrowRight, egui::Key::ArrowRight, 1)] {
@@ -2894,6 +2928,8 @@ impl App {
                     }
                 }
             });
+            // a menu left open this frame (the shortcuts read it next frame)
+            self.menubar_open = egui::menu::BarState::load(ui.ctx(), ui.id()).is_some();
         });
     }
 
@@ -3160,6 +3196,7 @@ impl eframe::App for App {
         self.poll_media_job(ctx);
         self.poll_jobs(ctx);
         self.handle_dropped_files(ctx);
+        self.remember_selection();
         self.handle_keys(ctx);
         self.advance_playback(ctx);
         self.sync_audio();
@@ -3193,7 +3230,7 @@ impl eframe::App for App {
         copilot_ui::show(self, ctx);
         egui::SidePanel::right("inspector")
             .resizable(true)
-            .default_width(330.0)
+            .default_width(380.0)
             .min_width(280.0)
             .frame(egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin::same(8)).stroke(egui::Stroke::new(1.0_f32, theme::BORDER)))
             .show(ctx, |ui| inspector::show(self, ui));

@@ -75,11 +75,15 @@ pub enum Drag {
         key_time: Time,
         origin: Time,
     },
+    /// A velocity-lane dot: the speed follows the pointer's vertical travel
+    /// from where it was grabbed (`grab_y`, at `grab_speed`), not its spot in
+    /// the 34 px lane, which made each pixel ~18 %.
     VelocityKey {
         id: ClipId,
         index: usize,
         lane_top: f32,
-        lane_height: f32,
+        grab_y: f32,
+        grab_speed: f64,
     },
     /// Trim a caption block edge in the captions row; `base` is the track
     /// at drag start (the drag is re-applied to it every frame).
@@ -660,7 +664,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 None => Drag::CaptionSlide { index, origin: t, base },
             })
         } else if let Some((id, idx, _, lr)) = vel_handles.iter().rev().find(|(_, _, pos, _)| origin.distance(*pos) <= 9.0) {
-            Some(Drag::VelocityKey { id: *id, index: *idx, lane_top: lr.top(), lane_height: lr.height() })
+            let grab_speed = app.project.timeline.clip(*id).map_or(1.0, |c| {
+                let r = c.retime.clone().unwrap_or_else(|| Retime::uniform(c.duration, 1.0));
+                r.velocity_curve.as_ref().and_then(|cv| cv.keys.get(*idx)).map_or_else(|| r.speed_at(Time::ZERO), |k| k.value)
+            });
+            Some(Drag::VelocityKey { id: *id, index: *idx, lane_top: lr.top(), grab_y: origin.y, grab_speed })
         } else if let Some(k) = anim_key_hit(app, &hits, origin, &geo, anim) {
             if let Drag::Key { id, key_time, .. } = k {
                 app.tl.selected_key = Some((id, key_time));
@@ -681,13 +689,23 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 Tool::Select | Tool::Trim if near_start || near_end => Some(Drag::Trim { id: h.id, start_edge: near_start && !near_end, origin: t }),
                 Tool::Select => {
                     if !app.selection.contains(&h.id) {
-                        app.selection = vec![h.id];
+                        // Shift / Ctrl adds the grabbed clip, like a click does
+                        if mods.shift || mods.command {
+                            app.selection.push(h.id);
+                        } else {
+                            app.selection = vec![h.id];
+                        }
                     }
                     Some(Drag::Move { id: h.id, grab: t - h.start })
                 }
                 Tool::Position => {
                     if !app.selection.contains(&h.id) {
-                        app.selection = vec![h.id];
+                        // Shift / Ctrl adds the grabbed clip, like a click does
+                        if mods.shift || mods.command {
+                            app.selection.push(h.id);
+                        } else {
+                            app.selection = vec![h.id];
+                        }
                     }
                     Some(Drag::Position { id: h.id, grab: t - h.start })
                 }
@@ -851,12 +869,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 let x = p.x;
                 painter.line_segment([Pos2::new(x, area.top() + RULER_H), Pos2::new(x, area.bottom())], Stroke::new(1.0_f32, theme::SNAP));
             }
-            Drag::VelocityKey { id, index, lane_top, lane_height } => {
+            Drag::VelocityKey { id, index, lane_top, grab_y, grab_speed } => {
                 if let Some(c) = app.project.timeline.clip(id).cloned() {
                     let clip_start = app.project.timeline.clip_start(id).unwrap_or(Time::ZERO);
                     let mut r = c.retime.clone().unwrap_or_else(|| Retime::uniform(c.duration, 1.0));
-                    let y_norm = (1.0 - ((p.y - (lane_top + 4.0)) / (lane_height - 8.0).max(4.0))).clamp(0.0, 1.0);
-                    let new_speed = vel_norm_to_speed(y_norm);
+                    let fine = ui.input(|i| i.modifiers.shift);
+                    let new_speed = vel_drag_speed(grab_speed, grab_y - p.y, fine);
                     let local_t = (raw_t - clip_start).clamp(Time::ZERO, c.duration);
                     // the key being dragged, which keeps its place in later frames
                     let mut dragged = None;
@@ -1548,31 +1566,14 @@ fn draw_clip(app: &App, p: &egui::Painter, rect: Rect, c: &Clip, selected: bool)
             let arect = Rect::from_min_max(Pos2::new(rect.left(), split), rect.max);
             if has_v {
                 p.rect_filled(vrect, radius, theme::clip_fill(accent));
-                if let Some(asset) = c.asset_id() {
-                    if let Some(strip) = app.library.filmstrips.get(&asset) {
-                        let tw = (vrect.height() * strip.aspect).max(8.0);
-                        let mut x = vrect.left();
-                        let pps = rect.width() / c.duration.as_secs_f64().max(1e-6) as f32;
-                        while x < vrect.right() && x < p.clip_rect().right() {
-                            if x + tw >= p.clip_rect().left() {
-                                let local = Time::from_secs_f64((((x - vrect.left()) + tw * 0.5) / pps).max(0.0) as f64).min(c.duration);
-                                if let Some(tex) = strip.at(c.source_time(local)) {
-                                    let tr = Rect::from_min_size(Pos2::new(x, vrect.top()), Vec2::new(tw, vrect.height()));
-                                    p.image(tex.id(), tr, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::from_gray(225));
-                                }
-                            }
-                            x += tw;
-                        }
-                    }
-                }
+                draw_filmstrip(app, &p, c, rect, vrect, 0);
                 if matches!(c.kind, ClipKind::Compound(_)) {
                     p.rect_filled(vrect, radius, Color32::from_rgba_unmultiplied(10, 132, 255, 40));
                 }
             }
             if has_a || (!has_v && c.has_audio()) {
                 p.rect_filled(arect, radius, theme::clip_fill(theme::AUDIO));
-                if let Some(pk) = c.asset_id().and_then(|a| app.library.peaks.get(&a)) {
-                    draw_peaks(&p, pk, c, rect, arect);
+                if draw_waveform(app, &p, c, rect, arect, 0) {
                     // volume line
                     let pps = pps_of(rect, c).max(1e-3);
                     let vy = |x: f32| {
@@ -1807,6 +1808,86 @@ const WAVE_COL: f32 = 2.0;
 /// columns inside the painter's clip rect (the visible timeline viewport)
 /// are generated — cost is bounded by screen width, not clip length. All
 /// bars go into a single mesh (one draw call per clip).
+/// Rects of the inner clips of compound `c` (drawn at `rect`) that overlap
+/// what it shows, each with the painter clipped to it. None for a retimed
+/// compound, whose inner clips no longer sit at a fixed x.
+fn compound_parts<'a>(c: &Clip, inner: &'a [Clip], rect: Rect, p: &egui::Painter) -> Option<Vec<(&'a Clip, Rect, egui::Painter)>> {
+    if c.retime.is_some() {
+        return None;
+    }
+    let pps = pps_of(rect, c);
+    let mut acc = Time::ZERO;
+    let mut out = Vec::new();
+    for ic in inner {
+        let start = acc;
+        acc += ic.duration;
+        let x0 = rect.left() + (start.as_secs_f64() - c.source_in.as_secs_f64()) as f32 * pps;
+        let x1 = x0 + ic.duration.as_secs_f64() as f32 * pps;
+        let r = Rect::from_min_max(Pos2::new(x0, rect.top()), Pos2::new(x1, rect.bottom()));
+        let clip = r.intersect(p.clip_rect());
+        if clip.width() > 0.0 {
+            out.push((ic, r, p.with_clip_rect(clip)));
+        }
+    }
+    Some(out)
+}
+
+/// Thumbnails along `vrect`; a compound shows those of the clips inside it.
+fn draw_filmstrip(app: &App, p: &egui::Painter, c: &Clip, rect: Rect, vrect: Rect, depth: u32) {
+    match &c.kind {
+        ClipKind::Asset { asset } => {
+            let Some(strip) = app.library.filmstrips.get(asset) else { return };
+            let tw = (vrect.height() * strip.aspect).max(8.0);
+            let mut x = vrect.left();
+            let pps = rect.width() / c.duration.as_secs_f64().max(1e-6) as f32;
+            while x < vrect.right() && x < p.clip_rect().right() {
+                if x + tw >= p.clip_rect().left() {
+                    let local = Time::from_secs_f64((((x - vrect.left()) + tw * 0.5) / pps).max(0.0) as f64).min(c.duration);
+                    if let Some(tex) = strip.at(c.source_time(local)) {
+                        let tr = Rect::from_min_size(Pos2::new(x, vrect.top()), Vec2::new(tw, vrect.height()));
+                        p.image(tex.id(), tr, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::from_gray(225));
+                    }
+                }
+                x += tw;
+            }
+        }
+        ClipKind::Compound(comp) if depth < 4 => {
+            for (ic, r, ip) in compound_parts(c, &comp.spine, rect, p).unwrap_or_default() {
+                if ic.has_video() {
+                    let iv = Rect::from_min_max(Pos2::new(r.left(), vrect.top()), Pos2::new(r.right(), vrect.bottom()));
+                    draw_filmstrip(app, &ip, ic, r, iv, depth + 1);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Waveform in `arect`; a compound shows those of the clips it plays.
+/// Returns whether anything was drawn.
+fn draw_waveform(app: &App, p: &egui::Painter, c: &Clip, rect: Rect, arect: Rect, depth: u32) -> bool {
+    match &c.kind {
+        ClipKind::Asset { asset } => match app.library.peaks.get(asset) {
+            Some(pk) => {
+                draw_peaks(p, pk, c, rect, arect);
+                true
+            }
+            None => false,
+        },
+        ClipKind::Compound(comp) if depth < 4 => {
+            let mut drew = false;
+            for (ic, r, ip) in compound_parts(c, comp.audio_spine(), rect, p).unwrap_or_default() {
+                if ic.has_audio() && !ic.audio.muted {
+                    let ia = Rect::from_min_max(Pos2::new(r.left(), arect.top()), Pos2::new(r.right(), arect.bottom()));
+                    drew |= draw_waveform(app, &ip, ic, r, ia, depth + 1);
+                }
+            }
+            drew
+        }
+        _ => false,
+    }
+}
+
 fn draw_peaks(p: &egui::Painter, pk: &nle_media::PeakBuffer, c: &Clip, rect: Rect, arect: Rect) {
     let x0 = arect.left().max(p.clip_rect().left());
     let x1 = arect.right().min(p.clip_rect().right());
@@ -2292,6 +2373,21 @@ fn vel_speed_to_norm(speed: f64) -> f32 {
     (ratio / span).clamp(0.0, 1.0) as f32
 }
 
+/// Speed after dragging a velocity dot `up_px` up from where it was grabbed at
+/// `grab`: the full 10–800 % range takes 240 px (960 px with Shift), whole
+/// percents, and common speeds catch the pointer unless Shift is held.
+fn vel_drag_speed(grab: f64, up_px: f32, fine: bool) -> f64 {
+    let px_per_range = if fine { 960.0 } else { 240.0 };
+    let speed = vel_norm_to_speed(vel_speed_to_norm(grab) + up_px / px_per_range);
+    let speed = (speed * 100.0).round() / 100.0;
+    if !fine {
+        if let Some(n) = [0.25, 0.5, 1.0, 2.0, 4.0].into_iter().find(|n: &f64| (speed / n).ln().abs() < 0.07) {
+            return n;
+        }
+    }
+    speed.clamp(MIN_VELOCITY, MAX_VELOCITY)
+}
+
 fn vel_norm_to_speed(norm: f32) -> f64 {
     let span = (MAX_VELOCITY / MIN_VELOCITY).ln();
     (MIN_VELOCITY * (norm.clamp(0.0, 1.0) as f64 * span).exp()).clamp(MIN_VELOCITY, MAX_VELOCITY)
@@ -2353,7 +2449,23 @@ fn set_segment(app: &mut App, id: ClipId, _seg: usize, f: impl FnOnce(&mut Retim
 
 #[cfg(test)]
 mod wave_tests {
-    use super::{wave_gain, Clip, Time};
+    use super::{vel_drag_speed, wave_gain, Clip, Time};
+
+    #[test]
+    fn velocity_drags_move_the_speed_gently_and_catch_common_speeds() {
+        assert_eq!(vel_drag_speed(1.0, 0.0, false), 1.0);
+        // a few pixels stay on 100 %, where the old lane jumped ~18 % a pixel
+        assert_eq!(vel_drag_speed(1.0, 3.0, false), 1.0);
+        let up = vel_drag_speed(1.0, 12.0, false);
+        assert!(up > 1.0 && up < 1.3, "{up}");
+        // Shift: finer, and no snapping
+        let fine = vel_drag_speed(1.0, 3.0, true);
+        assert!(fine > 1.0 && fine < 1.05, "{fine}");
+        // about a sixth of the range up from 100 % lands on 200 %
+        assert_eq!(vel_drag_speed(1.0, 38.0, false), 2.0);
+        assert_eq!(vel_drag_speed(1.0, 10_000.0, false), 8.0);
+        assert_eq!(vel_drag_speed(1.0, -10_000.0, false), 0.1);
+    }
 
     #[test]
     fn the_waveform_applies_clip_volume_once() {
