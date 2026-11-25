@@ -355,3 +355,18 @@ fn polish_audio_is_role_aware_and_one_undo_step() {
     h.undo(&mut tl);
     assert!(!tl.clip(voice).unwrap().audio.vocal_clarity);
 }
+
+#[test]
+fn interchange_urls_keep_synthetic_paths_and_windows_drives() {
+    use nle_core::fcpxml::{path_to_url, url_to_path};
+    use std::path::{Path, PathBuf};
+    let demo = "synthetic://Golden Hour?hue=0.08";
+    assert_eq!(url_to_path(&path_to_url(Path::new(demo))), PathBuf::from(demo));
+    // what earlier builds exported for demo media
+    assert_eq!(url_to_path("file:///synthetic://Golden%20Hour%3Fhue%3D0.08"), PathBuf::from(demo));
+    let win = r"C:\Media\Ocean Drive.mp4";
+    let url = path_to_url(Path::new(win));
+    assert_eq!(url, "file:///C:/Media/Ocean%20Drive.mp4");
+    assert_eq!(url_to_path(&url), PathBuf::from("C:/Media/Ocean Drive.mp4"));
+    assert_eq!(url_to_path(&path_to_url(Path::new("/home/me/a b.mov"))), PathBuf::from("/home/me/a b.mov"));
+}

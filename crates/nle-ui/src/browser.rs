@@ -816,24 +816,24 @@ fn truncate(s: &str, n: usize) -> String {
 
 fn metadata(app: &mut App, ui: &mut egui::Ui, a: &MediaAsset) {
     egui::ScrollArea::vertical().id_salt("browser-meta").show(ui, |ui| {
+        // the name gets its own line: beside the rating buttons a narrow
+        // browser left it no room at all (it overlapped them, or showed "…")
+        ui.add(egui::Label::new(egui::RichText::new(&a.name).strong()).truncate());
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(&a.name).strong());
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if a.has_video() && ui.small_button("Create Proxy").clicked() {
-                    app.create_proxies(&[a.id]);
+            let current = a.rating();
+            for r in [Rating::Favorite, Rating::None, Rating::Rejected] {
+                let text = match r {
+                    Rating::Favorite => egui::RichText::new("★").color(theme::AUDIO),
+                    Rating::Rejected => egui::RichText::new("✕").color(REJECT),
+                    Rating::None => egui::RichText::new("○"),
+                };
+                if ui.selectable_label(current == r, text).on_hover_text(r.label()).clicked() {
+                    rate(app, &[a.id], r);
                 }
-                let current = a.rating();
-                for r in [Rating::Rejected, Rating::None, Rating::Favorite] {
-                    let text = match r {
-                        Rating::Favorite => egui::RichText::new("★").color(theme::AUDIO),
-                        Rating::Rejected => egui::RichText::new("✕").color(REJECT),
-                        Rating::None => egui::RichText::new("○"),
-                    };
-                    if ui.selectable_label(current == r, text).on_hover_text(r.label()).clicked() {
-                        rate(app, &[a.id], r);
-                    }
-                }
-            });
+            }
+            if a.has_video() && ui.small_button("Create Proxy").clicked() {
+                app.create_proxies(&[a.id]);
+            }
         });
         egui::Grid::new("meta").num_columns(2).spacing([10.0, 3.0]).show(ui, |ui| {
             let mut row = |k: &str, v: String| {

@@ -302,6 +302,40 @@ fn compound_clip_nesting_and_break_apart() {
 }
 
 #[test]
+fn compounding_keeps_the_dissolves_at_its_edges() {
+    let mut tl = Timeline::default();
+    let a = tl.append(clip("A", 4)).unwrap();
+    let b = tl.append(clip("B", 4)).unwrap();
+    let c = tl.append(clip("C", 4)).unwrap();
+    let d = tl.append(clip("D", 4)).unwrap();
+    let dissolve = Transition::new(TransitionKind::CrossDissolve, secs(1));
+    tl.clip_mut(b).unwrap().transition_in = Some(dissolve.clone());
+    tl.clip_mut(c).unwrap().transition_out = Some(dissolve.clone());
+
+    let comp = tl.make_compound(&[b, c], "CC").unwrap();
+    assert!(tl.clip(comp).unwrap().transition_in.is_some() && tl.clip(comp).unwrap().transition_out.is_some());
+    assert!(tl.clip(b).unwrap().transition_in.is_none() && tl.clip(c).unwrap().transition_out.is_none(), "nothing left to fade to black inside");
+
+    // either side of each edge cut, both clips are on screen, not one of them and black
+    for t in [Time::from_secs_f64(3.75), Time::from_secs_f64(4.25), Time::from_secs_f64(11.75), Time::from_secs_f64(12.25)] {
+        match &evaluate(&tl, t).nodes[0] {
+            RenderNode::Transition { from: Some(from), to: Some(to), .. } => {
+                for side in [from, to] {
+                    if let LayerSource::Compound(inner) = &side.source {
+                        assert!(!inner.media_requests().is_empty(), "compound side is empty at {t:?}");
+                    }
+                }
+            }
+            other => panic!("expected a dissolve between two pictures at {t:?}, got {other:?}"),
+        }
+    }
+
+    tl.break_apart(comp).unwrap();
+    assert!(tl.clip(b).unwrap().transition_in.is_some() && tl.clip(c).unwrap().transition_out.is_some());
+    assert!(tl.clip(a).unwrap().transition_out.is_none() && tl.clip(d).unwrap().transition_in.is_none());
+}
+
+#[test]
 fn break_apart_trimmed_compound_extracts_used_range() {
     let mut tl = Timeline::default();
     let a = tl.append(clip("A", 4)).unwrap();

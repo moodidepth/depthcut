@@ -98,11 +98,20 @@ pub fn path_to_url(p: &std::path::Path) -> String {
             _ => enc.push_str(&format!("%{b:02X}")),
         }
     }
-    if enc.starts_with('/') {
+    if has_scheme(&s) {
+        // already a URL (the built-in synthetic:// demo media): wrapping it in
+        // file:/// made it come back as "/synthetic://…", which is neither
+        enc
+    } else if enc.starts_with('/') {
         format!("file://{enc}")
     } else {
         format!("file:///{enc}")
     }
+}
+
+/// `scheme://…` with a scheme longer than one letter (so not `C:/…`).
+fn has_scheme(s: &str) -> bool {
+    s.split_once("://").is_some_and(|(scheme, _)| scheme.len() > 1 && scheme.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'-' || b == b'.'))
 }
 
 pub fn url_to_path(u: &str) -> PathBuf {
@@ -127,6 +136,10 @@ pub fn url_to_path(u: &str) -> PathBuf {
     // "/C:/x" → "C:/x"
     let b = s.as_bytes();
     if b.len() > 2 && b[0] == b'/' && b[2] == b':' && b[1].is_ascii_alphabetic() {
+        s.remove(0);
+    }
+    // "/synthetic://x", as older exports wrote demo media → "synthetic://x"
+    if s.starts_with('/') && has_scheme(&s[1..]) {
         s.remove(0);
     }
     PathBuf::from(s)

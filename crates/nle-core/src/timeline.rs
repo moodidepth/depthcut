@@ -1040,11 +1040,17 @@ impl Timeline {
             return Err(EditError::NotContiguous);
         }
         let first = idx[0];
-        let inner: Vec<Clip> = self.spine.drain(first..=idx[idx.len() - 1]).collect();
+        let mut inner: Vec<Clip> = self.spine.drain(first..=idx[idx.len() - 1]).collect();
+        // the transitions at the selection's edges join the compound to its neighbours;
+        // left inside they would fade to and from black
+        let edge_in = inner.first_mut().and_then(|c| c.transition_in.take());
+        let edge_out = inner.last_mut().and_then(|c| c.transition_out.take());
         let comp = CompoundClip::new(inner);
         let dur = comp.duration();
         let mut clip = Clip::new(name, ClipKind::Compound(Box::new(comp)), dur);
         clip.media_duration = Some(dur);
+        clip.transition_in = edge_in;
+        clip.transition_out = edge_out;
         let id = clip.id;
         self.spine.insert(first, clip);
         Ok(id)
@@ -1070,7 +1076,18 @@ impl Timeline {
             let _ = inner.blade(hi);
         }
         let starts = inner.spine_starts();
-        let pieces: Vec<(Time, Clip)> = inner.spine.into_iter().zip(starts).filter(|(c, s)| *s >= lo && *s + c.duration <= hi).map(|(c, s)| (s - lo, c)).collect();
+        let mut pieces: Vec<(Time, Clip)> = inner.spine.into_iter().zip(starts).filter(|(c, s)| *s >= lo && *s + c.duration <= hi).map(|(c, s)| (s - lo, c)).collect();
+        // the compound's own edge transitions go back to the clips at its edges
+        if let Some(tr) = &clip.transition_in {
+            if let Some((_, c)) = pieces.first_mut() {
+                c.transition_in = Some(tr.clone());
+            }
+        }
+        if let Some(tr) = &clip.transition_out {
+            if let Some((_, c)) = pieces.last_mut() {
+                c.transition_out = Some(tr.clone());
+            }
+        }
         let new_ids: Vec<ClipId> = pieces.iter().map(|(_, c)| c.id).collect();
 
         match loc {

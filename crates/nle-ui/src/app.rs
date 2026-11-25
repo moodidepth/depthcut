@@ -3173,10 +3173,14 @@ impl eframe::App for App {
             .frame(egui::Frame::new().fill(theme::BG).inner_margin(egui::Margin::same(0)))
             .show(ctx, |ui| timeline_ui::show(self, ui));
         if self.mixer_view.open {
+            // never more than ~60 % of what the timeline leaves, so the viewer
+            // and the browser keep usable room in a small window
+            let room = ctx.available_rect().height();
             egui::TopBottomPanel::bottom("audio-mixer")
                 .resizable(true)
-                .default_height(330.0)
+                .default_height(400.0)
                 .min_height(260.0)
+                .max_height((room * 0.6).max(260.0))
                 .frame(egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin::same(6)).stroke(egui::Stroke::new(1.0_f32, theme::BORDER)))
                 .show(ctx, |ui| self.mixer_drawer(ui));
         }

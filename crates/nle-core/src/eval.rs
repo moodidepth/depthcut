@@ -323,7 +323,9 @@ pub fn clip_layer(c: &Clip, local: Time, lane: i32) -> Option<Layer> {
         ClipKind::Title(p) => LayerSource::Title(p.clone(), title_anim(p, local, c.duration)),
         ClipKind::Adjustment => LayerSource::Solid([0.0; 4]),
         ClipKind::Compound(comp) => {
-            let inner_t = c.source_time(local);
+            // like media, a compound holds its first and last frames where a transition
+            // reaches past it, rather than leaving the overlap black
+            let inner_t = c.source_time(local).max(Time::ZERO).min((comp.duration() - Time(1)).max(Time::ZERO));
             LayerSource::Compound(Box::new(evaluate_spine(&comp.spine, inner_t)))
         }
     };

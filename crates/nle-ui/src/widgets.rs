@@ -100,6 +100,18 @@ pub fn slider_f32(ui: &mut egui::Ui, label: &str, v: &mut f32, range: std::ops::
     .inner
 }
 
+/// [`slider_f32`] that clamps only what the user drags or types, so a value already
+/// beyond `range` is shown as-is rather than rewritten (and recorded) on sight.
+pub fn slider_f32_edits(ui: &mut egui::Ui, label: &str, v: &mut f32, range: std::ops::RangeInclusive<f32>, suffix: &str) -> bool {
+    ui.horizontal(|ui| {
+        ui.add_sized([96.0, 20.0], egui::Label::new(egui::RichText::new(label).color(theme::TEXT_DIM)).truncate());
+        // an empty range (0..=0 when the other fade fills the clip) would otherwise
+        // print as many decimals as the float has
+        ui.add(egui::Slider::new(v, range).suffix(suffix).clamping(egui::SliderClamping::Edits).max_decimals(2)).changed()
+    })
+    .inner
+}
+
 const WHEEL_MAX: f32 = 0.5;
 
 fn wheel_xy(w: &ColorWheel) -> Vec2 {

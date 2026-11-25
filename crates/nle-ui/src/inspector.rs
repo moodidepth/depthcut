@@ -356,7 +356,9 @@ fn transform_section(ui: &mut egui::Ui, v: &mut nle_core::VideoParams, t: Time, 
                 follow_scale(&y0, &v.scale_y, &mut v.scale_x, t);
             }
         }
-        ui.checkbox(&mut v.scale_lock, "Lock scale aspect ratio").on_hover_text("Changing one axis scales the other by the same factor");
+        ui.checkbox(&mut v.scale_lock, "Lock scale aspect ratio").on_hover_text(
+            "Changing one axis scales the other by the same factor, and viewer corner handles keep the shape (Shift frees them). Viewer edge handles always stretch one axis.",
+        );
 
         param_row(ui, &ParamSpec::new("Anchor X", -1.0, 1.0, 0.0).scaled(100.0, " %").decimals(1), &mut v.anchor_x, t, f);
         param_row(ui, &ParamSpec::new("Anchor Y", -1.0, 1.0, 0.0).scaled(100.0, " %").decimals(1), &mut v.anchor_y, t, f);
@@ -829,6 +831,8 @@ fn audio_tab(
         ui.label(egui::RichText::new(why).color(theme::TEXT_DIM));
         return;
     }
+    // fades span the audible extent, which J/L cuts widen beyond the video
+    let audible = (c.duration + c.audio.audio_lead.max(Time::ZERO) + c.audio.audio_tail.max(Time::ZERO)).as_secs_f64() as f32;
     let a = &mut c.audio;
     let reset = resettable(ui, "Volume & Pan", |ui| {
         ui.checkbox(&mut a.muted, "Mute");
@@ -939,11 +943,12 @@ fn audio_tab(
     let reset = resettable(ui, "Fades & Crossfades", |ui| {
         let mut fi = a.fade_in.as_secs_f64() as f32;
         let mut fo = a.fade_out.as_secs_f64() as f32;
-        if slider_f32(ui, "Fade In", &mut fi, 0.0..=10.0, " s") {
-            a.fade_in = Time::from_secs_f64(fi as f64);
+        // a fade can't outlast the clip, and fade in and out can't overlap
+        if crate::widgets::slider_f32_edits(ui, "Fade In", &mut fi, 0.0..=(audible - fo).max(0.0), " s") {
+            a.fade_in = Time::from_secs_f64(fi.clamp(0.0, (audible - fo).max(0.0)) as f64);
         }
-        if slider_f32(ui, "Fade Out", &mut fo, 0.0..=10.0, " s") {
-            a.fade_out = Time::from_secs_f64(fo as f64);
+        if crate::widgets::slider_f32_edits(ui, "Fade Out", &mut fo, 0.0..=(audible - fi).max(0.0), " s") {
+            a.fade_out = Time::from_secs_f64(fo.clamp(0.0, (audible - fi).max(0.0)) as f64);
         }
         ui.horizontal(|ui| {
             ui.add_sized([96.0, 20.0], egui::Label::new(egui::RichText::new("Shape").color(theme::TEXT_DIM)));

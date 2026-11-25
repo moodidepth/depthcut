@@ -663,7 +663,10 @@ struct StripInfo<'a> {
     master: bool,
 }
 
-fn strip(ui: &mut egui::Ui, info: StripInfo, s: &mut BusSettings, view: &mut MixerView, req: &mut MixerRequests, solo_active: bool, clock: AutoClock) {
+/// One channel strip with a `fader_h` tall fader; returns the strip's height
+/// without the fader, so the caller can fit the next frame's fader to the drawer.
+#[allow(clippy::too_many_arguments)]
+fn strip(ui: &mut egui::Ui, info: StripInfo, s: &mut BusSettings, view: &mut MixerView, req: &mut MixerRequests, solo_active: bool, clock: AutoClock, fader_h: f32) -> f32 {
     let b = info.slot;
     let selected = view.selected == Some(b);
     let frame = egui::Frame::new()
@@ -671,7 +674,7 @@ fn strip(ui: &mut egui::Ui, info: StripInfo, s: &mut BusSettings, view: &mut Mix
         .stroke(Stroke::new(1.0_f32, if selected { info.color } else { theme::BORDER }))
         .corner_radius(egui::CornerRadius::same(4))
         .inner_margin(egui::Margin::same(4));
-    frame.show(ui, |ui| {
+    let shown = frame.show(ui, |ui| {
         ui.set_width(96.0);
         ui.vertical_centered(|ui| {
             ui.add(egui::Label::new(egui::RichText::new(info.label).strong().color(info.color)).truncate());
@@ -684,7 +687,7 @@ fn strip(ui: &mut egui::Ui, info: StripInfo, s: &mut BusSettings, view: &mut Mix
             let read_pan = (!s.auto_off && !s.pan_auto.is_empty()) || touching(view, true);
             let mut gain = if read_gain { s.gain_db_at(clock.t) } else { s.gain_db };
             let mut pan = if read_pan { s.pan_at(clock.t) } else { s.pan };
-            let h = (ui.available_height() - 156.0).clamp(80.0, 260.0);
+            let h = fader_h;
             ui.horizontal(|ui| {
                 ui.add_space(4.0);
                 meter(ui, view, b, h);
@@ -760,6 +763,7 @@ fn strip(ui: &mut egui::Ui, info: StripInfo, s: &mut BusSettings, view: &mut Mix
             }
         });
     });
+    shown.response.rect.height() - fader_h
 }
 
 /// CLAP / VST3 inserts of one bus: bypass, remove, parameters, add.
@@ -881,19 +885,31 @@ pub fn mixer_panel(ui: &mut egui::Ui, mix: &mut MixerSettings, view: &mut MixerV
             ui.label(egui::RichText::new("SOLO").strong().color(theme::SELECTION));
         }
     });
+    // The fader takes what the drawer has left after the rest of a strip. That
+    // rest is measured from the last frame, not guessed: sizing the fader from
+    // the available height minus a too-small constant made every strip a bit
+    // taller than the drawer, the drawer grew to fit, and the next frame's
+    // fader grew again until it hit its cap; the drawer could not be shrunk.
+    let overhead_id = ui.id().with("mixer-strip-overhead");
+    let overhead = ui.data(|d| d.get_temp::<f32>(overhead_id)).unwrap_or(230.0);
+    let fader_h = (ui.available_height() - overhead).clamp(80.0, 260.0);
+    let mut tallest = 0.0_f32;
     ui.horizontal_top(|ui| {
         egui::ScrollArea::horizontal().id_salt("mixer-strips").auto_shrink([true, false]).show(ui, |ui| {
             ui.horizontal_top(|ui| {
+                let mut strip = |ui: &mut egui::Ui, info: StripInfo, s: &mut BusSettings, view: &mut MixerView, req: &mut MixerRequests| {
+                    tallest = tallest.max(strip(ui, info, s, view, req, solo_active, clock, fader_h));
+                };
                 for bus in &BusId::ALL[..4] {
                     let info = StripInfo { slot: bus.index(), label: bus.label(), sub: None, color: role_color(*bus), master: false };
-                    strip(ui, info, mix.bus_mut(*bus), view, &mut req, solo_active, clock);
+                    strip(ui, info, mix.bus_mut(*bus), view, &mut req);
                 }
                 for u in 0..mix.user.len().min(MAX_USER_BUSSES) {
                     let color = slot_color(mix, 5 + u);
                     let ub = &mut mix.user[u];
                     let (name, sub) = (ub.name.clone(), format!("→ {}", BusId::Role(ub.feeds).label()));
                     let info = StripInfo { slot: 5 + u, label: &name, sub: Some(&sub), color, master: false };
-                    strip(ui, info, &mut ub.settings, view, &mut req, solo_active, clock);
+                    strip(ui, info, &mut ub.settings, view, &mut req);
                 }
                 if mix.user.len() < MAX_USER_BUSSES {
                     ui.menu_button("+ Bus", |ui| {
@@ -912,7 +928,7 @@ pub fn mixer_panel(ui: &mut egui::Ui, mix: &mut MixerSettings, view: &mut MixerV
                     .on_hover_text("Add a submix bus: route clips to it in Inspector → Audio, process them together, then it feeds a role bus");
                 }
                 let info = StripInfo { slot: 4, label: BusId::Master.label(), sub: None, color: role_color(BusId::Master), master: true };
-                strip(ui, info, mix.bus_mut(BusId::Master), view, &mut req, solo_active, clock);
+                strip(ui, info, mix.bus_mut(BusId::Master), view, &mut req);
             });
         });
         if let Some(b) = view.selected {
@@ -988,6 +1004,10 @@ pub fn mixer_panel(ui: &mut egui::Ui, mix: &mut MixerSettings, view: &mut MixerV
             });
         }
     });
+    if tallest > 0.0 && (tallest - overhead).abs() > 0.5 {
+        ui.data_mut(|d| d.insert_temp(overhead_id, tallest));
+        ui.ctx().request_repaint();
+    }
     finish_touch(ui, mix, view, clock);
     req
 }

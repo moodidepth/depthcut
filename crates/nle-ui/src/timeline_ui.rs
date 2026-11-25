@@ -858,6 +858,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     let y_norm = (1.0 - ((p.y - (lane_top + 4.0)) / (lane_height - 8.0).max(4.0))).clamp(0.0, 1.0);
                     let new_speed = vel_norm_to_speed(y_norm);
                     let local_t = (raw_t - clip_start).clamp(Time::ZERO, c.duration);
+                    // the key being dragged, which keeps its place in later frames
+                    let mut dragged = None;
                     if let Some(cv) = r.velocity_curve.as_mut() {
                         let key_count = cv.keys.len();
                         if let Some(k) = cv.keys.get_mut(index) {
@@ -866,10 +868,17 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                             if !is_endpoint {
                                 k.time = local_t;
                             }
+                            dragged = Some(k.time);
                         }
                         cv.keys.sort_by_key(|k| k.time);
                     } else {
+                        // a constant speed's dot becomes a point on a new curve, at the grab
                         r.set_velocity_point(local_t, new_speed);
+                        dragged = Some(local_t);
+                    }
+                    let now = dragged.and_then(|t| r.velocity_curve.as_ref()?.keys.iter().position(|k| k.time == t && k.value == new_speed.clamp(MIN_VELOCITY, MAX_VELOCITY)));
+                    if let (Some(now), Some(Drag::VelocityKey { index, .. })) = (now, app.tl.drag.as_mut()) {
+                        *index = now;
                     }
                     r.blend = FrameBlendMode::OpticalFlow;
                     app.exec_key(Command::SetRetime { id, retime: Some(r) }, Some(drag_key(0x52, id)));

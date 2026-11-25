@@ -505,8 +505,10 @@ fn gizmo(app: &mut App, ui: &mut egui::Ui, resp: &egui::Response, img: Rect, fra
     }
 }
 
-/// The settings with the pointer at `at` (output pixels). Shift keeps the
-/// aspect ratio and rotates in 15° steps; Ctrl drags without snapping.
+/// The settings with the pointer at `at` (output pixels). An edge handle
+/// stretches its own axis; a corner keeps the aspect ratio while the scale is
+/// locked. Shift flips that for corners, keeps the aspect on edges and rotates
+/// in 15° steps; Ctrl drags without snapping.
 fn drag_edit(drag: &mut GizmoDrag, now: &VideoParams, at: [f32; 2], frame: [f32; 2], per_point: f32, mods: egui::Modifiers) -> (Guides, VideoParams) {
     let (t, s, v, layer) = (drag.local, &drag.start, &drag.drawn, drag.layer);
     let tolerance = if mods.command { 0.0 } else { SNAP_DISTANCE * per_point };
@@ -536,7 +538,9 @@ fn drag_edit(drag: &mut GizmoDrag, now: &VideoParams, at: [f32; 2], frame: [f32;
             put(&mut out.position_y, s.position_y.at(t) + (by[1] / frame[1]) as f64);
         }
         Grab::Scale(side) => {
-            let (scale, lines) = manipulate::resize(v, layer, frame, side, handle(side), s.scale_lock || mods.shift, tolerance);
+            let corner = side[0] != 0 && side[1] != 0;
+            let keep = if corner { s.scale_lock != mods.shift } else { mods.shift };
+            let (scale, lines) = manipulate::resize(v, layer, frame, side, handle(side), keep, tolerance);
             guides = lines;
             // by ratio, as what is drawn can carry a followed track's scale
             let scaled = |from: &nle_core::Param, i: usize| if v.scale[i].abs() > 1e-6 { from.at(t) * (scale[i] / v.scale[i]) as f64 } else { scale[i] as f64 };
@@ -728,6 +732,32 @@ mod drag_tests {
         };
         assert!((shape(egui::Modifiers::NONE) - 1.0).abs() > 0.1);
         assert!((shape(egui::Modifiers::SHIFT) - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn an_edge_handle_stretches_one_axis_even_when_locked() {
+        let start = VideoParams::default();
+        assert!(start.scale_lock);
+        let mut d = drag(&start, Grab::Scale([1, 0]), [1920.0, 540.0]);
+        let (_, out) = drag_edit(&mut d, &start, [1440.0, 540.0], FRAME, 1.0, egui::Modifiers::COMMAND);
+        assert!((out.scale_x.at(Time::ZERO) - 0.5).abs() < 1e-4, "{}", out.scale_x.at(Time::ZERO));
+        assert_eq!(out.scale_y, start.scale_y);
+        // Shift keeps the aspect ratio on an edge
+        let mut d = drag(&start, Grab::Scale([1, 0]), [1920.0, 540.0]);
+        let (_, out) = drag_edit(&mut d, &start, [1440.0, 540.0], FRAME, 1.0, egui::Modifiers::SHIFT | egui::Modifiers::COMMAND);
+        assert!((out.scale_y.at(Time::ZERO) - out.scale_x.at(Time::ZERO)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn shift_frees_a_locked_corner() {
+        let start = VideoParams::default();
+        let shape = |mods| {
+            let mut d = drag(&start, Grab::Scale([1, 1]), [1920.0, 1080.0]);
+            let (_, out) = drag_edit(&mut d, &start, [1500.0, 1000.0], FRAME, 1.0, mods);
+            out.scale_x.at(Time::ZERO) / out.scale_y.at(Time::ZERO)
+        };
+        assert!((shape(egui::Modifiers::NONE) - 1.0).abs() < 1e-4);
+        assert!((shape(egui::Modifiers::SHIFT) - 1.0).abs() > 0.1);
     }
 
     #[test]
