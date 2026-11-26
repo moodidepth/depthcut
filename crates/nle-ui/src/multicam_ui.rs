@@ -447,7 +447,8 @@ pub fn overlay(app: &mut App, ui: &mut egui::Ui, resp: &egui::Response, img: Rec
     if !app.multicam.angles || app.browser.skim.is_some() || app.source_active() {
         return false;
     }
-    let Some((_, _, mc)) = app.active_multicam(app.playhead) else { return false };
+    // the frame on screen (the skimmer may be over another clip)
+    let Some((_, _, mc)) = app.active_multicam(app.view_time()) else { return false };
     let n = mc.angles.len();
     let (video, audio) = (mc.video, mc.audio);
     let names: Vec<(String, bool)> = mc.angles.iter().map(|a| (a.name.clone(), a.has_video())).collect();

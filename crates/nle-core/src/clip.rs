@@ -1155,6 +1155,37 @@ impl CompoundClip {
     pub fn audio_spine(&self) -> &[Clip] {
         self.multicam.as_deref().and_then(|m| m.audio_spine()).unwrap_or(&self.spine)
     }
+
+    /// Roles of the audio heard inside, in order of first appearance. A
+    /// compound's sound routes by these, not by the compound's own role.
+    pub fn heard_roles(&self) -> Vec<AudioRole> {
+        fn walk(c: &Clip, out: &mut Vec<AudioRole>) {
+            match &c.kind {
+                ClipKind::Compound(comp) => comp.audio_spine().iter().for_each(|x| walk(x, out)),
+                _ if c.has_audio() && !out.contains(&c.audio.role) => out.push(c.audio.role),
+                _ => {}
+            }
+            c.connected.iter().for_each(|x| walk(x, out));
+        }
+        let mut out = Vec::new();
+        self.audio_spine().iter().for_each(|c| walk(c, &mut out));
+        out
+    }
+
+    /// Give every clip inside (every multicam angle too) `role`.
+    pub fn set_roles(&mut self, role: AudioRole) {
+        fn walk(c: &mut Clip, role: AudioRole) {
+            c.audio.role = role;
+            if let ClipKind::Compound(comp) = &mut c.kind {
+                comp.set_roles(role);
+            }
+            c.connected.iter_mut().for_each(|x| walk(x, role));
+        }
+        self.spine.iter_mut().for_each(|c| walk(c, role));
+        if let Some(m) = &mut self.multicam {
+            m.angles.iter_mut().flat_map(|a| a.spine.iter_mut()).for_each(|c| walk(c, role));
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1307,7 +1338,7 @@ impl Clip {
         let (lo, hi) = asset.bounds();
         let mut c = Clip::new(asset.name.clone(), ClipKind::Asset { asset: asset.id }, hi - lo);
         c.source_in = lo;
-        c.media_duration = Some(asset.duration);
+        c.media_duration = asset.clip_media_duration();
         c.av = AvFlags { video: asset.has_video(), audio: asset.has_audio() };
         if asset.has_audio() {
             c.audio.role = AudioRole::guess(&asset.name, asset.has_video());

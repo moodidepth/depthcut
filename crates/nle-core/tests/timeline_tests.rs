@@ -951,3 +951,35 @@ fn captions_follow_ripple_delete() {
     h.undo(&mut tl);
     assert_eq!(tl.captions.segments[0].start, Time::from_secs(12), "undo restores caption timing");
 }
+
+#[test]
+fn compound_sound_follows_inner_roles_and_its_bus() {
+    let mut tl = Timeline::default();
+    let mut a = clip("a", 4);
+    a.audio.role = AudioRole::Effects;
+    let mut b = clip("b", 4);
+    b.audio.role = AudioRole::Music;
+    b.audio.bus = Some(7);
+    let (ia, ib) = (a.id, b.id);
+    tl.spine = vec![a, b];
+    let comp = tl.make_compound(&[ia, ib], "Comp").unwrap();
+    let ClipKind::Compound(inner) = &tl.clip(comp).unwrap().kind else { panic!("not a compound") };
+    assert_eq!(inner.heard_roles(), vec![AudioRole::Effects, AudioRole::Music], "the inspector shows what the sound routes by");
+
+    // the compound's bus takes the clips that pick none; its role changes nothing by itself
+    let c = tl.clip_mut(comp).unwrap();
+    c.audio.bus = Some(3);
+    c.audio.role = AudioRole::Dialogue;
+    let spans = audio_spans(&tl);
+    assert_eq!(spans.iter().map(|s| (s.params.role, s.params.bus)).collect::<Vec<_>>(), vec![(AudioRole::Effects, Some(3)), (AudioRole::Music, Some(7))]);
+
+    // picking a role on the compound re-roles everything inside, as one undo step
+    let mut h = History::default();
+    let before = tl.clone();
+    h.execute(&mut tl, Command::SetRole { id: comp, role: AudioRole::Dialogue }).unwrap();
+    let ClipKind::Compound(inner) = &tl.clip(comp).unwrap().kind else { unreachable!() };
+    assert_eq!(inner.heard_roles(), vec![AudioRole::Dialogue]);
+    assert!(audio_spans(&tl).iter().all(|s| s.params.role == AudioRole::Dialogue));
+    assert!(h.undo(&mut tl));
+    assert_eq!(tl, before);
+}

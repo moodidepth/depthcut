@@ -309,6 +309,12 @@ impl MediaAsset {
         }
     }
 
+    /// How far a clip of this item can be trimmed out: none for a still
+    /// image, which shows the same picture for as long as the clip runs.
+    pub fn clip_media_duration(&self) -> Option<Time> {
+        (self.kind != AssetKind::Image).then_some(self.duration)
+    }
+
     /// Length of the media this item stands for.
     pub fn span(&self) -> Time {
         let (a, b) = self.bounds();

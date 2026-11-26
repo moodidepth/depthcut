@@ -133,7 +133,37 @@ impl Project {
         let mut p: Project = serde_json::from_str(s)?;
         p.active_timeline = p.active_timeline.min(p.timelines.len());
         p.reserve_ids();
+        p.free_still_lengths();
         Ok(p)
+    }
+
+    /// Projects saved before stills could run any length capped their clips
+    /// at the 5 s import length: lift that cap.
+    fn free_still_lengths(&mut self) {
+        use crate::asset::AssetKind;
+        use crate::clip::{Clip, ClipKind};
+        fn walk(c: &mut Clip, stills: &[AssetId]) {
+            if let ClipKind::Asset { asset } = c.kind {
+                if stills.contains(&asset) {
+                    c.media_duration = None;
+                }
+            }
+            if let ClipKind::Compound(comp) = &mut c.kind {
+                comp.spine.iter_mut().for_each(|ch| walk(ch, stills));
+                if let Some(mc) = comp.multicam.as_deref_mut() {
+                    mc.angles.iter_mut().flat_map(|a| a.spine.iter_mut()).for_each(|ch| walk(ch, stills));
+                }
+            }
+            c.connected.iter_mut().for_each(|ch| walk(ch, stills));
+            c.audition.iter_mut().for_each(|ch| walk(ch, stills));
+        }
+        let stills: Vec<AssetId> = self.assets.iter().filter(|a| a.kind == AssetKind::Image).map(|a| a.id).collect();
+        if stills.is_empty() {
+            return;
+        }
+        for tl in std::iter::once(&mut self.timeline).chain(self.timelines.iter_mut()) {
+            tl.spine.iter_mut().for_each(|c| walk(c, &stills));
+        }
     }
 
     pub fn reserve_ids(&self) {
@@ -368,5 +398,24 @@ mod tests {
         let c = crate::clip::Clip::from_asset(s);
         assert_eq!((c.source_in, c.duration), (Time::from_secs(2), Time::from_secs(8)));
         assert!(p.add_subclip(parent, Time::from_secs(4), Time::from_secs(4), None).is_none());
+    }
+
+    #[test]
+    fn stills_run_any_length_and_old_projects_lose_the_cap() {
+        let mut p = Project::new("Main");
+        let mut img = MediaAsset::new("photo", "photo.png", Time::from_secs(5));
+        img.kind = crate::asset::AssetKind::Image;
+        p.add_asset(img.clone());
+        let c = Clip::from_asset(&img);
+        assert_eq!(c.media_duration, None);
+        let id = c.id;
+        p.timeline.append(c).unwrap();
+        assert_eq!(p.timeline.trim_end(id, Time::from_secs(7)).unwrap(), Time::from_secs(7), "a still extends past its import length");
+        assert_eq!(p.timeline.clip(id).unwrap().duration, Time::from_secs(12));
+
+        // a project saved with the old 5 s cap
+        p.timeline.spine[0].media_duration = Some(Time::from_secs(5));
+        let back = Project::from_json(&p.to_json().unwrap()).unwrap();
+        assert_eq!(back.timeline.spine[0].media_duration, None);
     }
 }

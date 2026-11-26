@@ -1392,13 +1392,18 @@ impl App {
 
     pub fn unlink_audio(&mut self) {
         let key = coalesce_key();
+        let mut any = false;
         for id in self.action_targets() {
             // the partner is already unlinked when both halves are selected
             if self.project.timeline.clip(id).is_some_and(|c| c.link.is_some()) {
                 self.exec_key(Command::Unlink { id }, Some(key));
+                any = true;
             }
         }
         self.history.seal();
+        if !any {
+            self.status("Nothing to unlink: Detach Audio first, then Unlink to edit the halves apart");
+        }
     }
 
     pub fn link_audio(&mut self) {

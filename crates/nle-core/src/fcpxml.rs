@@ -1166,7 +1166,7 @@ fn parse_spine(spine: &Element, ctx: &ImportCtx, fmt: &VideoFormat, depth: usize
 fn fill_media_durations(clips: &mut [Clip], assets: &[MediaAsset]) {
     for c in clips {
         if let ClipKind::Asset { asset } = c.kind {
-            c.media_duration = assets.iter().find(|a| a.id == asset).map(|a| a.duration);
+            c.media_duration = assets.iter().find(|a| a.id == asset).and_then(MediaAsset::clip_media_duration);
         }
         if let ClipKind::Compound(comp) = &mut c.kind {
             fill_media_durations(&mut comp.spine, assets);

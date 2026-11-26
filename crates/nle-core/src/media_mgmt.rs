@@ -49,7 +49,7 @@ pub fn refresh_asset(project: &mut Project, id: AssetId, probed: MediaAsset) {
     a.video = probed.video;
     a.audio = probed.audio;
     a.field_order = probed.field_order;
-    let (has_v, has_a, dur) = (a.has_video(), a.has_audio(), a.duration);
+    let (has_v, has_a, dur) = (a.has_video(), a.has_audio(), a.clip_media_duration());
     fn walk(c: &mut Clip, id: AssetId, f: &dyn Fn(&mut Clip)) {
         if matches!(c.kind, ClipKind::Asset { asset } if asset == id) {
             f(c);
@@ -64,7 +64,7 @@ pub fn refresh_asset(project: &mut Project, id: AssetId, probed: MediaAsset) {
         c.source_in = (c.source_in - tc_shift).max(Time::ZERO);
         c.av.video &= has_v;
         c.av.audio &= has_a;
-        c.media_duration = Some(dur);
+        c.media_duration = dur;
     };
     project.timeline.spine.iter_mut().chain(project.timelines.iter_mut().flat_map(|t| t.spine.iter_mut())).for_each(|c| walk(c, id, &fix));
 }

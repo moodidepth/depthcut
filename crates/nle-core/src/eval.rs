@@ -894,6 +894,8 @@ fn push_clip_audio(c: &Clip, start: Time, lane: i32, window: (Time, Time), edge:
                     span.start = a;
                     span.duration = (b - a).max(Time::ZERO);
                 }
+                // the compound's submix bus takes the clips inside that pick none
+                span.params.bus = span.params.bus.or(params.bus);
                 let container = AudioContainer { params: params.clone(), origin: start, duration: c.duration, source_in: c.source_in, retime: c.retime.clone(), window: inner };
                 span.containers.insert(0, container);
             }

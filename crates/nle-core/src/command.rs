@@ -6,7 +6,7 @@
 //! exact same state (including freshly generated clip ids) every time.
 
 use crate::captions::CaptionTrack;
-use crate::clip::{Clip, Transition};
+use crate::clip::{AudioRole, Clip, Transition};
 use crate::edit_ops::CopiedClip;
 use crate::ids::ClipId;
 use crate::speed::Retime;
@@ -163,6 +163,12 @@ pub enum Command {
     ToggleEnabled {
         id: ClipId,
     },
+    /// Give a clip `role`, and every clip inside it when it is a compound or
+    /// multicam (their sound routes by their own roles).
+    SetRole {
+        id: ClipId,
+        role: AudioRole,
+    },
     /// Replace all timeline markers.
     SetMarkers {
         markers: Vec<Marker>,
@@ -302,6 +308,7 @@ impl Command {
             Command::UpdateClip { .. } => "Change Parameters",
             Command::ReplaceClip { label, .. } => label,
             Command::ToggleEnabled { .. } => "Enable/Disable",
+            Command::SetRole { .. } => "Set Role",
             Command::SetMarkers { .. } => "Markers",
             Command::SetCaptions { .. } => "Captions",
             Command::SetMixer { .. } => "Mixer",
@@ -368,6 +375,7 @@ impl Command {
             self,
             Command::SetCaptions { .. }
                 | Command::SetMarkers { .. }
+                | Command::SetRole { .. }
                 | Command::SetMixer { .. }
                 | Command::SetFormat { .. }
                 | Command::Rename { .. }
@@ -532,6 +540,14 @@ impl Command {
             Command::ToggleEnabled { id } => {
                 let c = tl.clip_mut(*id).ok_or(EditError::NotFound(*id))?;
                 c.enabled = !c.enabled;
+                Ok(())
+            }
+            Command::SetRole { id, role } => {
+                let c = tl.clip_mut(*id).ok_or(EditError::NotFound(*id))?;
+                c.audio.role = *role;
+                if let crate::clip::ClipKind::Compound(comp) = &mut c.kind {
+                    comp.set_roles(*role);
+                }
                 Ok(())
             }
             Command::SetMarkers { markers } => {

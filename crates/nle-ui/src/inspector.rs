@@ -72,6 +72,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let mut learn_noise = false;
     let mut toggle_reframe_916 = false;
     let mut punch_request: Option<bool> = None;
+    let mut set_role: Option<AudioRole> = None;
     let asset_lufs = if let ClipKind::Asset { asset } = &c.kind { app.asset_loudness_lufs(*asset) } else { None };
     let beat_busy = app.beat_job.is_some();
     let kill_busy = app.kill_job.is_some();
@@ -112,6 +113,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             &mut sync_beats,
             &mut learn_noise,
             &busses,
+            &mut set_role,
         ),
         InspectorTab::TitlesTransitions => titles_tab(ui, &mut c, &mut add_title, &mut templates, &mut pick_template),
         InspectorTab::Motion => motion_action = crate::motion_ui::tab(ui, &mut c, &motion_cx, motion_ui),
@@ -140,6 +142,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     }
     if !ui.ctx().input(|i| i.pointer.any_down()) && !ui.ctx().wants_keyboard_input() {
         app.history.seal();
+    }
+    if let Some(role) = set_role {
+        app.exec(Command::SetRole { id, role });
     }
     if let Some(a) = gallery_action {
         app.gallery_action(a);
@@ -827,6 +832,7 @@ fn audio_tab(
     sync_beats: &mut bool,
     learn_noise: &mut bool,
     busses: &[(u64, String)],
+    set_role: &mut Option<AudioRole>,
 ) {
     if !c.has_audio() {
         let why = if c.link.is_some() { "This clip's audio is on its linked audio clip." } else { "No audio in this clip." };
@@ -835,7 +841,15 @@ fn audio_tab(
     }
     // fades span the audible extent, which J/L cuts widen beyond the video
     let audible = (c.duration + c.audio.audio_lead.max(Time::ZERO) + c.audio.audio_tail.max(Time::ZERO)).as_secs_f64() as f32;
+    // a compound's sound routes by the roles of the clips inside it
+    let compound = matches!(c.kind, ClipKind::Compound(_));
+    let heard = match &c.kind {
+        ClipKind::Compound(comp) => Some(comp.heard_roles()).filter(|h| !h.is_empty()),
+        _ => None,
+    };
     let a = &mut c.audio;
+    let shown = heard.as_ref().map_or(a.role, |h| h[0]);
+    let mixed = heard.as_ref().is_some_and(|h| h.len() > 1);
     let reset = resettable(ui, "Volume & Pan", |ui| {
         ui.checkbox(&mut a.muted, "Mute");
         param_row(ui, &ParamSpec::new("Volume", -60.0, 12.0, 0.0).scaled(1.0, " dB").speed(0.1).decimals(1), &mut a.volume_db, t, f);
@@ -843,21 +857,34 @@ fn audio_tab(
         ui.horizontal(|ui| {
             ui.add_sized([96.0, 20.0], egui::Label::new(egui::RichText::new("Role").color(theme::TEXT_DIM)));
             for r in AudioRole::ALL {
-                ui.selectable_value(&mut a.role, r, r.label());
+                let on = heard.as_ref().map_or(a.role == r, |h| h.contains(&r));
+                let hint = if compound { "Sets the role of every clip inside" } else { "Which role bus this clip's audio goes through" };
+                if ui.selectable_label(on, r.label()).on_hover_text(hint).clicked() {
+                    // a compound's contents change by command: the inspector's copy can't edit them
+                    if compound {
+                        *set_role = Some(r);
+                    } else {
+                        a.role = r;
+                    }
+                }
+            }
+            if mixed {
+                ui.label(egui::RichText::new("mixed").small().color(theme::TEXT_DIM));
             }
         });
         ui.horizontal(|ui| {
             ui.add_sized([96.0, 20.0], egui::Label::new(egui::RichText::new("Bus").color(theme::TEXT_DIM)));
             let current = a.bus.and_then(|id| busses.iter().find(|b| b.0 == id));
             let text = match (a.bus, current) {
-                (None, _) => format!("{} (role bus)", a.role.label()),
+                (None, _) if mixed => "Role busses".to_string(),
+                (None, _) => format!("{} (role bus)", shown.label()),
                 (Some(_), Some(b)) => b.1.clone(),
-                (Some(_), None) => format!("{} (its bus was deleted)", a.role.label()),
+                (Some(_), None) => format!("{} (its bus was deleted)", shown.label()),
             };
             egui::ComboBox::from_id_salt("clip-audio-bus")
                 .selected_text(text)
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut a.bus, None, format!("{} (role bus)", a.role.label()));
+                    ui.selectable_value(&mut a.bus, None, if mixed { "Role busses".to_string() } else { format!("{} (role bus)", shown.label()) });
                     for (id, name) in busses {
                         ui.selectable_value(&mut a.bus, Some(*id), name);
                     }
