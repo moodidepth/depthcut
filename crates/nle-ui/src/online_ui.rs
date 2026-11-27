@@ -124,6 +124,10 @@ fn free_video_lane_above(tl: &Timeline, at: Time, dur: Time) -> i32 {
 /// Runs on the download's thread: probing starts ffprobe.
 fn downloaded_asset(path: PathBuf, attribution: Option<Attribution>) -> Result<MediaAsset, String> {
     let mut asset = probe::probe(&path).map_err(|e| format!("could not probe downloaded media: {e}"))?;
+    // the file is "<title> [<provider id>]" to stay unique on disk; show the title
+    if let Some(title) = attribution.as_ref().map(|a| a.title.trim()).filter(|t| !t.is_empty()) {
+        asset.name = title.to_string();
+    }
     asset.attribution = attribution;
     Ok(asset)
 }
