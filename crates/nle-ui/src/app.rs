@@ -886,6 +886,12 @@ impl App {
             self.playhead = playhead;
             self.status("The opened compound clip no longer exists \u{2014} stepped out");
         }
+        // An edit that shortened the timeline pulls a playhead left past
+        // the new end back onto it (otherwise Play shows black).
+        let end = self.project.timeline.extent();
+        if !self.playback.playing && self.playhead > end {
+            self.playhead = end;
+        }
     }
 
     fn after_focus_change(&mut self) {
