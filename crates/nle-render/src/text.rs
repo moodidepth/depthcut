@@ -211,12 +211,20 @@ fn place(l: &Line, tracking: f32) -> Vec<Placed> {
     out
 }
 
+/// Pixels per title unit for a `frame_w × frame_h` frame. Title sizes are
+/// "pixels at 1080p" measured on the frame's short side, so a 1080×1920
+/// Short draws a title at the same size as a 1920×1080 master instead of
+/// 1.78× larger and off both edges.
+pub fn title_unit(frame_w: u32, frame_h: u32) -> f32 {
+    frame_w.min(frame_h).max(1) as f32 / 1080.0
+}
+
 /// Lay out and rasterise a title for a `frame_w × frame_h` frame with its
 /// animation state (typewriter, tracking, highlighted word + pop). `\n`
 /// starts a new line, `Role | Name` makes a two-column credits row, and a
 /// rolling title rasterises only the part inside the frame.
 pub fn rasterize(p: &TitleParams, anim: &TitleAnim, frame_w: u32, frame_h: u32, fonts: &FontBook) -> Option<TextMask> {
-    let k = frame_h as f32 / 1080.0;
+    let k = title_unit(frame_w, frame_h);
     if let Some(s) = &p.shape {
         return Some(rasterize_shape(p, s, frame_w, frame_h, k));
     }
@@ -517,6 +525,20 @@ pub fn word_pill_box(from: Option<[f32; 4]>, to: [f32; 4], glide: f32) -> [f32; 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn portrait_titles_match_landscape_size() {
+        let fonts = FontBook::system();
+        if !fonts.has_fonts() {
+            return;
+        }
+        let p = TitleParams { text: "OVERTIME CLUTCH".into(), font_size: 120.0, ..Default::default() };
+        let land = rasterize(&p, &TitleAnim::default(), 1920, 1080, &fonts).unwrap();
+        let port = rasterize(&p, &TitleAnim::default(), 1080, 1920, &fonts).unwrap();
+        assert_eq!((land.width, land.height), (port.width, port.height));
+        assert!(port.width < 1080, "fits a 1080-wide Short: {}", port.width);
+        assert_eq!(title_unit(3840, 2160), 2.0);
+    }
 
     #[test]
     fn typewriter_and_highlight_masks() {

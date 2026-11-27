@@ -2058,7 +2058,7 @@ impl Renderer {
             return None;
         }
         let mask = self.title_mask(p, anim)?;
-        let k = self.height as f32 / 1080.0;
+        let k = text::title_unit(self.width, self.height);
         let out = self.pool.get(&self.gpu.device, self.width, self.height);
         let u = self.uniform(&TitleU {
             text_color: p.color,

@@ -117,7 +117,7 @@ fn shade(p: vec2<f32>) -> vec4<f32> {
     }
     if ((u.flags & 8u) != 0u) {
         // CapCut warm glow: highlight colour at 35 % under the stroke
-        let k = f32(textureDimensions(dst).y) / 1080.0;
+        let k = f32(min(textureDimensions(dst).x, textureDimensions(dst).y)) / 1080.0;
         let a = word_glow(p, 9.0 * k) * 0.35;
         acc = over(vec4<f32>(u.highlight_color.rgb * a, a), acc);
     }
@@ -146,7 +146,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     var q = (p - u.anim_offset - centre) / max(u.anim_scale, 1e-3) + centre;
     var acc: vec4<f32>;
     if (u.glitch > 0.001) {
-        let k = f32(dims.y) / 1080.0;
+        let k = f32(min(dims.x, dims.y)) / 1080.0;
         let slice = floor(q.y / (14.0 * k));
         let h = hash(slice * 1.37 + u.glitch_seed * 7.1);
         if (h > 0.55) {
