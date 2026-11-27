@@ -209,6 +209,10 @@ fn widgets(ctx: &egui::Context) -> Value {
             .nodes
             .values()
             .filter_map(|n| {
+                // a text run repeats its parent label's text
+                if n.role() == Role::TextRun {
+                    return None;
+                }
                 let b = n.bounds()?;
                 let label = n.label().unwrap_or_default();
                 let value = n.value().unwrap_or_default();

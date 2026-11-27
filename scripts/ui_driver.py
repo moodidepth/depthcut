@@ -19,7 +19,8 @@ Steps (arguments separated by spaces; quote a step that holds spaces):
                                TARGET is a rect name from the dump (panel:viewer,
                                clip:5, asset:1, viewer:timecode), text=LABEL (any
                                button / menu item / field by its label or value;
-                               text=LABEL#2 for the second), clip#N (the Nth
+                               text=LABEL#2 for the second, text=LABEL@RECT only
+                               inside that rect), clip#N (the Nth
                                storyline clip), asset=NAME, tl=SECONDS (timeline
                                storyline row at that time), or X,Y in points;
                                NAME@FX,FY is a point inside a rect (0..1 each)
@@ -340,12 +341,25 @@ class Driver:
 
     def find_widget(self, spec: str) -> list:
         """A widget by its label or value: exact (ignoring case) first, then
-        substring; 'Label#2' takes the second match from the top."""
-        nth = 0
+        substring; 'Label#2' takes the second match from the top,
+        'Label@panel:inspector' only looks inside that rect."""
+        nth, inside = 0, None
+        if "@" in spec:
+            spec, name = spec.rsplit("@", 1)
+            inside = self.s["rects"].get(name)
+            if inside is None:
+                raise StepFailed(f"no rect {name!r}")
         if m := re.fullmatch(r"(.*)#(\d+)", spec):
             spec, nth = m[1], int(m[2]) - 1
         want = spec.lower()
-        ws = [w for w in self.s.get("widgets", []) if "off" not in w[4].split()]
+
+        def within(r):
+            if inside is None:
+                return True
+            cx, cy = r[0] + r[2] / 2, r[1] + r[3] / 2
+            return inside[0] <= cx <= inside[0] + inside[2] and inside[1] <= cy <= inside[1] + inside[3]
+
+        ws = [w for w in self.s.get("widgets", []) if "off" not in w[4].split() and within(w[3])]
         hits = [w for w in ws if want in (w[1].lower(), w[2].lower())] or [w for w in ws if want in w[1].lower() or want in w[2].lower()]
         if len(hits) <= nth:
             near = sorted({w[1] or w[2] for w in ws if (w[1] or w[2])})[:40]
