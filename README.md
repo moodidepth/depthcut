@@ -15,7 +15,7 @@ scanning, 9:16 reframing, Whisper auto-captions and an optional AI Copilot.
 *Formerly Rust Cut Pro.* Depthcut is made by Moodi Depth, one developer working
 with help from AI, and has been in development since 2022. It's free, with no
 subscriptions, watermarks or locked features. If it's useful to you, please
-consider supporting it (*Help → Welcome & Support* in the app).
+consider supporting it on [Ko-fi](https://ko-fi.com/moodidepth).
 
 ---
 

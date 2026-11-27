@@ -71,6 +71,12 @@ pub fn show(state: &mut AboutState, ctx: &egui::Context) {
 fn about(ui: &mut egui::Ui, version_cache: &mut Option<Option<String>>) {
     ui.heading(format!("Depthcut {}", env!("CARGO_PKG_VERSION")));
     ui.label("A fast, GPU-accelerated video editor for gaming montages.");
+    ui.horizontal(|ui| {
+        ui.label("Made by Moodi Depth.");
+        if !crate::welcome_ui::DONATE_URL.is_empty() {
+            ui.hyperlink_to("♥ Support Depthcut on Ko-fi", crate::welcome_ui::DONATE_URL);
+        }
+    });
     ui.add_space(6.0);
     ui.label("Licensed under MIT OR Apache-2.0.");
     ui.label(egui::RichText::new("Built with egui, wgpu, whisper.cpp and 300+ open-source Rust crates — see Licenses & Notices.").color(theme::TEXT_DIM));

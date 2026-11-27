@@ -7,10 +7,10 @@ use eframe::egui::{self, Color32, RichText};
 use std::path::PathBuf;
 
 /// Where the "Support" button goes. Empty hides the button.
-/// A release build can override it with `DEPTHCUT_DONATE_URL=... cargo build`.
+/// A build can point it elsewhere with `DEPTHCUT_DONATE_URL=... cargo build`.
 pub const DONATE_URL: &str = match option_env!("DEPTHCUT_DONATE_URL") {
     Some(url) => url,
-    None => "",
+    None => "https://ko-fi.com/moodidepth",
 };
 
 #[derive(Default)]
@@ -100,6 +100,9 @@ pub fn show(state: &mut WelcomeState, ctx: &egui::Context) {
                     close = true;
                 }
             });
+            if !DONATE_URL.is_empty() {
+                ui.hyperlink_to(RichText::new(DONATE_URL).small(), DONATE_URL);
+            }
             ui.label(RichText::new("You can open this again from Help → Welcome & Support.").small().color(theme::TEXT_DIM));
         });
     if !open || close {

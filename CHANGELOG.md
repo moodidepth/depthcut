@@ -14,7 +14,8 @@ First public build. Windows 10/11 x64 only; Linux is experimental (build from so
   install in place and removes the old exe, shortcuts and file-association keys. `.rcp` project
   files and FCPXML metadata IDs are unchanged, so old projects open as before.
 - A welcome window on first launch (and under *Help → Welcome & Support…*) explains who makes
-  Depthcut, asks for support to keep it free, and lists the alpha features.
+  Depthcut, asks for support on [Ko-fi](https://ko-fi.com/moodidepth) to keep it free, and lists
+  the alpha features.
 - Unfinished features are labelled **(alpha)** in menus, panel titles and tooltips.
 - Whisper word timestamps (DTW) are on by default on the GPU too.
 - Keyboard and menu zoom (`Ctrl+=` / `Ctrl+-`) keeps the playhead in place instead of jumping
