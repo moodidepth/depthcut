@@ -3181,11 +3181,20 @@ impl App {
                 match res {
                     Ok(new_kills) => {
                         let count = new_kills.len();
-                        let mut markers: Vec<Marker> = self.project.timeline.markers.iter().filter(|m| m.kind != MarkerKind::Kill).cloned().collect();
-                        markers.extend(new_kills);
-                        markers.sort_by_key(|m| m.time);
-                        self.exec(Command::SetMarkers { markers });
-                        self.status(format!("Kill Scanner dropped {count} kill/multi-kill markers"));
+                        let had = self.project.timeline.markers.iter().any(|m| m.kind == MarkerKind::Kill);
+                        if count == 0 && !had {
+                            self.status("No kills found. The scanner listens for the kill sound that follows gunfire; faint ones (some skins, sidearms) can be missed, so add those with M");
+                        } else {
+                            let mut markers: Vec<Marker> = self.project.timeline.markers.iter().filter(|m| m.kind != MarkerKind::Kill).cloned().collect();
+                            markers.extend(new_kills);
+                            markers.sort_by_key(|m| m.time);
+                            self.exec(Command::SetMarkers { markers });
+                            self.status(match count {
+                                0 => "No kills found; removed the old kill markers".to_string(),
+                                1 => "Marked 1 kill (on the killing shot)".to_string(),
+                                n => format!("Marked {n} kills (on the killing shots). Faint kill sounds can be missed; add those with M"),
+                            });
+                        }
                     }
                     Err(e) => self.status(format!("Kill scan failed: {e}")),
                 }

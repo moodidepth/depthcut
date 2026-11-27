@@ -310,7 +310,7 @@ presets: **Argon Montage** (the default, below), **Final Cut Pro** and
 | **M** | Add Marker | Markers |
 | **Alt+M** | Add Named / Colored Marker | Markers |
 | **Alt+B** | Analyze Beats | Markers |
-| **Shift+Alt+K** | Scan VOD for Kills / Action Peaks | Montage |
+| **Shift+Alt+K** | Scan VOD for Kills | Montage |
 | **Alt+S** | Sync Clips & Velocity to Beats | Montage |
 | **Alt+9** | Gaming 9:16 Split-Crop | Montage |
 | **Z** | Zoom Punch at Playhead | Montage |

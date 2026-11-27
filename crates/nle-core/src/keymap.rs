@@ -96,7 +96,7 @@ actions! {
     AddMarker => "Add Marker", "Markers";
     AddNamedMarker => "Add Named / Colored Marker", "Markers";
     AnalyzeBeats => "Analyze Beats", "Markers";
-    ScanKills => "Scan VOD for Kills / Action Peaks", "Montage";
+    ScanKills => "Scan VOD for Kills", "Montage";
     SyncToBeats => "Sync Clips & Velocity to Beats", "Montage";
     GamingReframe916 => "Gaming 9:16 Split-Crop", "Montage";
     ZoomPunch => "Zoom Punch at Playhead", "Montage";

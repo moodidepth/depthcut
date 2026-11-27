@@ -940,7 +940,7 @@ fn audio_tab(
             }
             if ui
                 .add_enabled(!kill_busy, egui::Button::new(if kill_busy { "Scanning kills..." } else { "🎯 Scan VOD for Kills" }))
-                .on_hover_text("Analyze gameplay audio transients & kill-chimes to drop Kill markers")
+                .on_hover_text("Listens for the kill sound that follows gunfire and marks the killing shot. Faint kill sounds (some skins, sidearms) can be missed.")
                 .clicked()
             {
                 *scan_kills = true;
