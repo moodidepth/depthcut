@@ -260,6 +260,16 @@ class Dot(dict):
         return v
 
 
+def split_args(tail: str) -> list[str]:
+    """Shell-style words with quotes, but backslashes kept: Windows paths
+    such as C:/Users/x.rcp written with backslashes survive unquoted."""
+    lex = shlex.shlex(tail, posix=True)
+    lex.whitespace_split = True
+    lex.escape = ""
+    lex.commenters = ""
+    return list(lex)
+
+
 class Driver:
     def __init__(self, pid: int | None, dump: Path, shots: Path, launch: str | None = None, open_file: str | None = None):
         self.dump = dump
@@ -433,6 +443,11 @@ class Driver:
             bits.append(f"dialogs {s['ui']['dialogs']}")
         if s["ui"]["menu_open"] or s["ui"]["popup_open"]:
             bits.append("menu/popup open")
+        ex = s["jobs"]["export"]
+        if ex["running"]:
+            bits.append(f"exporting {ex['frame']}/{ex['total']}")
+        elif before is not None and ex["last_result"] != before["jobs"]["export"]["last_result"]:
+            bits.append(f"export: {ex['last_result']}")
         if before is not None and s["history"]["undo"] != before["history"]["undo"]:
             bits.append(f"undo: {s['history']['undo_label']}")
         return "; ".join(bits) or "no change"
@@ -456,8 +471,13 @@ class Driver:
                 # expressions keep their quotes; wait takes an optional trailing timeout
                 m = re.fullmatch(r"(.*?)\s+(\d+(?:\.\d+)?)", tail.strip()) if name == "wait" else None
                 rest = [m[1], m[2]] if m else [tail.strip()]
+                # a quoted expression is a string literal, always truthy:
+                # strip one pair of outer quotes so "wait \"x == 1\" 5" tests x
+                q = rest[0]
+                if len(q) >= 2 and q[0] == q[-1] and q[0] in "\"'" and q[0] not in q[1:-1]:
+                    rest[0] = q[1:-1]
             else:
-                rest = shlex.split(tail, posix=True)
+                rest = split_args(tail)
             before = self.s
             try:
                 if name in INPUT_STEPS:
@@ -492,9 +512,13 @@ class Driver:
     def ensure_front(self) -> None:
         """Keys and clicks go to whatever window is in front: never send them
         unless that is the app under test (another Depthcut may be open)."""
-        for _ in range(3):
+        for i in range(3):
             fg = user32.GetForegroundWindow()
             if fg and window_pid(fg) == self.pid:
+                if i:
+                    # bringing it up can maximize it: the widget rects in the
+                    # last dump are from the old layout, so a click would miss
+                    self.s = self.fresh()
                 return
             bring_front(self.hwnd)
         fg = user32.GetForegroundWindow()
@@ -578,6 +602,7 @@ class Driver:
     def do_save(self, path=None):
         """Ctrl+S; with PATH, also fill in the native Save dialog (which
         blocks the app, so no state is read until it closes)."""
+        existed = bool(path) and Path(path).exists()
         press_chord("ctrl+shift+s" if path and self.s["app"]["project_path"] else "ctrl+s")
         if path:
             time.sleep(1.2)
@@ -585,7 +610,7 @@ class Driver:
             time.sleep(0.2)
             press_chord("enter")
             time.sleep(0.8)
-            if Path(path).exists():  # "replace it?" confirmation, if the file existed
+            if existed:  # the "replace it?" confirmation only shows for an existing file
                 press_chord("alt+y")
         self.fresh(30.0)
         if path and Path(self.s["app"]["project_path"] or "").resolve() != Path(path).resolve():
