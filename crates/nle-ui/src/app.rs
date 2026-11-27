@@ -1322,31 +1322,57 @@ impl App {
         }
     }
 
+    /// Alt+9: toggle the 9:16 reframe on every selected footage clip (a
+    /// montage is several clips; reframing one would leave the rest as a
+    /// letterboxed strip in the portrait sequence), else on the footage
+    /// under the playhead. Titles and audio are never reframed.
     pub fn toggle_gaming_reframe_916(&mut self) {
-        let Some(id) = self.target_clip() else {
+        let tl = &self.project.timeline;
+        let footage = |id: &ClipId| tl.clip(*id).is_some_and(|c| c.asset_id().is_some() && c.has_video());
+        let mut ids: Vec<ClipId> = self.selection.iter().copied().filter(footage).collect();
+        if ids.is_empty() {
+            let t = self.playhead;
+            let placed = tl.placed_clips();
+            ids.extend(placed.iter().filter(|p| t >= p.start && t < p.end() && footage(&p.clip.id)).max_by_key(|p| (p.lane.max(0), p.lane == 0)).map(|p| p.clip.id));
+        }
+        if ids.is_empty() {
             return self.status("Select a gameplay clip first");
-        };
-        let Some(mut c) = self.project.timeline.clip(id).cloned() else { return };
-        if let Some(pos) = c.effects.iter().position(|e| e.kind == EffectKind::GamingReframe916) {
-            c.effects.remove(pos);
-            if self.exec(Command::UpdateClip { clip: Box::new(c) }) {
-                self.status("Disabled Gaming 9:16 Reframe");
+        }
+        let reframed = |c: &Clip| c.effects.iter().any(|e| e.kind == EffectKind::GamingReframe916);
+        // mixed selection: enable on the rest, so one press makes them all match
+        let enable = !ids.iter().all(|id| tl.clip(*id).is_some_and(reframed));
+        let mut commands: Vec<Command> = Vec::new();
+        for id in &ids {
+            let Some(mut c) = tl.clip(*id).cloned() else { continue };
+            if reframed(&c) == enable {
+                continue;
             }
+            if enable {
+                c.effects.push(Effect::new(EffectKind::GamingReframe916));
+            } else {
+                c.effects.retain(|e| e.kind != EffectKind::GamingReframe916);
+            }
+            commands.push(Command::UpdateClip { clip: Box::new(c) });
+        }
+        let n = commands.len();
+        let clips = if n == 1 { String::new() } else { format!(" on {n} clips") };
+        let cmd = if n == 1 { commands.remove(0) } else { Command::Batch { label: "Gaming 9:16 Reframe", commands } };
+        let key = coalesce_key();
+        if !self.exec_key(cmd, Some(key)) {
+            return;
+        }
+        if !enable {
+            return self.status(format!("Disabled Gaming 9:16 Reframe{clips}"));
+        }
+        // the effect renders a 9:16 layer; a landscape sequence would pillarbox it
+        let f = self.project.timeline.format;
+        let portrait = nle_core::VideoFormat { width: 1080, height: 1920, ..f };
+        let switched = f.width > f.height && self.exec_key(Command::SetFormat { format: portrait }, Some(key));
+        self.history.seal();
+        if switched {
+            self.status(format!("Enabled Gaming 9:16 Reframe{clips} — sequence switched {}×{} → 1080×1920", f.width, f.height));
         } else {
-            c.effects.push(Effect::new(EffectKind::GamingReframe916));
-            let key = coalesce_key();
-            if self.exec_key(Command::UpdateClip { clip: Box::new(c) }, Some(key)) {
-                // the effect renders a 9:16 layer; a landscape sequence would pillarbox it
-                let f = self.project.timeline.format;
-                let portrait = nle_core::VideoFormat { width: 1080, height: 1920, ..f };
-                let switched = f.width > f.height && self.exec_key(Command::SetFormat { format: portrait }, Some(key));
-                self.history.seal();
-                if switched {
-                    self.status(format!("Enabled Gaming 9:16 Reframe — sequence switched {}×{} → 1080×1920", f.width, f.height));
-                } else {
-                    self.status("Enabled Gaming 9:16 Reframe (Split Stack · aspect-locked, no stretching)");
-                }
-            }
+            self.status(format!("Enabled Gaming 9:16 Reframe{clips} (Split Stack · aspect-locked, no stretching)"));
         }
     }
 
