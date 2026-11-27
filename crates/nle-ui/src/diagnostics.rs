@@ -94,6 +94,12 @@ pub fn init(default_filter: &str) {
     install_panic_hook();
 }
 
+/// This is the first running instance (it owns the main log and the crash
+/// marker). False before [`init`] and for any later window.
+pub fn is_primary() -> bool {
+    SESSION.get().is_some_and(|s| s.marker.is_some())
+}
+
 /// Clean shutdown: the next launch won't report a crash.
 pub fn shutdown() {
     log::info!("clean exit");

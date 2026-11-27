@@ -329,8 +329,13 @@ impl App {
         nle_media::encoder_probe::start_background_probe();
         theme::apply(&cc.egui_ctx);
         theme::install_fonts(&cc.egui_ctx);
-        let autosaver = Autosaver::new(data_dir().join("autosave"), "session");
-        let recovery = autosaver.recover();
+        // Only the first running instance owns the shared crash-recovery
+        // snapshot. A second window autosaves to its own file and never
+        // offers (or discards) the first one's live session as "recovered".
+        let primary = crate::diagnostics::is_primary();
+        let slot = if primary { "session".to_string() } else { format!("session-{}", std::process::id()) };
+        let autosaver = Autosaver::new(data_dir().join("autosave"), &slot);
+        let recovery = if primary { autosaver.recover() } else { None };
         let project = demo::demo_project();
 
         let (preview, gpu, gpu_label) = match cc.wgpu_render_state.as_ref() {
