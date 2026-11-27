@@ -432,7 +432,7 @@ impl ActionMap {
                 (DetachAudio, &[B::ctrl_shift(K::D)]),
                 (AddAudioCrossfade, &[B::ctrl_shift(K::T)]),
                 (Undo, &[B::ctrl(K::Z)]),
-                (Redo, &[B::ctrl_shift(K::Z)]),
+                (Redo, &[B::ctrl_shift(K::Z), B::ctrl(K::Y)]),
                 (SelectAll, &[B::ctrl(K::A)]),
                 (ClearSelection, &[B::key(K::Escape)]),
                 (ToggleClipEnabled, &[B::shift(K::D)]),
@@ -561,7 +561,7 @@ impl ActionMap {
                 (DetachAudio, &[B::ctrl_shift(K::D)]),
                 (AddAudioCrossfade, &[B::ctrl_shift(K::T)]),
                 (Undo, &[B::ctrl(K::Z)]),
-                (Redo, &[B::ctrl_shift(K::Z)]),
+                (Redo, &[B::ctrl_shift(K::Z), B::ctrl(K::Y)]),
                 (SelectAll, &[B::ctrl(K::A)]),
                 (ClearSelection, &[B::key(K::Escape)]),
                 (ToggleClipEnabled, &[B::key(K::V)]),
@@ -690,7 +690,7 @@ impl ActionMap {
                 (DetachAudio, &[B::ctrl_shift(K::D)]),
                 (AddAudioCrossfade, &[B::ctrl_shift(K::T)]),
                 (Undo, &[B::ctrl(K::Z)]),
-                (Redo, &[B::ctrl_shift(K::Z)]),
+                (Redo, &[B::ctrl_shift(K::Z), B::ctrl(K::Y)]),
                 (SelectAll, &[B::ctrl(K::A)]),
                 (ClearSelection, &[B::key(K::Escape)]),
                 (ToggleClipEnabled, &[B::key(K::D)]),
@@ -942,7 +942,7 @@ mod tests {
         let partial = "profile = \"Final Cut Pro\"\n[bindings]\nUndo = [\"Ctrl+U\"]\n";
         let p = ActionMap::from_toml(partial).unwrap();
         assert_eq!(p.get(Action::Undo), &[KeyBinding::ctrl(KeyCode::U)]);
-        assert_eq!(p.get(Action::Redo), &[KeyBinding::ctrl_shift(KeyCode::Z)]);
+        assert_eq!(p.get(Action::Redo), &[KeyBinding::ctrl_shift(KeyCode::Z), KeyBinding::ctrl(KeyCode::Y)]);
         assert!(ActionMap::from_toml("profile = \"x\"\n[bindings]\nNope = [\"A\"]\n").is_err());
         assert!(ActionMap::from_toml("profile = \"x\"\n[bindings]\nUndo = [\"Hyper+Q\"]\n").is_err());
     }

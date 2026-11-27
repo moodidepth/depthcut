@@ -278,7 +278,7 @@ presets: **Argon Montage** (the default, below), **Final Cut Pro** and
 | **Delete / Backspace** | Lift Delete (Leave Gap) | Edit |
 | **Alt+G** | Insert Gap at Playhead | Edit |
 | **Ctrl+Z** | Undo | Edit |
-| **Ctrl+Shift+Z** | Redo | Edit |
+| **Ctrl+Shift+Z** / **Ctrl+Y** | Redo | Edit |
 | **Ctrl+A** | Select All | Edit |
 | **Esc** | Clear Selection | Edit |
 | **Shift+D** | Enable / Disable Clip | Edit |
