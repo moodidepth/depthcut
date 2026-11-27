@@ -1356,20 +1356,19 @@ impl App {
         }
         let n = commands.len();
         let clips = if n == 1 { String::new() } else { format!(" on {n} clips") };
-        let cmd = if n == 1 { commands.remove(0) } else { Command::Batch { label: "Gaming 9:16 Reframe", commands } };
-        let key = coalesce_key();
-        if !self.exec_key(cmd, Some(key)) {
+        // the effect renders a 9:16 layer; a landscape sequence would pillarbox it
+        let f = self.project.timeline.format;
+        let switch = enable && f.width > f.height;
+        if switch {
+            commands.insert(0, Command::SetFormat { format: nle_core::VideoFormat { width: 1080, height: 1920, ..f } });
+        }
+        // one undo step, named after what the user did
+        if !self.exec(Command::Batch { label: "Gaming 9:16 Reframe", commands }) {
             return;
         }
         if !enable {
-            return self.status(format!("Disabled Gaming 9:16 Reframe{clips}"));
-        }
-        // the effect renders a 9:16 layer; a landscape sequence would pillarbox it
-        let f = self.project.timeline.format;
-        let portrait = nle_core::VideoFormat { width: 1080, height: 1920, ..f };
-        let switched = f.width > f.height && self.exec_key(Command::SetFormat { format: portrait }, Some(key));
-        self.history.seal();
-        if switched {
+            self.status(format!("Disabled Gaming 9:16 Reframe{clips}"));
+        } else if switch {
             self.status(format!("Enabled Gaming 9:16 Reframe{clips} — sequence switched {}×{} → 1080×1920", f.width, f.height));
         } else {
             self.status(format!("Enabled Gaming 9:16 Reframe{clips} (Split Stack · aspect-locked, no stretching)"));
