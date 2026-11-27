@@ -5,7 +5,8 @@
 //!   in it changes, at least once a second, and right away when `<file>.req`
 //!   appears (the request file's text comes back as `request`, then the
 //!   request file is removed). A driver writes a nonce to `.req` after an
-//!   action and waits for that nonce in the dump.
+//!   action and waits for that nonce in the dump. Later writes keep echoing
+//!   the last nonce, so a change written right after the answer cannot hide it.
 //! * Ctrl+Alt+Shift+D writes a one-off dump to the logs folder.
 //!
 //! The dump holds the project format, every timeline clip (placement, source
@@ -35,6 +36,8 @@ pub struct DebugDump {
     /// Last written body without its volatile header, to skip identical writes.
     last_body: String,
     last_write: Option<Instant>,
+    /// The last request answered; echoed until the next one arrives.
+    last_request: Option<String>,
     seq: u64,
     /// Rectangles drawn this frame, by name (`panel:timeline`, `clip:12`, `asset:3`).
     rects: RefCell<Vec<(String, Rect)>>,
@@ -42,6 +45,8 @@ pub struct DebugDump {
     started: Option<Instant>,
     /// Ctrl+Alt+Shift+D was pressed this frame.
     snapshot: bool,
+    /// The thread that wakes an idle UI when a request file appears.
+    watcher: bool,
 }
 
 impl DebugDump {
@@ -59,6 +64,25 @@ impl DebugDump {
     pub fn begin_frame(&mut self, ctx: &egui::Context) {
         self.rects.borrow_mut().clear();
         self.snapshot = ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL | egui::Modifiers::ALT | egui::Modifiers::SHIFT, egui::Key::D));
+        if let (Some(path), false) = (&self.path, self.watcher) {
+            // An idle egui app draws no frames, so nothing would see the
+            // request file; poll for it off the UI thread and wake the UI.
+            self.watcher = true;
+            let req = request_path(path);
+            let ctx = ctx.clone();
+            let _ = std::thread::Builder::new().name("state-dump-watch".into()).spawn(move || loop {
+                std::thread::sleep(Duration::from_millis(25));
+                if req.exists() {
+                    ctx.request_repaint();
+                }
+            });
+        }
+        if self.path.is_some() {
+            // Widget labels, roles and bounds come from egui's AccessKit
+            // nodes; normally they are built only while a screen reader or
+            // other UI Automation client is listening.
+            ctx.enable_accesskit();
+        }
     }
 
     /// Remember where something was drawn this frame.
@@ -121,8 +145,8 @@ pub fn tick(app: &mut App, ctx: &egui::Context) {
     let Some(path) = app.dbg.path.clone() else {
         return;
     };
-    let req_path = PathBuf::from(format!("{}.req", path.display()));
-    let request = std::fs::read_to_string(&req_path).ok();
+    let req_path = request_path(&path);
+    let request = std::fs::read_to_string(&req_path).ok().map(|r| r.trim().to_owned());
     let body = body(app, ctx);
     let text = serde_json::to_string(&body).unwrap_or_default();
     let stale = app.dbg.last_write.is_none_or(|t| t.elapsed() > Duration::from_secs(1));
@@ -130,16 +154,25 @@ pub fn tick(app: &mut App, ctx: &egui::Context) {
         return;
     }
     app.dbg.seq += 1;
-    let out = serde_json::to_string_pretty(&wrap(app, ctx, body, app.dbg.seq, request.as_deref())).unwrap_or_default();
+    let echo = request.clone().or_else(|| app.dbg.last_request.clone());
+    let out = serde_json::to_string_pretty(&wrap(app, ctx, body, app.dbg.seq, echo.as_deref())).unwrap_or_default();
     // write then rename, so a reader never sees half a file
     let tmp = PathBuf::from(format!("{}.tmp", path.display()));
     if std::fs::write(&tmp, out).is_ok() && std::fs::rename(&tmp, &path).is_ok() {
         if request.is_some() {
             let _ = std::fs::remove_file(&req_path);
+            app.dbg.last_request = request;
         }
         app.dbg.last_body = text;
         app.dbg.last_write = Some(Instant::now());
     }
+}
+
+/// `<dump>.req`: a driver writes a nonce here to ask for a fresh dump.
+fn request_path(dump: &std::path::Path) -> PathBuf {
+    let mut p = dump.as_os_str().to_owned();
+    p.push(".req");
+    PathBuf::from(p)
 }
 
 fn unix_ms() -> u128 {
@@ -156,10 +189,50 @@ fn wrap(app: &App, ctx: &egui::Context, body: Value, seq: u64, request: Option<&
     m.insert("frame".into(), json!(ctx.cumulative_pass_nr()));
     m.insert("uptime_s".into(), json!(app.dbg.started.map(|s| s.elapsed().as_secs_f32())));
     m.insert("status_age_ms".into(), json!(app.last_status().map(|(_, age)| age.as_millis() as u64)));
+    // Volatile (labels like the timecode change every frame), so outside the
+    // body that decides whether the file is rewritten.
+    m.insert("widgets".into(), widgets(ctx));
     if let Value::Object(b) = body {
         m.extend(b);
     }
     Value::Object(m)
+}
+
+/// Every labelled or interactive widget drawn this frame so far:
+/// `[role, label, value, [x, y, w, h], flags]`, flags holding "off" when
+/// disabled and "on" / "unchecked" for toggles. Sorted top to bottom.
+fn widgets(ctx: &egui::Context) -> Value {
+    use egui::accesskit::{Role, Toggled};
+    let mut out: Vec<(f64, f64, Value)> = ctx.viewport(|v| {
+        let Some(state) = v.this_pass.accesskit_state.as_ref() else { return Vec::new() };
+        state
+            .nodes
+            .values()
+            .filter_map(|n| {
+                let b = n.bounds()?;
+                let label = n.label().unwrap_or_default();
+                let value = n.value().unwrap_or_default();
+                let interactive = !matches!(n.role(), Role::Label | Role::Unknown | Role::GenericContainer | Role::Window);
+                if (label.is_empty() && value.is_empty()) && !interactive || b.width() < 1.0 || b.height() < 1.0 {
+                    return None;
+                }
+                let mut flags = String::new();
+                if n.is_disabled() {
+                    flags.push_str("off ");
+                }
+                match n.toggled() {
+                    Some(Toggled::True) => flags.push_str("on"),
+                    Some(Toggled::False) => flags.push_str("unchecked"),
+                    _ => {}
+                }
+                let role = format!("{:?}", n.role());
+                let r = |x: f64| (x * 10.0).round() / 10.0;
+                Some((b.y0, b.x0, json!([role, label, value, [r(b.x0), r(b.y0), r(b.width()), r(b.height())], flags.trim()])))
+            })
+            .collect()
+    });
+    out.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    Value::Array(out.into_iter().map(|(_, _, v)| v).collect())
 }
 
 fn clip_kind(k: &ClipKind) -> Value {

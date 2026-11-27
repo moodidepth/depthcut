@@ -17,18 +17,23 @@ Steps (arguments separated by spaces; quote a step that holds spaces):
     type TEXT                  type text (unicode, layout-independent)
     click TARGET [right|double|shift|ctrl]
                                TARGET is a rect name from the dump (panel:viewer,
-                               clip:5, asset:1, viewer:timecode), clip#N (the Nth
+                               clip:5, asset:1, viewer:timecode), text=LABEL (any
+                               button / menu item / field by its label or value;
+                               text=LABEL#2 for the second), clip#N (the Nth
                                storyline clip), asset=NAME, tl=SECONDS (timeline
-                               storyline row at that time), or X,Y in points
+                               storyline row at that time), or X,Y in points;
+                               NAME@FX,FY is a point inside a rect (0..1 each)
     drag FROM TO               press on FROM, move, release on TO (same targets)
     hover TARGET
     seek SECONDS               type the playhead position into the viewer timecode
     import PATH                Ctrl+I, type the path into the file dialog
+    save [PATH]                Ctrl+S (Save As into PATH when given), then 'saved'
     wait EXPR [TIMEOUT]        poll the state until EXPR is true (s = state dict)
     expect EXPR                fail unless EXPR is true now
     sleep SECONDS
     state [KEY.PATH]           print the state (or a part of it) as JSON
     clips                      print the timeline clips, one per line
+    widgets [FILTER|RECT]      list labelled widgets (role, label, value, rect)
     shot NAME [MAXW]           screenshot, cropped to a rect name (or 'window'),
                                scaled to MAXW px wide (default 900)
     log [N]                    print the last N log lines (default 15)
@@ -235,19 +240,19 @@ class Dot(dict):
 
 
 class Driver:
-    def __init__(self, pid: int | None, dump: Path, shots: Path, launch: str | None = None):
+    def __init__(self, pid: int | None, dump: Path, shots: Path, launch: str | None = None, open_file: str | None = None):
         self.dump = dump
         self.shots = shots
         if launch:
             env = dict(os.environ, DEPTHCUT_STATE_DUMP=str(dump))
             dump.unlink(missing_ok=True)
-            pid = subprocess.Popen([launch], env=env, cwd=str(Path(launch).parent)).pid
+            pid = subprocess.Popen([launch] + ([str(Path(open_file).resolve())] if open_file else []), env=env, cwd=str(Path(launch).parent)).pid
             self._wait_file(30)
         elif pid is None:
             pid = self._read_raw().get("app", {}).get("pid")
         self.pid = pid
         self.hwnd = find_window(pid)
-        self.s = self.fresh()
+        self.s = self.fresh(30.0)  # a fresh launch can take a while to draw its first frames
         log = self.s["app"].get("log")
         self.log_path = Path(log) if log else None
         self.log_start = self.log_path.stat().st_size if self.log_path and self.log_path.exists() else 0
@@ -281,10 +286,10 @@ class Driver:
         req.unlink(missing_ok=True)
         raise RuntimeError("the app did not answer a state request (hung, or the dump is off?)")
 
-    def fresh(self) -> dict:
+    def fresh(self, timeout: float = 5.0) -> dict:
         """A dump from a frame that began after every input sent so far."""
-        self._roundtrip()
-        self.s = self._roundtrip()
+        self._roundtrip(timeout)
+        self.s = self._roundtrip(timeout)
         return self.s
 
     # --- geometry
@@ -299,7 +304,7 @@ class Driver:
             return r[0] + r[2] / 2, r[1] + r[3] / 2
 
         anchor = None
-        if "@" in target:  # name@fx,fy : a fraction inside the rect
+        if "@" in target and not target.startswith("text="):  # name@fx,fy : a fraction inside the rect
             target, anchor = target.split("@", 1)
         if m := re.fullmatch(r"(-?[\d.]+),(-?[\d.]+)", target):
             x, y = float(m[1]), float(m[2])
@@ -313,6 +318,10 @@ class Driver:
             if m := re.fullmatch(r"clip#(\d+)", target):
                 spine = [c for c in s["timeline"]["clips"] if c["lane"] == 0]
                 target = f"clip:{spine[int(m[1])]['id']}"
+            elif target.startswith("text="):
+                w = self.find_widget(target[5:])
+                target = "_w"
+                rects = dict(rects, _w=w[3])
             elif target.startswith("asset="):
                 name = target[6:].lower()
                 hits = [a for a in s["assets"] if name in a["name"].lower()]
@@ -328,6 +337,20 @@ class Driver:
             else:
                 x, y = center(r)
         return round(ox + x * ppp), round(oy + y * ppp)
+
+    def find_widget(self, spec: str) -> list:
+        """A widget by its label or value: exact (ignoring case) first, then
+        substring; 'Label#2' takes the second match from the top."""
+        nth = 0
+        if m := re.fullmatch(r"(.*)#(\d+)", spec):
+            spec, nth = m[1], int(m[2]) - 1
+        want = spec.lower()
+        ws = [w for w in self.s.get("widgets", []) if "off" not in w[4].split()]
+        hits = [w for w in ws if want in (w[1].lower(), w[2].lower())] or [w for w in ws if want in w[1].lower() or want in w[2].lower()]
+        if len(hits) <= nth:
+            near = sorted({w[1] or w[2] for w in ws if (w[1] or w[2])})[:40]
+            raise StepFailed(f"no enabled widget {spec!r} (#{nth + 1}); on screen: {near}")
+        return hits[nth]
 
     # --- reporting
     def summary(self, before: dict | None) -> str:
@@ -473,6 +496,23 @@ class Driver:
         v = a.get("video") or {}
         return f"asset {a['id']} {a['name']} {a['duration_s']:.2f}s {v.get('width')}x{v.get('height')}@{v.get('fps')}"
 
+    def do_save(self, path=None):
+        """Ctrl+S; with PATH, also fill in the native Save dialog (which
+        blocks the app, so no state is read until it closes)."""
+        press_chord("ctrl+shift+s" if path and self.s["app"]["project_path"] else "ctrl+s")
+        if path:
+            time.sleep(1.2)
+            type_text(str(Path(path).resolve()))
+            time.sleep(0.2)
+            press_chord("enter")
+            time.sleep(0.8)
+            if Path(path).exists():  # "replace it?" confirmation, if the file existed
+                press_chord("alt+y")
+        self.fresh(30.0)
+        if path and Path(self.s["app"]["project_path"] or "").resolve() != Path(path).resolve():
+            raise StepFailed(f"project path is {self.s['app']['project_path']!r}")
+        return self.do_saved()
+
     def do_wait(self, expr, timeout="20"):
         end = time.time() + float(timeout)
         while True:
@@ -510,6 +550,19 @@ class Driver:
         for k in [p for p in path.split(".") if p]:
             v = v[int(k)] if isinstance(v, list) else v[k]
         return json.dumps(v, indent=None if path else 1)[:4000]
+
+    def do_widgets(self, *filt):
+        """List widgets (role, label/value, rect), optionally filtered by text or inside a rect name."""
+        self.fresh()
+        ws = self.s.get("widgets", [])
+        f = " ".join(filt)
+        if f in self.s["rects"]:
+            x, y, w, h = self.s["rects"][f]
+            ws = [v for v in ws if x <= v[3][0] + v[3][2] / 2 <= x + w and y <= v[3][1] + v[3][3] / 2 <= y + h]
+        elif f:
+            ws = [v for v in ws if f.lower() in (v[1] + " " + v[2]).lower() or f.lower() == v[0].lower()]
+        lines = [f"  {v[0]:<12} {(v[1] or '')[:40]!r:<42} {(v[2] or '')[:30]!r:<32} {[round(c) for c in v[3]]} {v[4]}" for v in ws[:80]]
+        return f"{len(ws)} widgets\n" + "\n".join(lines)
 
     def do_clips(self):
         self.fresh()
@@ -594,14 +647,17 @@ class Driver:
 def main(argv: list[str]) -> int:
     import argparse
 
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--pid", type=int)
     ap.add_argument("--launch", help="start this exe with the state dump on")
+    ap.add_argument("--open", help="with --launch: the project file to open")
     ap.add_argument("--dump", type=Path, default=Path(os.environ.get("DEPTHCUT_STATE_DUMP", DEFAULT_DUMP)))
     ap.add_argument("--shots", type=Path, default=Path(tempfile.gettempdir()) / "depthcut-shots")
     ap.add_argument("steps", nargs="*")
     a = ap.parse_args(argv)
-    d = Driver(a.pid, a.dump, a.shots, a.launch)
+    d = Driver(a.pid, a.dump, a.shots, a.launch, a.open)
     print(f"pid {d.pid}; {d.summary(None)}")
     return 0 if d.run(a.steps) else 1
 

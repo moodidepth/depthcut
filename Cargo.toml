@@ -59,7 +59,7 @@ pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
 half = "2"
 ab_glyph = "0.2"
-eframe = { version = "0.31", default-features = false, features = ["wgpu", "default_fonts", "wayland", "x11"] }
+eframe = { version = "0.31", default-features = false, features = ["wgpu", "default_fonts", "wayland", "x11", "accesskit"] }
 rfd = "0.15"
 
 [profile.dev]
