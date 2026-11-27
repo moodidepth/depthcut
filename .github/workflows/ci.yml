@@ -5,7 +5,10 @@ name: CI
 on:
   push:
     branches: [main, master]
+    # The website and docs don't need a Windows build.
+    paths-ignore: ["site/**", "docs/**", "**.md", ".github/workflows/pages.yml"]
   pull_request:
+    paths-ignore: ["site/**", "docs/**", "**.md", ".github/workflows/pages.yml"]
   workflow_dispatch:
 
 concurrency:

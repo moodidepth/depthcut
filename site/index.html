@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Depthcut: free GPU video editor for Windows</title>
+<meta name="description" content="Depthcut is a free, open-source, GPU-accelerated video editor for Windows. Magnetic timeline, color grading, audio mixing, captions and montage tools. No subscription, no watermark.">
+<meta name="theme-color" content="#0b0c0f">
+<link rel="canonical" href="https://moodidepth.github.io/depthcut/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Depthcut">
+<meta property="og:title" content="Depthcut: free GPU video editor for Windows">
+<meta property="og:description" content="Magnetic timeline, color grading, audio mixing, captions and montage tools. Free and open source, no watermark.">
+<meta property="og:url" content="https://moodidepth.github.io/depthcut/">
+<meta property="og:image" content="https://moodidepth.github.io/depthcut/img/og.jpg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" type="image/png" sizes="32x32" href="img/favicon-32.png">
+<link rel="icon" type="image/png" sizes="192x192" href="img/icon-192.png">
+<link rel="apple-touch-icon" href="img/apple-touch-icon.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="nav">
+  <div class="wrap nav-inner">
+    <a class="brand" href="#top"><img src="img/icon-192.png" alt="" width="28" height="28">Depthcut</a>
+    <nav aria-label="Main">
+      <a href="#features">Features</a>
+      <a href="#screenshots">Screenshots</a>
+      <a href="#requirements">Requirements</a>
+      <a href="https://github.com/moodidepth/depthcut">GitHub</a>
+      <a class="nav-cta" href="#download">Download</a>
+    </nav>
+  </div>
+</header>
+
+<main id="top">
+
+<section class="hero">
+  <div class="wrap">
+    <p class="eyebrow"><span class="pill">Alpha</span> v0.1.0 for Windows 10/11</p>
+    <h1>A fast, free video editor<br>that runs on your GPU.</h1>
+    <p class="lede">Depthcut is built for gaming montages and short-form edits. It has a magnetic timeline, color grading, a real audio mixer and auto-captions, and exports with your NVIDIA, AMD or Intel encoder. No subscription and no watermark.</p>
+    <div class="cta-row" id="download">
+      <a class="btn btn-primary" id="dl-btn" href="https://github.com/moodidepth/depthcut/releases">
+        <svg aria-hidden="true" viewBox="0 0 20 20" width="18" height="18" fill="currentColor"><rect x="0" y="0" width="9.4" height="9.4"/><rect x="10.6" y="0" width="9.4" height="9.4"/><rect x="0" y="10.6" width="9.4" height="9.4"/><rect x="10.6" y="10.6" width="9.4" height="9.4"/></svg>
+        <span>Download for Windows</span>
+      </a>
+      <a class="btn btn-ghost" href="https://github.com/moodidepth/depthcut">
+        <svg aria-hidden="true" viewBox="0 0 16 16" width="18" height="18"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8a8 8 0 0 0 5.47 7.59c.4.07.55-.17.55-.38v-1.33c-2.23.48-2.7-1.07-2.7-1.07-.36-.92-.89-1.17-.89-1.17-.73-.5.06-.49.06-.49.8.06 1.23.83 1.23.83.72 1.22 1.88.87 2.33.66.07-.52.28-.87.5-1.07-1.78-.2-3.65-.89-3.65-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 4 0c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48v2.2c0 .21.15.46.55.38A8 8 0 0 0 16 8c0-4.42-3.58-8-8-8"/></svg>
+        <span>Source on GitHub</span>
+      </a>
+    </div>
+    <p class="dl-meta" id="dl-meta">Installer or portable zip · 64-bit · MIT / Apache-2.0</p>
+    <figure class="hero-shot">
+      <img src="img/editor.jpg" width="2000" height="1130" alt="The Depthcut editor: media browser on the left, viewer with a lower-third title in the middle, clip inspector on the right and the magnetic timeline below">
+    </figure>
+  </div>
+</section>
+
+<section class="section" id="features">
+  <div class="wrap">
+    <h2>What's in it</h2>
+    <p class="section-lede">One developer, built since 2022, written in Rust. Effects, color and scopes render in GPU compute shaders.</p>
+    <div class="grid">
+      <article class="card">
+        <h3>Magnetic timeline</h3>
+        <p>Ripple editing, connected clips, compound clips and secondary storylines. Blade, trim, slip and slide, plus auditions, multicam and three-point edits. Unlimited undo, with an autosave every 30 seconds.</p>
+      </article>
+      <article class="card">
+        <h3>Montage tools</h3>
+        <p>Zoom punch with one key, beat detection with sync to beats, and a VOD scan that finds kills and action peaks. A 9:16 split-crop for Shorts and TikTok, and 16 CS2 and Valorant presets.</p>
+      </article>
+      <article class="card">
+        <h3>Color grading</h3>
+        <p>Color management, wheels, log wheels and curves, HSL qualifiers, window masks and a node graph. Also <code>.cube</code> LUTs, shot match and HDR export, with GPU waveform, parade, vectorscope and histogram.</p>
+      </article>
+      <article class="card">
+        <h3>Audio mixer</h3>
+        <p>Buses with automation and LUFS metering, EQ, dynamics and restoration, and −14 LUFS normalize. Look-ahead ducking lowers the music before the voice starts. Preview sounds the same as the export.</p>
+      </article>
+      <article class="card">
+        <h3>Motion &amp; tracking</h3>
+        <p>Point, region and planar trackers, camera stabilization and scene-cut detection. Keyframes on every parameter, a graph editor with Bézier handles, roto masks, speed ramps and optical-flow retiming.</p>
+      </article>
+      <article class="card">
+        <h3>Hardware export</h3>
+        <p>AV1, HEVC and H.264 through NVENC, AMF or Quick Sync. The app tests each encoder at start-up and lists only the ones that work. It falls back to x264 when there's no GPU encoder, and has a render queue.</p>
+      </article>
+      <article class="card">
+        <h3>Captions &amp; text editing <span class="tag">alpha</span></h3>
+        <p>Offline Whisper speech-to-text on your GPU, word-by-word caption styles and <code>.srt</code> import and export. Cut the edit by deleting words, filler words and pauses in the transcript.</p>
+      </article>
+      <article class="card">
+        <h3>Works with other tools</h3>
+        <p>FCPXML import and export, CMX 3600 EDL and OpenTimelineIO, plus AAF export for Avid and Pro Tools <span class="tag">alpha</span>. VST3 and CLAP plug-ins on mixer buses <span class="tag">alpha</span>.</p>
+      </article>
+      <article class="card">
+        <h3>Free, for real</h3>
+        <p>No account, no subscription, no watermark and no locked features. Open source under MIT or Apache-2.0. Your projects and AI keys stay on your PC.</p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="screenshots">
+  <div class="wrap">
+    <h2>Screenshots</h2>
+    <div class="gallery">
+      <figure>
+        <button class="zoom" data-full="img/color.jpg" aria-label="Enlarge: color inspector"><img src="img/color-crop.jpg" width="1376" height="1000" loading="lazy" alt="Color inspector with color management, three color wheels and basic color controls"></button>
+        <figcaption>Color: wheels, LUTs, corrections and a node graph</figcaption>
+      </figure>
+      <figure>
+        <button class="zoom" data-full="img/audio.jpg" aria-label="Enlarge: audio inspector"><img src="img/audio-crop.jpg" width="1376" height="1000" loading="lazy" alt="Audio inspector with volume, roles, loudness, fades and restoration settings"></button>
+        <figcaption>Audio: roles, loudness, fades and restoration</figcaption>
+      </figure>
+      <figure>
+        <button class="zoom" data-full="img/titles.jpg" aria-label="Enlarge: titles inspector"><img src="img/titles-crop.jpg" width="1376" height="1000" loading="lazy" alt="Titles inspector with title templates, text, font and shadow settings"></button>
+        <figcaption>Titles: templates, shapes and text styles</figcaption>
+      </figure>
+    </div>
+    <p class="credit">Footage: <i>Tears of Steel</i> and <i>Sintel</i>, © Blender Foundation, <a href="https://mango.blender.org">mango.blender.org</a> and <a href="https://durian.blender.org">durian.blender.org</a>, <a href="https://creativecommons.org/licenses/by/3.0/">CC BY 3.0</a>.</p>
+  </div>
+</section>
+
+<section class="section" id="requirements">
+  <div class="wrap two-col">
+    <div>
+      <h2>System requirements</h2>
+      <dl class="specs">
+        <dt>OS</dt><dd>Windows 10 (1809 or later) or Windows 11, 64-bit</dd>
+        <dt>GPU</dt><dd>A DirectX 12 GPU with a Vulkan 1.2 driver. Every current NVIDIA, AMD and Intel driver includes one.</dd>
+        <dt>CPU</dt><dd>4 cores, any x86-64 Intel or AMD processor</dd>
+        <dt>RAM</dt><dd>8 GB, or 16 GB for 1440p and 4K timelines</dd>
+        <dt>Disk</dt><dd>200 MB, plus about 100 MB for FFmpeg</dd>
+      </dl>
+      <p class="note">Tested on Intel Arc A750, NVIDIA RTX 3080 and AMD RX 7800 XT. Linux builds from source but is experimental. macOS isn't supported yet.</p>
+    </div>
+    <div>
+      <h2>First launch</h2>
+      <ol class="steps">
+        <li><b>SmartScreen.</b> The builds aren't code-signed yet, so Windows may show <i>"Windows protected your PC"</i>. Click <b>More info → Run anyway</b>.</li>
+        <li><b>FFmpeg.</b> Depthcut doesn't ship FFmpeg. If it's missing, a banner offers to download it (about 100 MB, checksum-verified) or lets you pick your own.</li>
+        <li><b>Alpha features.</b> Parts marked <i>alpha</i> in the app may not work reliably yet. These are AI Copilot, auto-captions, the transcript editor, AI mattes, voice isolation, voiceover, AAF and plug-ins. Please <a href="https://github.com/moodidepth/depthcut/issues">report what breaks</a>.</li>
+      </ol>
+    </div>
+  </div>
+</section>
+
+<section class="section support">
+  <div class="wrap support-inner">
+    <img src="img/icon-192.png" alt="" width="72" height="72">
+    <div>
+      <h2>Keep it free</h2>
+      <p>Depthcut is made by Moodi Depth, one developer working with help from AI. If it saves you a subscription, a coffee helps.</p>
+    </div>
+    <a class="btn btn-kofi" href="https://ko-fi.com/moodidepth">Support on Ko-fi</a>
+  </div>
+</section>
+
+</main>
+
+<footer class="footer">
+  <div class="wrap footer-inner">
+    <span>© 2026 Moodi Depth · <a href="https://github.com/moodidepth/depthcut/blob/main/LICENSE-MIT">MIT</a> / <a href="https://github.com/moodidepth/depthcut/blob/main/LICENSE-APACHE">Apache-2.0</a></span>
+    <span><a href="https://github.com/moodidepth/depthcut">GitHub</a> · <a href="https://github.com/moodidepth/depthcut/releases">Releases</a> · <a href="https://github.com/moodidepth/depthcut/blob/main/CHANGELOG.md">Changelog</a> · <a href="https://github.com/moodidepth/depthcut/issues">Issues</a></span>
+  </div>
+</footer>
+
+<dialog id="viewer" aria-label="Screenshot">
+  <form method="dialog"><button class="close" aria-label="Close">×</button></form>
+  <img alt="">
+</dialog>
+
+<script src="site.js" defer></script>
+</body>
+</html>
