@@ -63,6 +63,18 @@ impl VideoFormat {
     pub fn label(&self) -> String {
         format!("{}×{} {}", self.width, self.height, self.rate.label())
     }
+    /// The timeline format that matches a source video stream: even
+    /// dimensions (encoders need them), and the nearest standard rate when
+    /// the source is variable-rate or within 2 % of one.
+    pub fn from_source(width: u32, height: u32, rate: FrameRate, vfr: bool) -> Option<Self> {
+        if width < 2 || height < 2 || rate.num == 0 || rate.den == 0 {
+            return None;
+        }
+        let fps = rate.fps();
+        let nearest = FrameRate::PRESETS.into_iter().min_by(|a, b| (a.fps() - fps).abs().total_cmp(&(b.fps() - fps).abs()))?;
+        let rate = if vfr || (nearest.fps() - fps).abs() <= fps * 0.02 { nearest } else { rate };
+        Some(VideoFormat { width: width & !1, height: height & !1, rate })
+    }
 }
 
 /// Where a clip lives on the timeline.
@@ -105,6 +117,11 @@ pub struct Timeline {
     /// Eye / mute / solo / lock of the lanes that differ from the default.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tracks: Vec<crate::tracks::TrackState>,
+    /// Someone set this timeline's format (Project Format edit or a reframe).
+    /// Until then the first video clip edited into the empty timeline sets
+    /// its size and frame rate, as in Final Cut Pro.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub format_chosen: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -174,6 +191,7 @@ impl Timeline {
             captions: CaptionTrack::default(),
             mixer: Default::default(),
             tracks: Vec::new(),
+            format_chosen: false,
         }
     }
 
@@ -771,7 +789,7 @@ impl Timeline {
 
     /// A bare timeline around a nested spine (compound / storyline editing).
     pub fn nested(format: VideoFormat, spine: Vec<Clip>) -> Timeline {
-        Timeline { name: String::new(), format, spine, snapping: false, markers: Vec::new(), captions: CaptionTrack::default(), mixer: Default::default(), tracks: Vec::new() }
+        Timeline { name: String::new(), format, spine, snapping: false, markers: Vec::new(), captions: CaptionTrack::default(), mixer: Default::default(), tracks: Vec::new(), format_chosen: true }
     }
 
     /// Group connected clips into a secondary storyline (FCP "Create

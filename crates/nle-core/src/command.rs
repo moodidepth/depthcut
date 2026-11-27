@@ -613,6 +613,7 @@ impl Command {
                     return Err(EditError::OutOfRange);
                 }
                 tl.format = *format;
+                tl.format_chosen = true;
                 Ok(())
             }
             Command::Rename { name } => {

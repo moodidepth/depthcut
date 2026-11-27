@@ -597,18 +597,55 @@ impl App {
             self.status(format!("{label}: markers, captions, track controls and the mixer belong to the project timeline \u{2014} step out of the compound first"));
             return false;
         }
+        let (cmd, auto_format) = self.first_clip_sets_format(cmd);
         self.remember_selection();
         let result = self.focus.execute(&mut self.project.timeline, &mut self.history, cmd, key);
         self.after_focus_edit();
         match result {
             Ok(()) => {
                 self.prune_selection();
+                if let Some(f) = auto_format {
+                    self.status(format!("Project format set to {} to match the first clip (change it in the inspector)", f.label()));
+                }
                 true
             }
             Err(e) => {
                 self.status(format!("{label}: {e}"));
                 false
             }
+        }
+    }
+
+    /// Final Cut Pro's automatic settings: the first video clip edited into
+    /// an empty project timeline whose format nobody picked sets the
+    /// timeline's size and frame rate, so 60 fps gameplay isn't edited (and
+    /// exported) at 30. Both changes land in one undo step.
+    fn first_clip_sets_format(&self, cmd: Command) -> (Command, Option<nle_core::VideoFormat>) {
+        let tl = &self.project.timeline;
+        if !self.focus.is_empty() || tl.format_chosen || tl.placed_clips().iter().any(|p| !p.clip.is_gap()) {
+            return (cmd, None);
+        }
+        let clip = match &cmd {
+            Command::Append { clip }
+            | Command::Insert { clip, .. }
+            | Command::Overwrite { clip, .. }
+            | Command::Connect { clip, .. }
+            | Command::InsertLane { clip, .. }
+            | Command::OverwriteLane { clip, .. } => clip,
+            _ => return (cmd, None),
+        };
+        let format = clip
+            .asset_id()
+            .and_then(|a| self.project.asset(a))
+            .filter(|a| a.kind == nle_core::AssetKind::Video)
+            .and_then(|a| a.video.as_ref())
+            .and_then(|v| nle_core::VideoFormat::from_source(v.width, v.height, v.frame_rate, v.is_vfr));
+        match format {
+            Some(format) if format != tl.format => {
+                let label = cmd.label();
+                (Command::Batch { label, commands: vec![Command::SetFormat { format }, cmd] }, Some(format))
+            }
+            _ => (cmd, None),
         }
     }
 

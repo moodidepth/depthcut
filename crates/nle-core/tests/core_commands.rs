@@ -141,6 +141,34 @@ fn format_changes_undo_even_while_stepped_in() {
     assert_eq!(focus.root(&shown).format, original);
 }
 
+#[test]
+fn a_format_edit_marks_the_format_chosen_and_undo_clears_it() {
+    let mut tl = Timeline::default();
+    assert!(!tl.format_chosen);
+    let mut history = History::default();
+    let format = VideoFormat { width: 1080, height: 1920, ..tl.format };
+    history.execute(&mut tl, Command::SetFormat { format }).unwrap();
+    assert!(tl.format_chosen);
+    assert!(history.undo(&mut tl));
+    assert!(!tl.format_chosen);
+}
+
+#[test]
+fn source_formats_snap_to_standard_rates() {
+    use nle_core::FrameRate;
+    let f = VideoFormat::from_source(1280, 720, FrameRate::FPS_60, false).unwrap();
+    assert_eq!((f.width, f.height, f.rate), (1280, 720, FrameRate::FPS_60));
+    // 59.94 stays 59.94; 59.7 (a VFR average) becomes 59.94
+    assert_eq!(VideoFormat::from_source(1920, 1080, FrameRate::FPS_59_94, false).unwrap().rate, FrameRate::FPS_59_94);
+    assert_eq!(VideoFormat::from_source(1920, 1080, FrameRate::new(59_700, 1000), false).unwrap().rate, FrameRate::FPS_59_94);
+    // a VFR 144 fps capture lands on the nearest standard rate
+    assert_eq!(VideoFormat::from_source(1920, 1080, FrameRate::new(144, 1), true).unwrap().rate, FrameRate::FPS_120);
+    // an unusual constant rate is kept; odd sizes become even
+    let odd = VideoFormat::from_source(1279, 721, FrameRate::new(144, 1), false).unwrap();
+    assert_eq!((odd.width, odd.height, odd.rate), (1278, 720, FrameRate::new(144, 1)));
+    assert!(VideoFormat::from_source(0, 720, FrameRate::FPS_30, false).is_none());
+}
+
 // ----- track controls
 
 #[test]
