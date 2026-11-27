@@ -148,8 +148,9 @@ pub fn run_audio_export(
         let pcm = render_range(&mut mixer, settings.start, settings.end, cancel, &mut |f| progress(base + f / n));
         let Some(mut pcm) = pcm else { return Err(ExportError::Cancelled) };
         if let (None, Some(target)) = (tap, settings.loudness_target) {
-            use nle_media::analysis::loudness::{normalize_program, CEILING_DBFS};
-            if let Some(r) = normalize_program(&mut pcm, 2, 48_000, target, CEILING_DBFS) {
+            use nle_media::analysis::loudness::{normalize_program, CEILING_DBFS, LOSSY_CEILING_DBTP};
+            let ceiling = if matches!(settings.format, AudioFormat::Aac { .. }) { LOSSY_CEILING_DBTP } else { CEILING_DBFS };
+            if let Some(r) = normalize_program(&mut pcm, 2, 48_000, target, ceiling) {
                 log::info!("audio export: loudness {:.1} LUFS -> {target:.1} ({:+.1} dB)", r.measured_lufs, r.gain_db);
             }
         }

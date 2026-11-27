@@ -99,8 +99,12 @@ pub fn normalize_gain_db(measured: f32, target: f32) -> f32 {
 
 /// Short-form (Shorts / TikTok / Reels) mastering target.
 pub const TARGET_LUFS_SHORTS: f32 = -16.0;
-/// Peak ceiling for delivery masters (headroom for lossy-codec overshoot).
+/// True-peak ceiling for delivery masters (dBTP).
 pub const CEILING_DBFS: f32 = -1.0;
+/// Ceiling when the mix is then encoded lossily (AAC): the codec's decoded
+/// waveform overshoots the limited PCM (+0.5 dB measured on a 320k gameplay
+/// mix), so the extra headroom keeps the delivered file under −1 dBTP.
+pub const LOSSY_CEILING_DBTP: f32 = -1.5;
 
 /// Result of [`normalize_program`].
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -113,7 +117,8 @@ pub struct ProgramLoudness {
 
 /// Fairlight/Premiere-style "normalize to platform target" for a whole
 /// interleaved mix: measure integrated loudness, apply make-up gain, then run
-/// a linked look-ahead peak limiter so no sample exceeds `ceiling_dbfs`.
+/// a linked look-ahead true-peak limiter so neither samples nor the peaks
+/// between them (4× oversampled, BS.1770-4) exceed `ceiling_dbfs` (dBTP).
 /// Silence / too-short audio is left untouched (`None`).
 pub fn normalize_program(samples: &mut [f32], channels: usize, rate: u32, target_lufs: f32, ceiling_dbfs: f32) -> Option<ProgramLoudness> {
     let measured = integrated_lufs(samples, channels, rate)?;
@@ -138,7 +143,53 @@ pub fn normalize_program(samples: &mut [f32], channels: usize, rate: u32, target
     Some(ProgramLoudness { measured_lufs: measured, gain_db, limited_db })
 }
 
-/// Offline linked look-ahead peak limiter (5 ms look-ahead, 120 ms release).
+/// Per-frame true peak: the largest |sample| across channels, raised by any
+/// 4× interpolated point next to the frame. Interpolation is skipped where no
+/// sample in the filter window is loud enough to push a point over `ceiling`,
+/// so quiet stretches cost one comparison per frame.
+fn frame_true_peaks(samples: &[f32], ch: usize, ceiling: f32) -> Vec<f32> {
+    use crate::audio::meter::{true_peak_coefs, TP_TAPS};
+    let frames = samples.len() / ch;
+    let mut tp: Vec<f32> = samples.chunks_exact(ch).map(|f| f.iter().fold(0.0f32, |m, x| m.max(x.abs()))).collect();
+    let coefs = true_peak_coefs();
+    // |interpolated point| <= l1 * max|input in window|
+    let l1 = coefs.iter().map(|ph| ph.iter().map(|c| c.abs()).sum::<f32>()).fold(0.0, f32::max);
+    let mut hot = vec![0u32; frames + 1];
+    for j in 0..frames {
+        hot[j + 1] = hot[j] + u32::from(tp[j] * l1 > ceiling);
+    }
+    // signal is zero outside [0, frames): starts and ends ring too
+    let at = |f: isize, c: usize| if f < 0 || f >= frames as isize { 0.0 } else { samples[f as usize * ch + c] };
+    let window_hot = |first: isize| {
+        let (a, b) = (first.clamp(0, frames as isize) as usize, (first + TP_TAPS as isize).clamp(0, frames as isize) as usize);
+        hot[b] > hot[a]
+    };
+    // a window ending at frame i yields points between frames i-6 and i-5
+    for i in 5..frames as isize + 6 {
+        let first = i + 1 - TP_TAPS as isize;
+        if !window_hot(first) {
+            continue;
+        }
+        let mut m = 0.0f32;
+        for c in 0..ch {
+            for ph in &coefs {
+                // newest sample takes tap 0 (same orientation as the meter)
+                let v: f32 = ph.iter().rev().enumerate().map(|(k, w)| w * at(first + k as isize, c)).sum();
+                m = m.max(v.abs());
+            }
+        }
+        for k in [i - 6, i - 5] {
+            if (0..frames as isize).contains(&k) {
+                tp[k as usize] = tp[k as usize].max(m);
+            }
+        }
+    }
+    tp
+}
+
+/// Offline linked look-ahead true-peak limiter (5 ms look-ahead, 120 ms
+/// release). Delivery specs cap *true* peak (−1 dBTP): a sample-peak limiter
+/// leaves inter-sample overs that decoders and lossy codecs turn into clipping.
 ///
 /// Gain is the sliding-window minimum of the required gain over the next
 /// look-ahead span, box-smoothed over the previous span: every frame's gain is
@@ -150,17 +201,7 @@ pub fn peak_limit(samples: &mut [f32], channels: usize, rate: u32, ceiling: f32)
     if frames == 0 || ceiling <= 0.0 {
         return 0.0;
     }
-    let need: Vec<f32> = samples
-        .chunks_exact(ch)
-        .map(|f| {
-            let peak = f.iter().fold(0.0f32, |m, x| m.max(x.abs()));
-            if peak > ceiling {
-                ceiling / peak
-            } else {
-                1.0
-            }
-        })
-        .collect();
+    let need: Vec<f32> = frame_true_peaks(samples, ch, ceiling).into_iter().map(|peak| if peak > ceiling { ceiling / peak } else { 1.0 }).collect();
     if need.iter().all(|g| *g >= 1.0) {
         return 0.0;
     }
@@ -216,6 +257,8 @@ mod tests {
         let ceil = 10f32.powf(CEILING_DBFS / 20.0);
         let peak = x.iter().fold(0.0f32, |m, s| m.max(s.abs()));
         assert!(peak <= ceil + 1e-5, "peak {peak} over ceiling {ceil}");
+        let tp = true_peak_dbtp(&x);
+        assert!(tp <= CEILING_DBFS + 0.1, "true peak {tp} dBTP over the ceiling");
         let after = integrated_lufs(&x, 2, 48_000).unwrap();
         assert!((after - TARGET_LUFS).abs() < 1.0, "landed at {after} LUFS");
         // Shorts target is 2 LU quieter
@@ -242,6 +285,30 @@ mod tests {
         let gains: Vec<f32> = y.chunks(2).map(|f| f[1] / 0.3).collect();
         let max_step = gains.windows(2).enumerate().filter(|(i, _)| *i != 23_999 && *i != 24_000).map(|(_, w)| (w[1] - w[0]).abs()).fold(0.0, f32::max);
         assert!(max_step < 0.05, "gain step {max_step}");
+    }
+
+    fn true_peak_dbtp(x: &[f32]) -> f32 {
+        let mut m = crate::audio::meter::LoudnessMeter::new(48_000);
+        m.push(x);
+        m.true_peak_db().unwrap()
+    }
+
+    #[test]
+    fn limiter_catches_intersample_overs() {
+        // fs/4 sine at 45°: every sample sits at 0.707 (−3 dBFS), the
+        // waveform between them reaches 1.0 (0 dBTP). A sample-peak limiter
+        // with a −1 dB ceiling would leave it alone.
+        let mut x: Vec<f32> = (0..48_000)
+            .flat_map(|i| {
+                let v = (std::f64::consts::FRAC_PI_2 * i as f64 + std::f64::consts::FRAC_PI_4).sin() as f32;
+                [v, v]
+            })
+            .collect();
+        assert!(true_peak_dbtp(&x) > -0.5);
+        let reduced = peak_limit(&mut x, 2, 48_000, 10f32.powf(CEILING_DBFS / 20.0));
+        assert!(reduced > 0.5, "limited {reduced} dB");
+        let tp = true_peak_dbtp(&x);
+        assert!(tp <= CEILING_DBFS + 0.1, "true peak {tp} dBTP");
     }
 
     fn sine_stereo(rate: u32, freq: f64, amp: f32, secs: f64) -> Vec<f32> {

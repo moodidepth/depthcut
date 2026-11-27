@@ -955,9 +955,12 @@ pub fn run_export(
         let sources = export_audio(project, audio_sources, settings.start, settings.end, cancel)?;
         let mut pcm = mix_audio(project, &sources, settings.start, settings.end);
         if let Some(target) = settings.loudness_target {
-            use nle_media::analysis::loudness::{normalize_program, CEILING_DBFS};
-            match normalize_program(&mut pcm, 2, 48_000, target, CEILING_DBFS) {
-                Some(r) => log::info!("export: loudness {:.1} LUFS -> {target:.1} ({:+.1} dB, limiter {:.1} dB)", r.measured_lufs, r.gain_db, r.limited_db),
+            use nle_media::analysis::loudness::{normalize_program, CEILING_DBFS, LOSSY_CEILING_DBTP};
+            let ceiling = if matches!(settings.audio, AudioExport::Aac { .. }) { LOSSY_CEILING_DBTP } else { CEILING_DBFS };
+            match normalize_program(&mut pcm, 2, 48_000, target, ceiling) {
+                Some(r) => {
+                    log::info!("export: loudness {:.1} LUFS -> {target:.1} ({:+.1} dB, limiter {:.1} dB, ceiling {ceiling:.1} dBTP)", r.measured_lufs, r.gain_db, r.limited_db)
+                }
                 None => log::info!("export: mix is silent; loudness normalization skipped"),
             }
         }

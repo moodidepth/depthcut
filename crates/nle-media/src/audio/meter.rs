@@ -9,8 +9,32 @@ const HIST_MIN: f64 = -70.0;
 const HIST_STEP: f64 = 0.1;
 const HIST_BINS: usize = 800;
 /// 4× true-peak interpolator: 48-tap windowed-sinc, 12 taps per phase.
-const TP_PHASES: usize = 4;
-const TP_TAPS: usize = 12;
+pub(crate) const TP_PHASES: usize = 4;
+pub(crate) const TP_TAPS: usize = 12;
+
+/// Polyphase coefficients of the BS.1770-4 4× true-peak interpolator. Phase
+/// `p` evaluated over the last [`TP_TAPS`] input samples (oldest first, taps
+/// reversed) yields one of the four upsampled points.
+pub(crate) fn true_peak_coefs() -> [[f32; TP_TAPS]; TP_PHASES] {
+    let mut tp_coefs = [[0.0f32; TP_TAPS]; TP_PHASES];
+    let len = TP_PHASES * TP_TAPS;
+    for (p, phase) in tp_coefs.iter_mut().enumerate() {
+        for (t, c) in phase.iter_mut().enumerate() {
+            // tap index in the 4× upsampled filter
+            let i = t * TP_PHASES + p;
+            let x = (i as f64 - (len as f64 - 1.0) / 2.0) / TP_PHASES as f64;
+            let sinc = if x.abs() < 1e-9 { 1.0 } else { (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x) };
+            let w = 0.42 - 0.5 * (std::f64::consts::TAU * i as f64 / (len - 1) as f64).cos() + 0.08 * (2.0 * std::f64::consts::TAU * i as f64 / (len - 1) as f64).cos();
+            *c = (sinc * w) as f32;
+        }
+    }
+    // each phase sums to unity gain at DC
+    for phase in &mut tp_coefs {
+        let s: f32 = phase.iter().sum();
+        phase.iter_mut().for_each(|c| *c /= s);
+    }
+    tp_coefs
+}
 
 fn lufs(z: f64) -> f64 {
     -0.691 + 10.0 * z.max(1e-20).log10()
@@ -49,23 +73,7 @@ pub struct LoudnessMeter {
 impl LoudnessMeter {
     pub fn new(sample_rate: u32) -> Self {
         let rate = sample_rate as f64;
-        let mut tp_coefs = [[0.0f32; TP_TAPS]; TP_PHASES];
-        let len = TP_PHASES * TP_TAPS;
-        for (p, phase) in tp_coefs.iter_mut().enumerate() {
-            for (t, c) in phase.iter_mut().enumerate() {
-                // tap index in the 4× upsampled filter
-                let i = t * TP_PHASES + p;
-                let x = (i as f64 - (len as f64 - 1.0) / 2.0) / TP_PHASES as f64;
-                let sinc = if x.abs() < 1e-9 { 1.0 } else { (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x) };
-                let w = 0.42 - 0.5 * (std::f64::consts::TAU * i as f64 / (len - 1) as f64).cos() + 0.08 * (2.0 * std::f64::consts::TAU * i as f64 / (len - 1) as f64).cos();
-                *c = (sinc * w) as f32;
-            }
-        }
-        // each phase sums to unity gain at DC
-        for phase in &mut tp_coefs {
-            let s: f32 = phase.iter().sum();
-            phase.iter_mut().for_each(|c| *c /= s);
-        }
+        let tp_coefs = true_peak_coefs();
         LoudnessMeter {
             filters: [k_weighting(rate), k_weighting(rate)],
             step_len: (0.1 * rate).round() as usize,
