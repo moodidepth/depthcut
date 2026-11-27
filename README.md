@@ -1,4 +1,4 @@
-# Rust Cut Pro
+# Depthcut
 
 A fast, GPU-accelerated video editor for gaming montages and short-form edits,
 written in Rust. It has a magnetic timeline in the style of Final Cut Pro, plus
@@ -7,23 +7,32 @@ scanning, 9:16 reframing, Whisper auto-captions and an optional AI Copilot.
 
 > **Status: v0.1.0, early release.** Windows 10/11 x64 is the supported
 > platform. Linux builds from source but is experimental. macOS is not supported.
+>
+> Features marked **(alpha)** in the app are still in development and may not
+> work reliably yet: AI Copilot, Auto Captions and the transcript editor, AI
+> mattes, voice isolation, voiceover recording, AAF export and audio plug-ins.
+
+*Formerly Rust Cut Pro.* Depthcut is made by Moodi Depth, one developer working
+with help from AI, and has been in development since 2022. It's free, with no
+subscriptions, watermarks or locked features. If it's useful to you, please
+consider supporting it (*Help → Welcome & Support* in the app).
 
 ---
 
 ## Install (Windows)
 
-1. Download `RustCutPro-v0.1.0-win64-setup.exe` (installer) **or**
-   `RustCutPro-v0.1.0-win64-portable.zip` (unzip anywhere and run `rust-cut-pro.exe`).
+1. Download `Depthcut-v0.1.0-win64-setup.exe` (installer) **or**
+   `Depthcut-v0.1.0-win64-portable.zip` (unzip anywhere and run `depthcut.exe`).
    You can check the download against `SHA256SUMS.txt`:
-   `Get-FileHash .\RustCutPro-v0.1.0-win64-portable.zip`
+   `Get-FileHash .\Depthcut-v0.1.0-win64-portable.zip`
 2. **SmartScreen warning.** Builds are **not code-signed yet**, so Windows may say
    *"Windows protected your PC"*. Click **More info → Run anyway**. If you'd rather
    not, build from source (see [Build & run](#build--run)).
-3. **First launch: FFmpeg.** Rust Cut Pro uses FFmpeg to import, proxy and export
+3. **First launch: FFmpeg.** Depthcut uses FFmpeg to import, proxy and export
    video, but does not ship it. If FFmpeg isn't found, a banner at the top offers:
    - **Download FFmpeg Automatically**: fetches the gyan.dev "release essentials"
      build (about 100 MB), checks its SHA-256 and puts it in
-     `%LOCALAPPDATA%\RustCutPro\bin`. That build is GPL-licensed; its license is
+     `%LOCALAPPDATA%\Depthcut\bin`. That build is GPL-licensed; its license is
      saved next to it.
    - **Locate Existing ffmpeg.exe…**: use one you already have.
    - Or install it yourself (`winget install Gyan.FFmpeg`) and restart.
@@ -57,13 +66,13 @@ already included next to the exe.
 
 | What | Where |
 |---|---|
-| Autosaves, logs, keybindings, proxies, Discord settings | `%APPDATA%\RustCutPro\` |
-| Whisper models, downloaded audio, downloaded FFmpeg (`bin\`) | `%LOCALAPPDATA%\RustCutPro\` |
+| Autosaves, logs, keybindings, proxies, Discord settings | `%APPDATA%\Depthcut\` |
+| Whisper models, downloaded audio, downloaded FFmpeg (`bin\`) | `%LOCALAPPDATA%\Depthcut\` |
 | AI Copilot settings | `%LOCALAPPDATA%\Argon\ai_config.toml` (no keys in it) |
-| AI API keys | **Windows Credential Manager** → *Windows Credentials* → entries starting `RustCutPro` |
+| AI API keys | **Windows Credential Manager** → *Windows Credentials* → entries starting `Depthcut` |
 
 Uninstalling leaves these in place so a reinstall keeps your settings. To remove
-everything, delete those two `RustCutPro` folders and the `RustCutPro` entries in
+everything, delete those two `Depthcut` folders and the `Depthcut` entries in
 Credential Manager.
 
 **Logs.** *Help → Show Log File* opens the log folder. It holds this session's
@@ -153,7 +162,7 @@ and tells you where the log is. Please attach it to bug reports.
 Every binding can be changed in *Help → Keyboard Shortcuts* (`Ctrl+,` / `F1`),
 including extra mouse buttons (`Middle`, `Back`, `Forward`). There are three
 presets: **Argon Montage** (the default, below), **Final Cut Pro** and
-**DaVinci Resolve**. Changes are saved to `%APPDATA%\RustCutPro\config\keybindings.toml`.
+**DaVinci Resolve**. Changes are saved to `%APPDATA%\Depthcut\config\keybindings.toml`.
 
 | Keys | Action | Group |
 |---|---|---|
@@ -262,11 +271,11 @@ The editor was tuned for an **AMD Ryzen 7 5800X** with an **Intel Arc A750**, on
 ### Workspace
 
 ```
-rust-cut-pro/
+depthcut/
 ├── crates/nle-core     data model — no GPU, no FFmpeg, fully unit-tested
 ├── crates/nle-media    decoding, hardware acceleration, audio, thumbnails, proxies
 ├── crates/nle-render   wgpu/WGSL render engine and hardware export
-└── crates/nle-ui       eframe/egui application (binary: rust-cut-pro)
+└── crates/nle-ui       eframe/egui application (binary: depthcut)
 ```
 
 There are no circular dependencies: `nle-core` ← `nle-media` ← `nle-render` ← `nle-ui`.
@@ -412,7 +421,7 @@ Check Quick Sync with `vainfo --display drm --device /dev/dri/renderD128`. It sh
      cargo run --release -p nle-ui --features ffmpeg
      ```
 
-  The plain `Gyan.FFmpeg` package (the "full" build) is just the executables, which is all the default build needs. It does not include headers or `.lib` files. To run the exe without that `PATH` line, copy the DLLs from `$ff\bin` next to `target\release\rust-cut-pro.exe`.
+  The plain `Gyan.FFmpeg` package (the "full" build) is just the executables, which is all the default build needs. It does not include headers or `.lib` files. To run the exe without that `PATH` line, copy the DLLs from `$ff\bin` next to `target\release\depthcut.exe`.
 
 Without FFmpeg the editor still runs: the demo media and the GPU pipeline work, but imports of real files, proxies and export need the `ffmpeg` binary.
 
@@ -421,7 +430,7 @@ Without FFmpeg the editor still runs: the demo media and the GPU pipeline work, 
 ### Build & run
 
 ```bash
-cargo run --release -p nle-ui            # the editor (binary: rust-cut-pro)
+cargo run --release -p nle-ui            # the editor (binary: depthcut)
 cargo check --workspace
 cargo test --workspace                   # core, media, render (incl. GPU) tests
 cargo run --release -p nle-ui --features ffmpeg   # in-process libav decoding
@@ -434,10 +443,10 @@ Environment variables:
 | `RCP_WGPU_BACKEND=vulkan\|dx12\|gl` | Force a wgpu backend. The default is DX12 → Vulkan on Windows and Vulkan on Linux. |
 | `RCP_FFMPEG`, `RCP_FFPROBE` | Paths to the FFmpeg tools. |
 | `RUST_LOG=debug` | Verbose logging. |
-| `RCP_DATA_DIR` | Override `%LOCALAPPDATA%\RustCutPro` (where the downloaded FFmpeg goes). |
+| `RCP_DATA_DIR` | Override `%LOCALAPPDATA%\Depthcut` (where the downloaded FFmpeg goes). |
 | `RCP_DISCORD_APP_ID` | Discord application ID. At build time it bakes the ID into the exe; at run time it overrides it. |
 
-Autosaves go to `%APPDATA%\RustCutPro\autosave` on Windows and `~/.local/share/RustCutPro/autosave` on Linux (`config\keybindings.toml`, `logs\` and `proxies\` live beside it). Whisper `models\`, `downloads\` and the downloaded FFmpeg `bin\` live under `%LOCALAPPDATA%\RustCutPro` (Linux: `~/.local/share/rust-cut-pro`).
+Autosaves go to `%APPDATA%\Depthcut\autosave` on Windows and `~/.local/share/Depthcut/autosave` on Linux (`config\keybindings.toml`, `logs\` and `proxies\` live beside it). Whisper `models\`, `downloads\` and the downloaded FFmpeg `bin\` live under `%LOCALAPPDATA%\Depthcut` (Linux: `~/.local/share/depthcut`).
 
 #### Release packaging (Windows)
 
@@ -445,7 +454,7 @@ Autosaves go to `%APPDATA%\RustCutPro\autosave` on Windows and `~/.local/share/R
 powershell -ExecutionPolicy Bypass -File scripts\package_windows.ps1   # add -SkipBuild to reuse target\release
 ```
 
-This writes `dist\RustCutPro-v<version>-win64-portable.zip`, the installer `dist\RustCutPro-v<version>-win64-setup.exe`
+This writes `dist\Depthcut-v<version>-win64-portable.zip`, the installer `dist\Depthcut-v<version>-win64-setup.exe`
 (only when [Inno Setup 6](https://jrsoftware.org/isinfo.php) is installed: `winget install JRSoftware.InnoSetup`)
 and `dist\SHA256SUMS.txt`. The exe is signed only if a certificate is configured through environment variables
 (see the script header and [docs/RELEASE_DECISIONS.md](docs/RELEASE_DECISIONS.md)). After a dependency change,
@@ -496,10 +505,10 @@ The `ffmpeg` feature (`ffmpeg-next` 9.1) was built and tested against the same F
   - `hwupload=extra_hw_frames=N` fails on D3D11 with `E_INVALIDARG`, so Windows uses a plain `hwupload,format=qsv`.
   - Output colour flags (`-colorspace` etc.) make FFmpeg insert an auto-scale filter that cannot accept QSV frames. BT.709 tags are therefore set with `setparams` before the upload.
   - QSV decode is not planned on Windows: it seeks inexactly. Decoding goes through D3D11VA.
-- **AI mattes (`onnx` feature, on by default):** the app loads ONNX Runtime at run time (`ort` 2.0.0-rc.10, which targets ONNX Runtime 1.22). It looks for `onnxruntime.dll` in `ORT_DYLIB_PATH`, next to `rust-cut-pro.exe`, then in `%LOCALAPPDATA%\RustCutPro\models\`. Put the models in that same folder:
+- **AI mattes (`onnx` feature, on by default):** the app loads ONNX Runtime at run time (`ort` 2.0.0-rc.10, which targets ONNX Runtime 1.22). It looks for `onnxruntime.dll` in `ORT_DYLIB_PATH`, next to `depthcut.exe`, then in `%LOCALAPPDATA%\Depthcut\models\`. Put the models in that same folder:
   - `person.onnx`: a portrait matting / segmentation model with a `1×3×H×W` input normalised as `(x − 0.5) / 0.5` and a `1×1×H×W` output in 0..1 (probabilities or logits), e.g. MODNet.
   - `depth.onnx`: a relative depth model with ImageNet normalisation whose output grows towards the camera, e.g. Depth Anything V2 Small.
 
-  Fixed input sizes are read from the model. Dynamic ones get the frame's shape at about 512² pixels (person) or 518×518 (depth). Mattes are cached at ≤ 480 px wide (about 130 KB per frame) in `%LOCALAPPDATA%\RustCutPro\mattes\`. Inference runs on the CPU, and the app switches ONNX Runtime's telemetry off.
+  Fixed input sizes are read from the model. Dynamic ones get the frame's shape at about 512² pixels (person) or 518×518 (depth). Mattes are cached at ≤ 480 px wide (about 130 KB per frame) in `%LOCALAPPDATA%\Depthcut\mattes\`. Inference runs on the CPU, and the app switches ONNX Runtime's telemetry off.
 
   Checked by hand on 2026-11-22 (Windows, Ryzen 7 5800X, ONNX Runtime 1.22.1, MODNet from `Xenova/modnet`, Depth Anything V2 Small from `onnx-community/depth-anything-v2-small`) on one 3-second 720p test clip made from still photos: generate, preview, a trimmed clip, and a Person Matte export. It took about 0.4 s per frame for person and 0.6 s for depth, so roughly 12 and 19 minutes per minute of 30 fps video. MODNet is a portrait model: it can miss people in wide shots and keep objects held next to a person. Depth is normalised per frame, so it may flicker on real footage; that has not been tested.

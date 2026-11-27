@@ -75,6 +75,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("🤖 AI Copilot").strong().size(14.0).color(theme::VIDEO));
+                theme::alpha_badge(ui);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.small_button("✕").on_hover_text("Close Copilot (Ctrl+Shift+A)").clicked() {
                         open = false;

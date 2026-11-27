@@ -35,10 +35,10 @@ const GAP_START: Time = Time::from_secs(3600);
 const COLOR_EFFECT: &str = "Color Adjustments";
 /// Colour management + correction nodes travel as JSON inside the colour filter.
 const COLOR_PIPELINE_PARAM: &str = "rcp.colorPipeline";
-/// RustCut Pro effects: one `filter-video` each, the effect as JSON.
-const RCP_EFFECT: &str = "RustCut Pro Effect";
+/// Depthcut effects: one `filter-video` each, the effect as JSON.
+const RCP_EFFECT: &str = "Depthcut Effect";
 const RCP_EFFECT_PARAM: &str = "rcp.effect";
-const RCP_MOTION: &str = "RustCut Pro Motion";
+const RCP_MOTION: &str = "Depthcut Motion";
 const RCP_MOTION_PARAM: &str = "rcp.motion";
 
 /// Tracks, stabilization, follow and Speed Warp (no FCPXML equivalent).

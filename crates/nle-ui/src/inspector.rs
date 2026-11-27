@@ -1021,7 +1021,7 @@ fn audio_tab(
         });
         let vi = &mut a.voice_isolation;
         let backend = nle_media::audio::restore::voice_isolation_backend();
-        ui.checkbox(&mut vi.enabled, egui::RichText::new("Voice Isolation").strong()).on_hover_text(match backend {
+        ui.checkbox(&mut vi.enabled, egui::RichText::new(theme::alpha("Voice Isolation")).strong()).on_hover_text(match backend {
             Some(name) => format!(
                 "Neural speech enhancement ({name}): removes noise, room tone, reverb tails and most background sound around the voice. Other voices and singing can remain."
             ),

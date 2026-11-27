@@ -136,7 +136,13 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         return;
     }
     let mut open = true;
-    egui::Window::new("Transcript").open(&mut open).default_width(540.0).default_height(560.0).resizable(true).show(ctx, |ui| body(app, ui));
+    egui::Window::new(theme::alpha("Transcript"))
+        .id(egui::Id::new("transcript_window"))
+        .open(&mut open)
+        .default_width(540.0)
+        .default_height(560.0)
+        .resizable(true)
+        .show(ctx, |ui| body(app, ui));
     app.transcript.open &= open;
 }
 

@@ -221,6 +221,31 @@ impl TimelineState {
     pub fn zoom_by(&mut self, k: f32) {
         self.pps = (self.pps * k).clamp(1.0, 4000.0);
     }
+
+    /// Keyboard / menu zoom around the playhead (seconds): it keeps its place
+    /// on screen when visible, otherwise the view centres on it.
+    pub fn zoom_around(&mut self, k: f32, playhead: f32) {
+        let x = (playhead - self.scroll) * self.pps;
+        let x = if (0.0..=self.view_width).contains(&x) { x } else { self.view_width * 0.5 };
+        self.zoom_by(k);
+        self.scroll = (playhead - x / self.pps).max(0.0);
+    }
+}
+
+#[cfg(test)]
+mod zoom_tests {
+    use super::TimelineState;
+
+    #[test]
+    fn keyboard_zoom_keeps_the_playhead_in_place() {
+        let mut tl = TimelineState { pps: 60.0, scroll: 10.0, view_width: 1200.0, ..Default::default() };
+        // playhead 300 px into the view
+        tl.zoom_around(1.5, 15.0);
+        assert!(((15.0 - tl.scroll) * tl.pps - 300.0).abs() < 1e-3);
+        // off screen: centred
+        tl.zoom_around(1.5, 500.0);
+        assert!(((500.0 - tl.scroll) * tl.pps - 600.0).abs() < 1e-2);
+    }
 }
 
 struct Row {
@@ -1220,8 +1245,17 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
                 if ui.selectable_label(app.skimming, "⇋ Skim").on_hover_text(format!("Skimming ({})", app.keymap.hint(Action::ToggleSkimming))).clicked() {
                     app.skimming = !app.skimming;
                 }
-                ui.toggle_value(&mut app.show_captions, "CC Captions").on_hover_text("Auto captions & Whisper transcription");
-                ui.toggle_value(&mut app.transcript.open, "Transcript").on_hover_text(app.keymap.tip("Edit by text: delete words, fillers and pauses", Action::ToggleTranscript));
+                ui.toggle_value(&mut app.show_captions, "CC Captions").on_hover_text(format!(
+                    "Auto captions & Whisper transcription
+{}",
+                    theme::ALPHA_HINT
+                ));
+                ui.toggle_value(&mut app.transcript.open, "Transcript").on_hover_text(format!(
+                    "{}
+{}",
+                    app.keymap.tip("Edit by text: delete words, fillers and pauses", Action::ToggleTranscript),
+                    theme::ALPHA_HINT
+                ));
                 ui.toggle_value(&mut app.graph.open, "Graph").on_hover_text(app.keymap.tip("Keyframe curves with Bézier handles", Action::ToggleGraphEditor));
                 let lanes_tip = format!("Group the audio below the storyline into Dialogue / Music / SFX / General lanes ({})", app.keymap.hint(Action::ToggleAudioLanes));
                 ui.toggle_value(&mut app.tl.audio_lanes, "Audio Lanes").on_hover_text(lanes_tip);
@@ -2129,7 +2163,7 @@ fn context_menu(app: &mut App, ui: &mut egui::Ui, clip: Option<ClipId>) {
             app.add_marker();
             ui.close_menu();
         }
-        if ui.button("Generate Captions…").clicked() {
+        if ui.button(theme::alpha("Generate Captions…")).clicked() {
             app.show_captions = true;
             ui.close_menu();
         }

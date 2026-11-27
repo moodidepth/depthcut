@@ -32,7 +32,7 @@ pub fn refresh() {
 }
 
 /// Folder the built-in downloader installs FFmpeg into
-/// (`%LOCALAPPDATA%\RustCutPro\bin` on Windows).
+/// (`%LOCALAPPDATA%\Depthcut\bin` on Windows).
 pub fn managed_bin_dir() -> PathBuf {
     crate::paths::local_data_dir().join("bin")
 }

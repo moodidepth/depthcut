@@ -1,4 +1,4 @@
-"""Read Rust Cut Pro's AAF export with the reference pyaaf2 library and print
+"""Read Depthcut's AAF export with the reference pyaaf2 library and print
 the composition, following each source clip to its file's URL.
 
     python -m venv .aaf && .aaf/Scripts/pip install pyaaf2

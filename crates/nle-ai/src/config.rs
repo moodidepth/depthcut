@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 /// Credential Manager service name for stored API keys.
-pub const KEYRING_SERVICE: &str = "RustCutPro";
+pub const KEYRING_SERVICE: &str = "Depthcut";
+/// Service name used before the app was renamed; keys found there are moved.
+pub const LEGACY_KEYRING_SERVICE: &str = "RustCutPro";
 /// Model tried when the chosen Gemini model is overloaded (HTTP 503/429).
 pub const DEFAULT_GEMINI_FALLBACK: &str = "gemini-flash-latest";
 
@@ -113,7 +115,7 @@ impl Default for AiConfig {
 /// Unit tests must never touch the user's real stored keys.
 fn default_service() -> &'static str {
     if cfg!(test) {
-        "RustCutPro-unit-test"
+        "Depthcut-unit-test"
     } else {
         KEYRING_SERVICE
     }
@@ -193,6 +195,16 @@ impl AiConfig {
                 if field.is_empty() {
                     match secrets::get(service, account) {
                         Ok(Some(v)) => *field = v,
+                        Ok(None) if service == KEYRING_SERVICE => {
+                            // key saved under the old app name: move it across
+                            if let Ok(Some(v)) = secrets::get(LEGACY_KEYRING_SERVICE, account) {
+                                if secrets::set(service, account, &v).is_ok() {
+                                    let _ = secrets::set(LEGACY_KEYRING_SERVICE, account, "");
+                                    log::info!("moved {account} to the {KEYRING_SERVICE} Credential Manager entry");
+                                }
+                                *field = v;
+                            }
+                        }
                         Ok(None) => {}
                         Err(e) => log::warn!("could not read {account} from the Credential Manager: {e}"),
                     }
@@ -322,7 +334,7 @@ mod tests {
         let p = scratch("old");
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(&p, "provider = \"gemini4\"\ngemini_model = \"gemini-4-hydrogen\"\n").unwrap();
-        let c = AiConfig::load_with_store(&p, &format!("RustCutPro-test-{}-old", std::process::id()));
+        let c = AiConfig::load_with_store(&p, &format!("Depthcut-test-{}-old", std::process::id()));
         assert_eq!(c.gemini_model, "gemini-4-hydrogen");
         assert_eq!(c.gemini_fallback_model, DEFAULT_GEMINI_FALLBACK);
         let _ = std::fs::remove_dir_all(p.parent().unwrap());
@@ -333,7 +345,7 @@ mod tests {
     #[test]
     fn plaintext_key_moves_to_credential_manager_and_is_scrubbed() {
         let p = scratch("migrate");
-        let service = format!("RustCutPro-test-{}", std::process::id());
+        let service = format!("Depthcut-test-{}", std::process::id());
         // removes the throwaway credentials even if an assert below fails
         struct Cleanup(String);
         impl Drop for Cleanup {

@@ -1,4 +1,4 @@
-//! Rust Cut Pro — a Final Cut Pro-style non-linear editor.
+//! Depthcut — a Final Cut Pro-style non-linear editor.
 //!
 //! eframe/egui UI on the wgpu backend. The preview renderer shares eframe's
 //! wgpu device, so rendered frames are shown in the viewer without copies.
@@ -38,6 +38,7 @@ mod track_headers;
 mod transcript_ui;
 mod viewer;
 mod voiceover_ui;
+mod welcome_ui;
 mod whisper_runtime;
 mod widgets;
 
@@ -51,6 +52,9 @@ fn main() -> eframe::Result<()> {
     if let Some(code) = whisper_runtime::selftest_from_args() {
         std::process::exit(code);
     }
+    // the app was called Rust Cut Pro: move its data folders to the new name
+    // before the log file, crash marker or anything else opens files there
+    media::migrate_legacy_data_dirs();
     // log file + panic hook + "previous session crashed" detection
     diagnostics::init("info,wgpu_core=warn,wgpu_hal=warn,naga=warn,eframe=warn,egui_wgpu=warn");
     let budget = nle_media::threads::init_media_pool();
@@ -84,7 +88,7 @@ fn main() -> eframe::Result<()> {
     };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("Rust Cut Pro")
+            .with_title("Depthcut")
             .with_icon(load_app_icon())
             .with_inner_size([1680.0, 1000.0])
             .with_min_inner_size([1100.0, 700.0])
@@ -99,7 +103,7 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
     let result = eframe::run_native(
-        "Rust Cut Pro",
+        "Depthcut",
         options,
         Box::new(|cc| {
             let mut app = app::App::new(cc);

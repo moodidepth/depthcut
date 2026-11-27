@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
-    println!("cargo:rerun-if-changed=assets/rust-cut-pro.ico");
-    println!("cargo:rerun-if-changed=assets/rust-cut-pro.rc");
+    println!("cargo:rerun-if-changed=assets/depthcut.ico");
+    println!("cargo:rerun-if-changed=assets/depthcut.rc");
     println!("cargo:rerun-if-changed=assets/icon-128.rgba");
 
     whisper_vulkan();
@@ -14,9 +14,9 @@ fn main() {
     }
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let rc_file = manifest_dir.join("assets").join("rust-cut-pro.rc");
+    let rc_file = manifest_dir.join("assets").join("depthcut.rc");
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
-    let res_file = out_dir.join("rust-cut-pro.res");
+    let res_file = out_dir.join("depthcut.res");
 
     let Some(rc_exe) = find_rc_exe() else {
         println!("cargo:warning=rc.exe not found; skipping Windows exe icon resource embedding");
@@ -27,7 +27,7 @@ fn main() {
 
     match status {
         Ok(s) if s.success() && res_file.exists() => {
-            println!("cargo:rustc-link-arg-bin=rust-cut-pro={}", res_file.display());
+            println!("cargo:rustc-link-arg-bin=depthcut={}", res_file.display());
         }
         Ok(s) => {
             println!("cargo:warning=rc.exe exited with {s}; skipping Windows exe icon embedding");

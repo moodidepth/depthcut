@@ -93,7 +93,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: rust-cut-pro-windows
+          name: depthcut-windows
           path: |
             dist/*.zip
             dist/*-setup.exe

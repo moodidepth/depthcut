@@ -242,6 +242,7 @@ pub struct App {
     pub shortcuts_ui: shortcuts_ui::ShortcutsState,
     pub ffmpeg_setup: crate::ffmpeg_setup::FfmpegSetup,
     pub about: crate::about_ui::AboutState,
+    pub welcome: crate::welcome_ui::WelcomeState,
     status: Option<(String, Instant)>,
     audio_revision: u64,
     audio_sources: HashSet<AssetId>,
@@ -406,6 +407,7 @@ impl App {
             shortcuts_ui: shortcuts_ui::ShortcutsState::default(),
             ffmpeg_setup: Default::default(),
             about: Default::default(),
+            welcome: Default::default(),
             status: None,
             audio_revision: u64::MAX,
             audio_sources: HashSet::new(),
@@ -2111,7 +2113,7 @@ impl App {
     }
 
     pub fn open_dialog(&mut self) {
-        if let Some(path) = rfd::FileDialog::new().add_filter("Rust Cut Pro project", &["rcp", "json"]).pick_file() {
+        if let Some(path) = rfd::FileDialog::new().add_filter("Depthcut project", &["rcp", "json"]).pick_file() {
             self.open_path(&path);
         }
     }
@@ -2133,7 +2135,7 @@ impl App {
     pub fn save(&mut self, save_as: bool) {
         let path = match (&self.project_path, save_as) {
             (Some(p), false) => Some(p.clone()),
-            _ => rfd::FileDialog::new().add_filter("Rust Cut Pro project", &["rcp"]).set_file_name(format!("{}.rcp", self.project.name)).save_file(),
+            _ => rfd::FileDialog::new().add_filter("Depthcut project", &["rcp"]).set_file_name(format!("{}.rcp", self.project.name)).save_file(),
         };
         let Some(path) = path else { return };
         let result = self.full_project().save(&path);
@@ -2309,8 +2311,8 @@ impl App {
                 self.skimming = !self.skimming;
                 self.status(if self.skimming { "Skimming on" } else { "Skimming off" });
             }
-            Action::ZoomIn => self.tl.zoom_by(1.5),
-            Action::ZoomOut => self.tl.zoom_by(1.0 / 1.5),
+            Action::ZoomIn => self.tl.zoom_around(1.5, self.playhead.as_secs_f64() as f32),
+            Action::ZoomOut => self.tl.zoom_around(1.0 / 1.5, self.playhead.as_secs_f64() as f32),
             Action::ZoomToFit => self.tl.fit_pending = true,
             Action::ToggleScopes => self.set_scopes(!self.viewer.scopes),
             Action::ToggleAudioMixer => self.mixer_view.open = !self.mixer_view.open,
@@ -2412,7 +2414,7 @@ impl App {
 
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
         egui::menu::bar(ui, |ui| {
-            ui.label(egui::RichText::new("◆ Rust Cut Pro").strong().color(theme::VIDEO));
+            ui.label(egui::RichText::new("◆ Depthcut").strong().color(theme::VIDEO));
             ui.add_space(8.0);
             ui.menu_button("File", |ui| {
                 if ui.button("New Project").clicked() {
@@ -2457,7 +2459,7 @@ impl App {
                     ui.close_menu();
                     self.import_dialog();
                 }
-                if ui.button("Record Voiceover…").on_hover_text("Record a microphone while the timeline plays; the take lands at the playhead").clicked() {
+                if ui.button(theme::alpha("Record Voiceover…")).on_hover_text("Record a microphone while the timeline plays; the take lands at the playhead. Alpha: not yet tested on many microphones; no latency compensation.").clicked() {
                     self.voiceover.open = true;
                     ui.close_menu();
                 }
@@ -2487,8 +2489,8 @@ impl App {
                         self.export_otio();
                     }
                     if ui
-                        .button("AAF (.aaf)…")
-                        .on_hover_text("For Avid Media Composer and Pro Tools: all tracks as cuts, linked to the original media files. Dissolves, speed changes, titles, effects and colour are not carried.")
+                        .button(theme::alpha("AAF (.aaf)…"))
+                        .on_hover_text("For Avid Media Composer and Pro Tools: all tracks as cuts, linked to the original media files. Dissolves, speed changes, titles, effects and colour are not carried. Alpha: not yet checked in Avid or Pro Tools.")
                         .clicked()
                     {
                         ui.close_menu();
@@ -2798,11 +2800,11 @@ impl App {
                 }
             });
             ui.menu_button("Captions", |ui| {
-                if ui.button(self.menu_label("Auto Captions & Whisper…", Action::AutoCaptions)).clicked() {
+                if ui.button(self.menu_label(&theme::alpha("Auto Captions & Whisper…"), Action::AutoCaptions)).clicked() {
                     self.show_captions = true;
                     ui.close_menu();
                 }
-                if ui.button(self.menu_label("Transcript (Text-Based Editing)…", Action::ToggleTranscript)).clicked() {
+                if ui.button(self.menu_label(&theme::alpha("Transcript (Text-Based Editing)…"), Action::ToggleTranscript)).clicked() {
                     self.transcript.open = true;
                     ui.close_menu();
                 }
@@ -2889,13 +2891,22 @@ impl App {
                     self.about.open_licenses();
                     ui.close_menu();
                 }
-                if ui.button("About Rust Cut Pro…").clicked() {
+                if ui.button("Welcome & Support…").clicked() {
+                    self.welcome.open = true;
+                    ui.close_menu();
+                }
+                if ui.button("About Depthcut…").clicked() {
                     self.about.open = true;
                     ui.close_menu();
                 }
             });
             ui.separator();
-            ui.toggle_value(&mut self.copilot.open, "🤖 AI Copilot").on_hover_text(self.menu_label("Toggle AI Copilot", Action::ToggleCopilot));
+            ui.toggle_value(&mut self.copilot.open, theme::alpha("🤖 AI Copilot")).on_hover_text(format!(
+                "{}
+{}",
+                self.menu_label("Toggle AI Copilot", Action::ToggleCopilot),
+                theme::ALPHA_HINT
+            ));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // always-visible Render button (top-right), same as Ctrl+E
                 let rendering = self.export.running();
@@ -2983,7 +2994,7 @@ impl App {
             .show(ctx, |ui| {
                 match &crash.panic {
                     Some(p) => {
-                        ui.label("Rust Cut Pro hit an internal error:");
+                        ui.label("Depthcut hit an internal error:");
                         let short: String = p.chars().take(600).collect();
                         ui.label(egui::RichText::new(short).monospace().small().color(theme::TEXT_DIM));
                     }
@@ -3268,6 +3279,8 @@ impl eframe::App for App {
         self.discord.show_dialog(ctx);
         shortcuts_ui::show(self, ctx);
         crate::about_ui::show(&mut self.about, ctx);
+        self.welcome.check_first_launch();
+        crate::welcome_ui::show(&mut self.welcome, ctx);
         self.marker_edit_window(ctx);
         self.multicam_window(ctx);
         self.paste_attributes_window(ctx);

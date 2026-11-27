@@ -1,11 +1,24 @@
 # Changelog
 
-All notable changes to Rust Cut Pro. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
+All notable changes to Depthcut. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [SemVer](https://semver.org/).
 
 ## [0.1.0] — unreleased
 
 First public build. Windows 10/11 x64 only; Linux is experimental (build from source).
+
+### Name, welcome and alpha labels
+- The app is now **Depthcut** (formerly Rust Cut Pro). On first launch the old
+  `%APPDATA%\RustCutPro` and `%LOCALAPPDATA%\RustCutPro` folders are renamed to `Depthcut`, and
+  saved API keys move to the `Depthcut` Credential Manager entry. The installer upgrades an old
+  install in place and removes the old exe, shortcuts and file-association keys. `.rcp` project
+  files and FCPXML metadata IDs are unchanged, so old projects open as before.
+- A welcome window on first launch (and under *Help → Welcome & Support…*) explains who makes
+  Depthcut, asks for support to keep it free, and lists the alpha features.
+- Unfinished features are labelled **(alpha)** in menus, panel titles and tooltips.
+- Whisper word timestamps (DTW) are on by default on the GPU too.
+- Keyboard and menu zoom (`Ctrl+=` / `Ctrl+-`) keeps the playhead in place instead of jumping
+  to the start of the timeline.
 
 ### Editor
 - Magnetic timeline: ripple insert/append/overwrite/connect, blade and blade all, ripple and lift
@@ -71,10 +84,12 @@ First public build. Windows 10/11 x64 only; Linux is experimental (build from so
 ### Known limitations
 - Builds are not code-signed yet, so SmartScreen warns on first run (*More info → Run anyway*).
 - A GPU driver with Vulkan support is required (`vulkan-1.dll`).
-- Auto Captions on the GPU (Vulkan) can miss words that the CPU catches. In the
-  release smoke test (Arc A750, *base* model) the GPU run dropped the first three
-  words and the last word of a 14-word sentence, and the CPU run on the same
-  audio got all of them. If captions skip words, untick **Use GPU** in the
-  Captions panel and run again.
+- Features marked **(alpha)** are still in development: AI Copilot, Auto Captions and the
+  transcript editor, AI mattes, voice isolation, voiceover recording, AAF export, and audio plug-ins
+  (VST3/CLAP).
+- Auto Captions on the GPU once dropped words that the CPU caught (2026-11-17, Arc A750). It no
+  longer reproduces (re-tested 2026-11-27, CPU and GPU give identical transcripts), but it has
+  only been checked on one GPU. If captions skip words, untick **Use GPU** in the Captions panel
+  and run again.
 - Quick Sync hardware encode/decode needs an Intel GPU. Others use software x264.
 - Gemini model availability depends on your key and region. Use *Test Live Connection*.

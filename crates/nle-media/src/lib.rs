@@ -1,6 +1,6 @@
 //! # nle-media
 //!
-//! Media I/O for Rust Cut Pro, tuned for an Intel Arc A750 + Ryzen 7 5800X:
+//! Media I/O for Depthcut, tuned for an Intel Arc A750 + Ryzen 7 5800X:
 //!
 //! * [`hwaccel`] — hardware decode first (D3D11VA on Windows, QSV over
 //!   VA-API `iHD` on Linux) for H.264 / HEVC 8+10-bit / AV1, with silent

@@ -1,6 +1,6 @@
 [package]
 name = "nle-ui"
-description = "Final Cut Pro-style egui/wgpu user interface for Rust Cut Pro"
+description = "Final Cut Pro-style egui/wgpu user interface for Depthcut"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,7 +8,7 @@ authors.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "rust-cut-pro"
+name = "depthcut"
 path = "src/main.rs"
 
 [features]

@@ -49,7 +49,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         }
         ui.horizontal_wrapped(|ui| {
             ui.label(egui::RichText::new("⚠ FFmpeg not found").strong().color(Color32::from_rgb(0xFF, 0xC8, 0x57)));
-            ui.label(egui::RichText::new("Rust Cut Pro needs ffmpeg.exe and ffprobe.exe to import and export video.").color(theme::TEXT));
+            ui.label(egui::RichText::new("Depthcut needs ffmpeg.exe and ffprobe.exe to import and export video.").color(theme::TEXT));
             if ui
                 .button("Download FFmpeg Automatically")
                 .on_hover_text(format!(

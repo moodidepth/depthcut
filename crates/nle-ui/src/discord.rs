@@ -1,8 +1,8 @@
 //! Discord Rich Presence over Discord's local IPC socket / named pipe.
 //!
 //! Connects asynchronously on a background thread so UI rendering never blocks,
-//! automatically reconnects if Discord starts after Rust Cut Pro, and persists
-//! configuration in `%APPDATA%\RustCutPro\discord.json`.
+//! automatically reconnects if Discord starts after Depthcut, and persists
+//! configuration in `%APPDATA%\Depthcut\discord.json`.
 
 use crate::media::data_dir;
 use crate::theme;
@@ -16,8 +16,8 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const DEFAULT_ASSET_KEY: &str = "rust_cut_pro";
-/// Official Rust Cut Pro Discord application, baked in at build time:
+const DEFAULT_ASSET_KEY: &str = "depthcut";
+/// Official Depthcut Discord application, baked in at build time:
 /// `set RCP_DISCORD_APP_ID=<id>` before `cargo build --release` (see
 /// docs/DISCORD.md). Empty in dev builds; users can still paste their own.
 const BUILT_IN_APP_ID: Option<&str> = option_env!("RCP_DISCORD_APP_ID");
@@ -184,7 +184,7 @@ impl DiscordPresence {
             });
 
             ui.add_space(6.0);
-            ui.checkbox(&mut self.dialog.draft.enabled, "Show Rust Cut Pro activity on Discord");
+            ui.checkbox(&mut self.dialog.draft.enabled, "Show Depthcut activity on Discord");
             ui.checkbox(&mut self.dialog.draft.show_project_name, "Display current project name");
             ui.checkbox(&mut self.dialog.draft.show_timeline_stats, "Display clip count, duration & playback state");
 
@@ -201,8 +201,8 @@ impl DiscordPresence {
 
             ui.add_space(8.0);
             egui::CollapsingHeader::new("One-time Discord setup (takes ~30 seconds)").default_open(self.config.valid_app_id().is_none()).show(ui, |ui| {
-                ui.label("1. Open the Discord Developer Portal and click New Application → name it \"Rust Cut Pro\".");
-                ui.label("2. Upload the Rust Cut Pro icon as the App Icon (and under Rich Presence → Art Assets as \"rust_cut_pro\").");
+                ui.label("1. Open the Discord Developer Portal and click New Application → name it \"Depthcut\".");
+                ui.label("2. Upload the Depthcut icon as the App Icon (and under Rich Presence → Art Assets as \"depthcut\").");
                 ui.label("3. Copy the Application ID from General Information and paste it above.");
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
@@ -271,13 +271,13 @@ impl Drop for DiscordPresence {
 fn discord_icon_dir() -> Option<PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         for anc in exe.ancestors() {
-            let candidate = anc.join("assets").join("rust-cut-pro-discord.png");
+            let candidate = anc.join("assets").join("depthcut-discord.png");
             if candidate.is_file() {
                 return candidate.parent().map(Path::to_path_buf);
             }
         }
     }
-    let cwd_assets = PathBuf::from("assets").join("rust-cut-pro-discord.png");
+    let cwd_assets = PathBuf::from("assets").join("depthcut-discord.png");
     if cwd_assets.is_file() {
         return cwd_assets.parent().map(Path::to_path_buf);
     }
@@ -416,7 +416,7 @@ impl IpcConn {
                     },
                     "assets": {
                         "large_image": asset_key,
-                        "large_text": "Rust Cut Pro"
+                        "large_text": "Depthcut"
                     }
                 }
             },

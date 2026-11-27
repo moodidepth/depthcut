@@ -16,7 +16,7 @@ macOS builds.
 encode, the Arc DX12 workaround) are tested on Windows only. Linux code paths
 exist (VA-API, Unix IPC for Discord) but nobody runs them regularly.
 
-**State.** `installer/rust_cut_pro.iss` sets `MinVersion=10.0.17763` and x64
+**State.** `installer/depthcut.iss` sets `MinVersion=10.0.17763` and x64
 only. The README says so at the top.
 
 ---
@@ -25,12 +25,12 @@ only. The README says so at the top.
 
 **Decision.** Ship both files:
 
-- `RustCutPro-vX.Y.Z-win64-portable.zip`: one folder with the exe, VC++
+- `Depthcut-vX.Y.Z-win64-portable.zip`: one folder with the exe, VC++
   runtime DLLs, docs and licenses. Unzip and run.
-- `RustCutPro-vX.Y.Z-win64-setup.exe`: an Inno Setup 6 installer.
+- `Depthcut-vX.Y.Z-win64-setup.exe`: an Inno Setup 6 installer.
   - Installs per user by default (no UAC); the dialog offers an all-users install.
   - Start-menu shortcut and an optional desktop icon.
-  - Optional `.rcp` → `RustCutPro.Project` association; the app opens `argv[1]`.
+  - Optional `.rcp` → `Depthcut.Project` association; the app opens `argv[1]`.
   - Uninstaller under *Settings → Apps*.
 
 Plus a `SHA256SUMS.txt`.
@@ -61,7 +61,7 @@ User data is kept on uninstall (see README → *Where your data lives*).
 
 1. `RCP_FFMPEG` / a custom path
 2. next to the exe
-3. `%LOCALAPPDATA%\RustCutPro\bin`
+3. `%LOCALAPPDATA%\Depthcut\bin`
 4. `PATH`
 5. winget / Scoop / Chocolatey folders
 
@@ -78,7 +78,7 @@ the two cleanly apart. It also keeps the zip about 100 MB smaller.
 - Downloads the gyan.dev *release essentials* zip.
 - Verifies the SHA-256 published next to it.
 - Extracts `ffmpeg.exe`, `ffprobe.exe` and the license to
-  `%LOCALAPPDATA%\RustCutPro\bin`.
+  `%LOCALAPPDATA%\Depthcut\bin`.
 - Shows progress and can be cancelled.
 
 **Verified 2026-11-17:** a real download of 9.0.2-essentials matched its
@@ -127,8 +127,8 @@ limits.
 ## 5. API keys: Windows Credential Manager
 
 **Decision.** Store keys with the `keyring` crate in Windows Credential Manager,
-service `RustCutPro`, one entry per provider (`gemini_api_key.RustCutPro`,
-`openai_api_key.RustCutPro`). `%LOCALAPPDATA%\Argon\ai_config.toml` holds no
+service `Depthcut`, one entry per provider (`gemini_api_key.Depthcut`,
+`openai_api_key.Depthcut`). `%LOCALAPPDATA%\Argon\ai_config.toml` holds no
 keys. A key found in an old plaintext config is moved to the credential store
 on load and then removed from the file.
 
@@ -142,7 +142,7 @@ in backups and screenshots.
   the editor falls back to the file and says so in Settings.
 - **Verified on the dev machine 2026-11-17:** the first launch of the packaged
   build moved the old plaintext key out of `ai_config.toml` (no `api_key` lines
-  left) into Credential Manager (`gemini_api_key.RustCutPro`).
+  left) into Credential Manager (`gemini_api_key.Depthcut`).
 
 ---
 
@@ -180,7 +180,7 @@ test them with. `signtool.exe` is present on the dev machine (Windows SDK
   (`option_env!("RCP_DISCORD_APP_ID")`).
 - With no ID, or with Discord not running, presence does nothing and shows no
   errors.
-- The large-image asset key is `rust_cut_pro`.
+- The large-image asset key is `depthcut`.
 
 **Why.** Users shouldn't need a developer account to see presence. The
 maintainer creates one Discord application and bakes its ID into release builds.
@@ -214,6 +214,12 @@ maintainer creates one Discord application and bakes its ID into release builds.
   - export via `av1_qsv`, 9.5 s, 1280×720
   - music −39.1 dB → −52.8 dB under the voice → −39.1 dB after
 
-  The same run found the GPU caption word drops listed in CHANGELOG → Known
-  limitations. These are not fixed, only documented, and *Use GPU* off is the
-  workaround.
+  The same run found GPU caption word drops ("This is a" and "word." missing).
+  **Re-tested 2026-11-27:** the same mix now gives all 14 words on the GPU,
+  with DTW word timestamps on and off, and matches the CPU. No code change
+  explains it. The PC's CPU hardware fault was fixed in between, which is the
+  most likely cause. `crates/nle-media/tests/whisper_backends.rs` compares
+  CPU/GPU × DTW recall on longer recordings: 98/98 words on clean speech for
+  every config, and identical results on noisy speech. DTW word timing is now
+  on by default on the GPU too (`RCP_WHISPER_DTW_GPU=0` turns it off). Captions
+  stay marked *alpha*, and *Use GPU* off remains the fallback.

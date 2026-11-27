@@ -1,13 +1,13 @@
 <#
 .SYNOPSIS
-  Build and package Rust Cut Pro for Windows x64.
+  Build and package Depthcut for Windows x64.
 
 .DESCRIPTION
   1. cargo build --release (unless -SkipBuild)
   2. stage exe + VC++ runtime DLLs + README/CHANGELOG/licenses/notices
   3. optionally code-sign the exe (see "Code signing" below)
-  4. dist\RustCutPro-v<ver>-win64-portable.zip
-  5. dist\RustCutPro-v<ver>-win64-setup.exe if Inno Setup 6 (ISCC.exe) is installed
+  4. dist\Depthcut-v<ver>-win64-portable.zip
+  5. dist\Depthcut-v<ver>-win64-setup.exe if Inno Setup 6 (ISCC.exe) is installed
   6. dist\SHA256SUMS.txt
 
   Code signing (skipped when none of these are set):
@@ -25,7 +25,7 @@
 param(
     [switch]$SkipBuild,
     [string]$Features = "",
-    # package this exe instead of target\release\rust-cut-pro.exe (implies -SkipBuild)
+    # package this exe instead of target\release\depthcut.exe (implies -SkipBuild)
     [string]$Exe = ""
 )
 
@@ -40,21 +40,21 @@ function Step($msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
 $cargoToml = Get-Content (Join-Path $Root "Cargo.toml") -Raw
 if ($cargoToml -notmatch '(?m)^\s*version\s*=\s*"([^"]+)"') { throw "workspace version not found in Cargo.toml" }
 $Version = $Matches[1]
-$Name = "RustCutPro-v$Version-win64"
+$Name = "Depthcut-v$Version-win64"
 $Dist = Join-Path $Root "dist"
 $Stage = Join-Path $Dist "stage"
-Step "Rust Cut Pro $Version"
+Step "Depthcut $Version"
 
 # ---- build -----------------------------------------------------------------
 if ($Exe) { $SkipBuild = $true; $Exe = (Resolve-Path $Exe).Path }
 if (-not $SkipBuild) {
     Step "cargo build --release"
-    $cargoArgs = @("build", "--release", "-p", "nle-ui", "--bin", "rust-cut-pro")
+    $cargoArgs = @("build", "--release", "-p", "nle-ui", "--bin", "depthcut")
     if ($Features) { $cargoArgs += @("--no-default-features", "--features", $Features) }
     & cargo @cargoArgs
     if ($LASTEXITCODE -ne 0) { throw "cargo build failed ($LASTEXITCODE)" }
 }
-if (-not $Exe) { $Exe = Join-Path $Root "target\release\rust-cut-pro.exe" }
+if (-not $Exe) { $Exe = Join-Path $Root "target\release\depthcut.exe" }
 if (-not (Test-Path $Exe)) { throw "missing $Exe (build first or drop -SkipBuild)" }
 
 # ---- VC++ runtime (app-local, redistributable per Microsoft's redist list) --
@@ -91,7 +91,7 @@ foreach ($f in @("README.md", "CHANGELOG.md", "LICENSE-MIT", "LICENSE-APACHE", "
 # Discord art asset: Help > Discord Rich Presence > "Open Icon Folder" looks for <exe dir>\assets
 $StageAssets = Join-Path $Stage "assets"
 New-Item -ItemType Directory -Force $StageAssets | Out-Null
-Copy-Item (Join-Path $Root "assets\rust-cut-pro-discord.png") $StageAssets
+Copy-Item (Join-Path $Root "assets\depthcut-discord.png") $StageAssets
 $crtDir = Find-VcRuntimeDir
 if ($crtDir) {
     foreach ($d in $VcDlls) { Copy-Item (Join-Path $crtDir $d) $Stage }
@@ -110,7 +110,7 @@ function Invoke-Sign([string]$File) {
     if ($LASTEXITCODE -ne 0) { throw "code signing failed for $File" }
 }
 Step "Code signing"
-Invoke-Sign (Join-Path $Stage "rust-cut-pro.exe")
+Invoke-Sign (Join-Path $Stage "depthcut.exe")
 
 # ---- portable zip ----------------------------------------------------------
 Step "Portable zip"
@@ -119,7 +119,7 @@ if (Test-Path $Zip) { Remove-Item $Zip -Force }
 # the zip holds one top-level folder so "Extract All" does not scatter files
 $ZipRoot = Join-Path $Dist "zip-root"
 if (Test-Path $ZipRoot) { Remove-Item $ZipRoot -Recurse -Force }
-$Inner = Join-Path $ZipRoot "RustCutPro-v$Version"
+$Inner = Join-Path $ZipRoot "Depthcut-v$Version"
 New-Item -ItemType Directory -Force $Inner | Out-Null
 Copy-Item (Join-Path $Stage "*") $Inner -Recurse
 Compress-Archive -Path $Inner -DestinationPath $Zip -CompressionLevel Optimal
@@ -146,7 +146,7 @@ if ($iscc) {
         $isccArgs += ('/Srcp=powershell.exe -NoProfile -ExecutionPolicy Bypass -File $q' + $SignScript + '$q -File $f')
         $isccArgs += "/DSignSetup"
     }
-    & $iscc @isccArgs (Join-Path $Root "installer\rust_cut_pro.iss")
+    & $iscc @isccArgs (Join-Path $Root "installer\depthcut.iss")
     if ($LASTEXITCODE -ne 0) { throw "ISCC failed ($LASTEXITCODE)" }
     Write-Host "    $Setup"
 } else {

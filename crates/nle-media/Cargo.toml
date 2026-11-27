@@ -1,6 +1,6 @@
 [package]
 name = "nle-media"
-description = "Media I/O for Rust Cut Pro: hardware-accelerated decode (QSV/VA-API/D3D11VA), frame queues, proxies, audio DSP and playback"
+description = "Media I/O for Depthcut: hardware-accelerated decode (QSV/VA-API/D3D11VA), frame queues, proxies, audio DSP and playback"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

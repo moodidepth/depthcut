@@ -1,4 +1,4 @@
-//! Help → About Rust Cut Pro: version, FFmpeg status and the
+//! Help → About Depthcut: version, FFmpeg status and the
 //! "Licenses & Notices" viewer (our MIT / Apache-2.0 licenses and every
 //! third-party notice, embedded at build time).
 
@@ -41,7 +41,7 @@ pub fn show(state: &mut AboutState, ctx: &egui::Context) {
         return;
     }
     let mut open = state.open;
-    egui::Window::new("About Rust Cut Pro").open(&mut open).default_size([720.0, 560.0]).resizable(true).collapsible(false).show(ctx, |ui| {
+    egui::Window::new("About Depthcut").open(&mut open).default_size([720.0, 560.0]).resizable(true).collapsible(false).show(ctx, |ui| {
         ui.horizontal(|ui| {
             ui.selectable_value(&mut state.tab, Tab::About, "About");
             ui.selectable_value(&mut state.tab, Tab::Notices, "Licenses & Notices");
@@ -69,7 +69,7 @@ pub fn show(state: &mut AboutState, ctx: &egui::Context) {
 }
 
 fn about(ui: &mut egui::Ui, version_cache: &mut Option<Option<String>>) {
-    ui.heading(format!("Rust Cut Pro {}", env!("CARGO_PKG_VERSION")));
+    ui.heading(format!("Depthcut {}", env!("CARGO_PKG_VERSION")));
     ui.label("A fast, GPU-accelerated video editor for gaming montages.");
     ui.add_space(6.0);
     ui.label("Licensed under MIT OR Apache-2.0.");
@@ -87,7 +87,7 @@ fn about(ui: &mut egui::Ui, version_cache: &mut Option<Option<String>>) {
         ui.label("Not found — use the banner at the top of the window to install or locate it.");
     }
     ui.label(
-        egui::RichText::new("FFmpeg is not part of Rust Cut Pro; it runs as a separate program under its own license (GPL for the builds the editor downloads).")
+        egui::RichText::new("FFmpeg is not part of Depthcut; it runs as a separate program under its own license (GPL for the builds the editor downloads).")
             .small()
             .color(theme::TEXT_DIM),
     );

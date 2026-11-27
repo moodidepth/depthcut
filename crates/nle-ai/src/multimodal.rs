@@ -63,7 +63,7 @@ pub struct UploadedFile {
 /// the server has processed it (`state == ACTIVE`).
 pub async fn upload_gemini_file(client: &reqwest::Client, api_key: &str, file_path: &Path, mime_type: &str) -> Result<UploadedFile, String> {
     let bytes = tokio::fs::read(file_path).await.map_err(|e| format!("read upload file {}: {e}", file_path.display()))?;
-    let display_name = file_path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "rust_cut_pro_proxy.mp4".to_string());
+    let display_name = file_path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "depthcut_proxy.mp4".to_string());
     let len = bytes.len();
 
     // 1. start: returns the session URL in a response header.

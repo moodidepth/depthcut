@@ -251,7 +251,7 @@ impl Class for HostApp {
 impl IHostApplicationTrait for HostApp {
     unsafe fn getName(&self, name: *mut String128) -> tresult {
         let name = unsafe { &mut *name };
-        for (d, s) in name.iter_mut().zip("Rust Cut Pro".encode_utf16().chain(std::iter::repeat(0))) {
+        for (d, s) in name.iter_mut().zip("Depthcut".encode_utf16().chain(std::iter::repeat(0))) {
             *d = s as TChar;
         }
         kResultOk
@@ -835,7 +835,7 @@ mod tests {
         assert_eq!(found, vec![path.clone()]);
         let d = describe(&path).unwrap();
         assert_eq!(d.len(), 1, "the controller class is not listed: {d:?}");
-        assert_eq!((d[0].name.as_str(), d[0].vendor.as_str()), ("Test Gain", "Rust Cut Pro"));
+        assert_eq!((d[0].name.as_str(), d[0].vendor.as_str()), ("Test Gain", "Depthcut"));
         assert_eq!(d[0].id.len(), 32);
         assert_eq!(parse_cid(&d[0].id).map(|c| cid_hex(&c)), Some(d[0].id.clone()));
         assert!(describe(Path::new("C:/nope/missing.vst3")).is_err());

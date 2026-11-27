@@ -111,13 +111,19 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         return;
     }
     let mut open = app.show_captions;
-    egui::Window::new("Auto Captions & Whisper").open(&mut open).default_width(560.0).default_height(640.0).resizable(true).show(ctx, |ui| {
-        model_manager_ui(app, ui);
-        ui.add_space(6.0);
-        generate_ui(app, ui);
-        ui.separator();
-        track_and_style_ui(app, ui);
-    });
+    egui::Window::new(theme::alpha("Auto Captions & Whisper"))
+        .id(egui::Id::new("auto_captions_window"))
+        .open(&mut open)
+        .default_width(560.0)
+        .default_height(640.0)
+        .resizable(true)
+        .show(ctx, |ui| {
+            model_manager_ui(app, ui);
+            ui.add_space(6.0);
+            generate_ui(app, ui);
+            ui.separator();
+            track_and_style_ui(app, ui);
+        });
     app.show_captions = open;
 }
 

@@ -220,8 +220,8 @@ unsafe extern "C" fn host_request(_: *const clap_host) {}
 static HOST: clap_host = clap_host {
     clap_version: CLAP_VERSION,
     host_data: std::ptr::null_mut(),
-    name: c"Rust Cut Pro".as_ptr(),
-    vendor: c"Rust Cut Pro contributors".as_ptr(),
+    name: c"Depthcut".as_ptr(),
+    vendor: c"Moodi Depth".as_ptr(),
     url: c"".as_ptr(),
     version: c"0.1".as_ptr(),
     get_extension: Some(host_get_extension),
@@ -553,7 +553,7 @@ mod tests {
         assert!(found.contains(&path), "{found:?}");
         let d = describe(&path).unwrap();
         assert_eq!(d.len(), 1);
-        assert_eq!((d[0].id.as_str(), d[0].name.as_str(), d[0].vendor.as_str()), (ID, "Test Gain", "Rust Cut Pro"));
+        assert_eq!((d[0].id.as_str(), d[0].name.as_str(), d[0].vendor.as_str()), (ID, "Test Gain", "Depthcut"));
         assert!(describe(Path::new("C:/nope/missing.clap")).is_err());
     }
 

@@ -2,7 +2,7 @@
 //! ONNX models, run fully offline.
 //!
 //! The model files are user-supplied (licences vary) and live in
-//! `%LOCALAPPDATA%/RustCutPro/models/`:
+//! `%LOCALAPPDATA%/Depthcut/models/`:
 //!
 //! * `person.onnx`: a portrait-matting / segmentation model with one RGB
 //!   input (`1×3×H×W`, values normalised with `(x − 0.5) / 0.5`, e.g. MODNet)

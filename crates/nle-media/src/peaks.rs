@@ -3,7 +3,7 @@
 //! One bucket covers [`BUCKET_SAMPLES`] audio frames. Peaks are quantised to
 //! `i8` (≈1.4 MB per hour of 48 kHz audio), carry a mip pyramid so any zoom
 //! level is drawn in O(1) per pixel column, and are cached on disk in
-//! `%LOCALAPPDATA%/RustCutPro/waveforms/`, keyed by source path + file size +
+//! `%LOCALAPPDATA%/Depthcut/waveforms/`, keyed by source path + file size +
 //! mtime, so re-importing a VOD shows its waveform instantly.
 
 use crate::frame::AudioBuffer;
@@ -179,7 +179,7 @@ impl PeakBuffer {
     }
 }
 
-/// `%LOCALAPPDATA%/RustCutPro/waveforms/` (or the platform equivalent).
+/// `%LOCALAPPDATA%/Depthcut/waveforms/` (or the platform equivalent).
 pub fn cache_dir() -> PathBuf {
     crate::paths::local_data_dir().join("waveforms")
 }

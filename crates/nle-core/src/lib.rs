@@ -1,6 +1,6 @@
 //! # nle-core
 //!
-//! Pure data model of the Rust Cut Pro editor — no I/O beyond autosave and
+//! Pure data model of the Depthcut editor — no I/O beyond autosave and
 //! project files, no GPU, no FFmpeg. Everything here is deterministic and
 //! unit-tested:
 //!

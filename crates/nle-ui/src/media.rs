@@ -295,12 +295,24 @@ fn peaks_result(asset: AssetId, peaks: PeakBuffer) -> JobResult {
     JobResult::Peaks { asset, peaks: Arc::new(peaks), transients: Arc::new(transients) }
 }
 
-/// Where autosaves, proxies and settings live.
-pub fn data_dir() -> PathBuf {
+/// Base folder [`data_dir`] lives in (`%APPDATA%` on Windows).
+fn data_base() -> PathBuf {
     let base = if cfg!(target_os = "windows") {
         std::env::var_os("APPDATA").map(PathBuf::from)
     } else {
         std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("share")))
     };
-    base.unwrap_or_else(std::env::temp_dir).join("RustCutPro")
+    base.unwrap_or_else(std::env::temp_dir)
+}
+
+/// Where autosaves, proxies and settings live. The folder is named the same
+/// on every OS here (it always was "RustCutPro", now "Depthcut").
+pub fn data_dir() -> PathBuf {
+    nle_media::paths::app_dir(&data_base(), true)
+}
+
+/// App startup: move both data folders over from the old app name.
+pub fn migrate_legacy_data_dirs() {
+    nle_media::paths::migrate_legacy_dir(&data_base(), true);
+    nle_media::paths::migrate_local_data_dir();
 }

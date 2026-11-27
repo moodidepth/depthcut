@@ -494,9 +494,9 @@
 
 ---
 
-## Synthesis: Top Techniques per Editor → Rust Cut Pro
+## Synthesis: Top Techniques per Editor → Depthcut
 
-| Editor | Top techniques observed | Status in Rust Cut Pro |
+| Editor | Top techniques observed | Status in Depthcut |
 |---|---|---|
 | Final Cut Pro | Magnetic spine + connected clips, gap clips, position tool, roll/trim at edit points, skimming | Spine/connected already present; **Roll edit added** (Trim tool on edit point) |
 | DaVinci Resolve | Cut-page overview strip, speed-ramp smoothing curves, Fairlight loudness/normalize, gameplay review via markers | **Overview mini-timeline added**; **Whip/Overshoot easing added**; **program loudness + limiter added** |

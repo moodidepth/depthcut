@@ -347,7 +347,7 @@ pub fn tab(ui: &mut egui::Ui, c: &mut Clip, cx: &TabCtx, motion_ui: &mut MotionU
             }
         });
 
-        section(ui, "AI Mattes", |ui| {
+        section(ui, &theme::alpha("AI Mattes"), |ui| {
             let runtime_found = nle_ai::segment::runtime_found();
             let dim = |ui: &mut egui::Ui, s: String| ui.label(egui::RichText::new(s).small().color(theme::TEXT_DIM));
             if !nle_ai::segment::onnx_supported() {

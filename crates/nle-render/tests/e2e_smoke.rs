@@ -6,7 +6,7 @@
 //!   → ffprobe validation + "is the music actually ducked" measurement.
 //!
 //! Needs: Windows (speech is synthesized with System.Speech), ffmpeg, a GPU,
-//! the Whisper base model in %LOCALAPPDATA%\RustCutPro\models, and a build
+//! the Whisper base model in %LOCALAPPDATA%\Depthcut\models, and a build
 //! with Whisper:
 //!
 //!   cargo test -p nle-render --features nle-media/whisper-vulkan --test e2e_smoke -- --ignored --nocapture
@@ -164,9 +164,9 @@ fn e2e_import_trim_punch_captions_duck_export() {
     let tr = transcribe::transcribe(&mono16k, &opts, Arc::new(|_| {}), Arc::new(|s| eprintln!("whisper: {s}")), Arc::new(AtomicBool::new(false))).expect("transcribe");
     let text: String = tr.words.iter().map(|w| w.text.trim()).collect::<Vec<_>>().join(" ");
     eprintln!("whisper ({}, {:.1}s): {text}", tr.backend, t0.elapsed().as_secs_f32());
-    // Known issue (2026-11-17, Arc A750, base-q5_1): on this exact mix the
-    // Vulkan run drops "This is a" and "word." while the CPU run gets all 14
-    // words. So this checks the pipeline, not the model's word accuracy;
+    // 2026-11-17 (Arc A750, base-q5_1): the Vulkan run dropped "This is a" and
+    // "word." on this mix; since 2026-11-27 GPU and CPU both give all 14 words.
+    // This still checks the pipeline, not word accuracy;
     // RCP_E2E_DEBUG=1 prints the CPU transcript next to it.
     if std::env::var_os("RCP_E2E_DEBUG").is_some() {
         for w in &tr.words {

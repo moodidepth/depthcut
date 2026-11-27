@@ -942,12 +942,14 @@ mod engine {
         Ok(Run { words, language })
     }
 
-    /// Whether to ask for DTW word timestamps on this backend. CPU: on unless
-    /// `RCP_WHISPER_DTW=0`. GPU: off unless `RCP_WHISPER_DTW_GPU=1` — DTW on
-    /// Vulkan (Intel Arc, large-v3-turbo) took the whole machine down
-    /// repeatedly, which no in-process fallback can catch.
+    /// Whether to ask for DTW word timestamps on this backend: on unless
+    /// `RCP_WHISPER_DTW=0`, and on the GPU also unless `RCP_WHISPER_DTW_GPU=0`.
+    /// GPU DTW was off by default for a while because runs on the dev PC
+    /// (Intel Arc) took the whole machine down; that turned out to be a CPU
+    /// hardware fault, and `tests/whisper_backends.rs` shows Vulkan + DTW
+    /// hearing the same words as the CPU, faster and with better timing.
     pub(super) fn dtw_enabled(gpu: bool, dtw_env: Option<&str>, dtw_gpu_env: Option<&str>) -> bool {
-        dtw_env != Some("0") && (!gpu || dtw_gpu_env == Some("1"))
+        dtw_env != Some("0") && (!gpu || dtw_gpu_env != Some("0"))
     }
 
     /// DTW word timestamps first when [`dtw_enabled`]; if the DTW run fails,
@@ -1059,7 +1061,7 @@ mod tests {
         use engine::dtw_enabled;
         assert!(dtw_enabled(false, None, None));
         assert!(!dtw_enabled(false, Some("0"), None));
-        assert!(!dtw_enabled(true, None, None));
+        assert!(dtw_enabled(true, None, None));
         assert!(!dtw_enabled(true, None, Some("0")));
         assert!(dtw_enabled(true, None, Some("1")));
         assert!(!dtw_enabled(true, Some("0"), Some("1")));

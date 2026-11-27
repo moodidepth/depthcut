@@ -24,7 +24,7 @@ pub fn demo_project() -> Project {
     for c in [c0, c1, c2, c3] {
         let _ = tl.append(c);
     }
-    let title = Clip::title(TitleParams::lower_third("Rust Cut Pro", "Magnetic timeline demo"), Time::from_secs(4));
+    let title = Clip::title(TitleParams::lower_third("Depthcut", "Magnetic timeline demo"), Time::from_secs(4));
     let _ = tl.connect(title, Time::from_millis(1500), 1);
     let mut bed = Clip::from_asset_range(&music, Time::ZERO, Time::from_secs(22));
     bed.audio.role = AudioRole::Music;

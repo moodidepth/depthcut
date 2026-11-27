@@ -1,5 +1,5 @@
 //! Whisper GGML model manager: downloads quantised whisper.cpp models from
-//! Hugging Face into `%LOCALAPPDATA%\RustCutPro\models`.
+//! Hugging Face into `%LOCALAPPDATA%\Depthcut\models`.
 
 use crate::transcribe::{validate_model_file, ModelFileError};
 use std::path::PathBuf;

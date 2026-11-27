@@ -1,6 +1,6 @@
 //! One-click FFmpeg install for Windows.
 //!
-//! Rust Cut Pro does not ship FFmpeg (the common Windows builds are GPL). When
+//! Depthcut does not ship FFmpeg (the common Windows builds are GPL). When
 //! no FFmpeg is found, the user can let the editor fetch the gyan.dev
 //! "release essentials" build: the published SHA-256 is downloaded first, the
 //! zip is streamed to disk and checked against it, and only `ffmpeg.exe`,

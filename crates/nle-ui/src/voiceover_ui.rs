@@ -100,82 +100,85 @@ impl VoiceoverDialog {
         }
         let mut open = self.open;
         let mut stop = false;
-        egui::Window::new("Record Voiceover").open(&mut open).resizable(false).collapsible(false).default_width(360.0).show(ctx, |ui| {
-            let idle = !self.busy();
-            ui.add_enabled_ui(idle, |ui| {
-                egui::Grid::new("vo-grid").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
-                    ui.label("Input");
-                    ui.horizontal(|ui| {
-                        let devices = self.devices.get_or_insert_with(input_devices);
-                        let shown = self.device.clone().unwrap_or_else(|| "System default".into());
-                        egui::ComboBox::from_id_salt("vo-device").selected_text(shown).width(220.0).show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.device, None, "System default");
-                            for d in devices.iter() {
-                                ui.selectable_value(&mut self.device, Some(d.clone()), d);
+        egui::Window::new(theme::alpha("Record Voiceover")).id(egui::Id::new("voiceover_window")).open(&mut open).resizable(false).collapsible(false).default_width(360.0).show(
+            ctx,
+            |ui| {
+                let idle = !self.busy();
+                ui.add_enabled_ui(idle, |ui| {
+                    egui::Grid::new("vo-grid").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+                        ui.label("Input");
+                        ui.horizontal(|ui| {
+                            let devices = self.devices.get_or_insert_with(input_devices);
+                            let shown = self.device.clone().unwrap_or_else(|| "System default".into());
+                            egui::ComboBox::from_id_salt("vo-device").selected_text(shown).width(220.0).show_ui(ui, |ui| {
+                                ui.selectable_value(&mut self.device, None, "System default");
+                                for d in devices.iter() {
+                                    ui.selectable_value(&mut self.device, Some(d.clone()), d);
+                                }
+                            });
+                            if ui.small_button("⟳").on_hover_text("Look for inputs again").clicked() {
+                                self.devices = None;
                             }
                         });
-                        if ui.small_button("⟳").on_hover_text("Look for inputs again").clicked() {
-                            self.devices = None;
-                        }
+                        ui.end_row();
+                        ui.label("Count-in");
+                        ui.horizontal(|ui| {
+                            ui.selectable_value(&mut self.count_in, 0, "None");
+                            ui.selectable_value(&mut self.count_in, 3, "3 s");
+                            ui.selectable_value(&mut self.count_in, 5, "5 s");
+                        });
+                        ui.end_row();
+                        ui.label("");
+                        ui.checkbox(&mut self.play_timeline, "Play the timeline while recording");
+                        ui.end_row();
                     });
-                    ui.end_row();
-                    ui.label("Count-in");
-                    ui.horizontal(|ui| {
-                        ui.selectable_value(&mut self.count_in, 0, "None");
-                        ui.selectable_value(&mut self.count_in, 3, "3 s");
-                        ui.selectable_value(&mut self.count_in, 5, "5 s");
-                    });
-                    ui.end_row();
-                    ui.label("");
-                    ui.checkbox(&mut self.play_timeline, "Play the timeline while recording");
-                    ui.end_row();
                 });
-            });
-            ui.add_space(4.0);
-            ui.horizontal(|ui| match &self.state {
-                State::Idle => {
-                    if ui.button(egui::RichText::new("⏺ Record").color(theme::PLAYHEAD)).clicked() {
-                        let path = next_take(dir);
-                        if self.count_in == 0 {
-                            action = self.begin(&path, playhead);
-                        } else {
-                            self.state = State::CountIn { until: Instant::now() + Duration::from_secs(self.count_in), path, at: playhead };
+                ui.add_space(4.0);
+                ui.horizontal(|ui| match &self.state {
+                    State::Idle => {
+                        if ui.button(egui::RichText::new("⏺ Record").color(theme::PLAYHEAD)).clicked() {
+                            let path = next_take(dir);
+                            if self.count_in == 0 {
+                                action = self.begin(&path, playhead);
+                            } else {
+                                self.state = State::CountIn { until: Instant::now() + Duration::from_secs(self.count_in), path, at: playhead };
+                            }
+                        }
+                        ui.label(egui::RichText::new(format!("starts at {:.2}s", playhead.as_secs_f64())).small().color(theme::TEXT_DIM));
+                    }
+                    State::CountIn { until, .. } => {
+                        let left = until.saturating_duration_since(Instant::now()).as_secs_f32().ceil();
+                        ui.label(egui::RichText::new(format!("Recording in {left:.0}…")).strong());
+                        if ui.button("Cancel").clicked() {
+                            stop = true;
                         }
                     }
-                    ui.label(egui::RichText::new(format!("starts at {:.2}s", playhead.as_secs_f64())).small().color(theme::TEXT_DIM));
-                }
-                State::CountIn { until, .. } => {
-                    let left = until.saturating_duration_since(Instant::now()).as_secs_f32().ceil();
-                    ui.label(egui::RichText::new(format!("Recording in {left:.0}…")).strong());
-                    if ui.button("Cancel").clicked() {
-                        stop = true;
+                    State::Recording { rec, .. } => {
+                        ui.label(egui::RichText::new(format!("⏺ {:.1}s", rec.seconds())).strong().color(theme::PLAYHEAD));
+                        if ui.button("⏹ Stop").clicked() {
+                            stop = true;
+                        }
                     }
+                });
+                // input level
+                let db = 20.0 * self.level.max(1e-6).log10();
+                let frac = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 8.0), egui::Sense::hover());
+                ui.painter().rect_filled(rect, 2.0, theme::VIEWER_BG);
+                let fill = if db > -1.0 {
+                    theme::PLAYHEAD
+                } else if db > -12.0 {
+                    theme::SNAP
+                } else {
+                    theme::AUDIO
+                };
+                ui.painter().rect_filled(egui::Rect::from_min_size(rect.min, egui::vec2(rect.width() * frac, rect.height())), 2.0, fill);
+                ui.label(egui::RichText::new(format!("Takes are saved to {}", dir.display())).small().color(theme::TEXT_DIM));
+                if let Some(m) = &self.last {
+                    ui.label(egui::RichText::new(m).small());
                 }
-                State::Recording { rec, .. } => {
-                    ui.label(egui::RichText::new(format!("⏺ {:.1}s", rec.seconds())).strong().color(theme::PLAYHEAD));
-                    if ui.button("⏹ Stop").clicked() {
-                        stop = true;
-                    }
-                }
-            });
-            // input level
-            let db = 20.0 * self.level.max(1e-6).log10();
-            let frac = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 8.0), egui::Sense::hover());
-            ui.painter().rect_filled(rect, 2.0, theme::VIEWER_BG);
-            let fill = if db > -1.0 {
-                theme::PLAYHEAD
-            } else if db > -12.0 {
-                theme::SNAP
-            } else {
-                theme::AUDIO
-            };
-            ui.painter().rect_filled(egui::Rect::from_min_size(rect.min, egui::vec2(rect.width() * frac, rect.height())), 2.0, fill);
-            ui.label(egui::RichText::new(format!("Takes are saved to {}", dir.display())).small().color(theme::TEXT_DIM));
-            if let Some(m) = &self.last {
-                ui.label(egui::RichText::new(m).small());
-            }
-        });
+            },
+        );
         if stop || (!open && self.busy()) {
             if let Some(a) = self.stop() {
                 action = Some(a);

@@ -10,7 +10,7 @@
 //! required" inside its `try` and Whisper carries on on the CPU.
 //!
 //! `RCP_SIMULATE_NO_VULKAN=1` takes the same path on a PC that has Vulkan.
-//! `rust-cut-pro.exe --whisper-selftest [model.bin]` transcribes two seconds of
+//! `depthcut.exe --whisper-selftest [model.bin]` transcribes two seconds of
 //! tone and prints the backend, to check all of this without the UI.
 
 #![cfg_attr(not(all(windows, target_env = "msvc", feature = "whisper-vulkan")), allow(dead_code))]

@@ -821,7 +821,7 @@ Untick to bypass",
     let add = |plugins: &mut Vec<PluginInsert>, info: &PluginInfo| {
         plugins.push(PluginInsert { path: info.path.to_string_lossy().into_owned(), id: info.id.clone(), name: info.name.clone(), bypass: false, params: Vec::new() });
     };
-    ui.menu_button("+ Add plug-in", |ui| {
+    ui.menu_button(theme::alpha("+ Add plug-in"), |ui| {
         if view.clap_found.is_none() {
             let (found, errors) = plugins::scan();
             view.clap_found = Some(found);

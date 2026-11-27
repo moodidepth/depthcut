@@ -17,7 +17,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 /// Generic client name (no personal data is ever sent).
-pub const USER_AGENT: &str = concat!("RustCutPro/", env!("CARGO_PKG_VERSION"), " (open-source video editor)");
+pub const USER_AGENT: &str = concat!("Depthcut/", env!("CARGO_PKG_VERSION"), " (open-source video editor)");
 
 static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();

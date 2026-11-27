@@ -2,7 +2,7 @@
 //!
 //! Mattes are generated offline (nle-ai, local ONNX models) and stored one
 //! file per source frame under
-//! `%LOCALAPPDATA%/RustCutPro/mattes/<source hash>/<kind>/<frame>.rcpm`, so
+//! `%LOCALAPPDATA%/Depthcut/mattes/<source hash>/<kind>/<frame>.rcpm`, so
 //! preview and export read exactly the same data. A file is a small header
 //! (`RCPM`, width, height as little-endian u32) followed by `width × height`
 //! 8-bit values (matte opacity, or relative nearness for depth: 255 = near).
@@ -59,7 +59,7 @@ impl Matte {
     }
 }
 
-/// `%LOCALAPPDATA%/RustCutPro/mattes`.
+/// `%LOCALAPPDATA%/Depthcut/mattes`.
 pub fn cache_root() -> PathBuf {
     crate::paths::local_data_dir().join("mattes")
 }

@@ -30,7 +30,7 @@ static DESC: Desc = Desc(clap_plugin_descriptor {
     clap_version: CLAP_VERSION,
     id: ID.as_ptr(),
     name: c"Test Gain".as_ptr(),
-    vendor: c"Rust Cut Pro".as_ptr(),
+    vendor: c"Depthcut".as_ptr(),
     url: c"".as_ptr(),
     manual_url: c"".as_ptr(),
     support_url: c"".as_ptr(),

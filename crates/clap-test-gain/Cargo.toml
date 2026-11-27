@@ -1,6 +1,6 @@
 [package]
 name = "clap-test-gain"
-description = "Minimal CLAP gain plug-in used to test Rust Cut Pro's CLAP host"
+description = "Minimal CLAP gain plug-in used to test Depthcut's CLAP host"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

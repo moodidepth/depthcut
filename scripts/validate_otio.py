@@ -1,4 +1,4 @@
-"""Check Rust Cut Pro's OTIO export against the reference opentimelineio library,
+"""Check Depthcut's OTIO export against the reference opentimelineio library,
 and write a library-authored file for the import test fixture.
 
     python -m venv .otio && .otio/Scripts/pip install opentimelineio

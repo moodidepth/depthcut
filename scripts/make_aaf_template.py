@@ -42,8 +42,8 @@ with aaf2.open(out, 'w') as f:
         if d is not None:
             f.cfb.rmtree(d)
         ident = f.header['IdentificationList'][0]
-        ident['ProductName'].value = 'Rust Cut Pro'
-        ident['CompanyName'].value = 'Rust Cut Pro'
+        ident['ProductName'].value = 'Depthcut'
+        ident['CompanyName'].value = 'Depthcut'
     else:
         a = file_mob(f, 'clip a', 'file:///C:/media/a.mov', rate, 300, ['picture', 'sound'])
         seq = comp.slot_at(1).segment

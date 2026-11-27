@@ -1,6 +1,6 @@
 //! Customizable keyboard & mouse shortcuts modal, presets (`Final Cut Pro` /
 //! `DaVinci Resolve`), conflict detection, click-to-record binding and TOML
-//! persistence in `%LOCALAPPDATA%\RustCutPro\config\keybindings.toml`.
+//! persistence in `%LOCALAPPDATA%\Depthcut\config\keybindings.toml`.
 
 use crate::app::App;
 use crate::media::data_dir;

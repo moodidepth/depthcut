@@ -341,7 +341,7 @@ impl Class for Factory {
 impl IPluginFactoryTrait for Factory {
     unsafe fn getFactoryInfo(&self, info: *mut PFactoryInfo) -> tresult {
         let info = &mut *info;
-        copy_cstring("Rust Cut Pro", &mut info.vendor);
+        copy_cstring("Depthcut", &mut info.vendor);
         copy_cstring("", &mut info.url);
         copy_cstring("", &mut info.email);
         info.flags = PFactoryInfo_::FactoryFlags_::kUnicode as int32;
@@ -388,7 +388,7 @@ impl IPluginFactory2Trait for Factory {
         copy_cstring("Test Gain", &mut info.name);
         info.classFlags = 0;
         copy_cstring(sub, &mut info.subCategories);
-        copy_cstring("Rust Cut Pro", &mut info.vendor);
+        copy_cstring("Depthcut", &mut info.vendor);
         copy_cstring("1.0.0", &mut info.version);
         copy_cstring("VST 3.7", &mut info.sdkVersion);
         kResultOk

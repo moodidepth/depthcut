@@ -1,8 +1,8 @@
 //! Crash diagnostics.
 //!
-//! * Every session logs to `<data>/logs/rust-cut-pro.log` as well as stderr,
+//! * Every session logs to `<data>/logs/depthcut.log` as well as stderr,
 //!   because release builds have no console. The previous session's log is
-//!   kept as `rust-cut-pro.prev.log`.
+//!   kept as `depthcut.prev.log`.
 //! * A panic hook writes the message, location and backtrace to the log.
 //! * A `session.running` marker exists while the app runs and is removed on
 //!   a clean exit. If the marker is still there at the next launch, that
@@ -12,15 +12,15 @@
 //!
 //! Only the first instance owns the main log and the marker. While it holds
 //! the log open, a second instance can't rotate it, so that instance logs to
-//! its own `rust-cut-pro-<pid>.log` and skips the crash check.
+//! its own `depthcut-<pid>.log` and skips the crash check.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-const LOG_NAME: &str = "rust-cut-pro.log";
-const PREV_LOG_NAME: &str = "rust-cut-pro.prev.log";
+const LOG_NAME: &str = "depthcut.log";
+const PREV_LOG_NAME: &str = "depthcut.prev.log";
 const MARKER_NAME: &str = "session.running";
 const PANIC_PREFIX: &str = "PANIC: ";
 /// Stop writing to the file past this size, so a log storm can't fill the disk.
@@ -84,7 +84,7 @@ pub fn init(default_filter: &str) {
         let _ = fs::write(m, marker_header());
     }
     log::info!(
-        "Rust Cut Pro {} ({} {}) · log: {}",
+        "Depthcut {} ({} {}) · log: {}",
         env!("CARGO_PKG_VERSION"),
         std::env::consts::OS,
         std::env::consts::ARCH,
@@ -114,7 +114,7 @@ fn read_marker(marker: &Path, prev_log: &Path) -> Option<PreviousCrash> {
     Some(PreviousCrash { panic: (!panics.is_empty()).then(|| panics.join("\n")), log: prev_log.to_path_buf() })
 }
 
-/// Rotate `rust-cut-pro.log` to `.prev.log` and open a fresh one, held so a
+/// Rotate `depthcut.log` to `.prev.log` and open a fresh one, held so a
 /// second instance can't rotate it. Returns (file, path, is_primary).
 fn open_log(dir: &Path) -> Option<(File, PathBuf, bool)> {
     let cur = dir.join(LOG_NAME);
@@ -128,7 +128,7 @@ fn open_log(dir: &Path) -> Option<(File, PathBuf, bool)> {
         }
     }
     // another instance owns the main log
-    let own = dir.join(format!("rust-cut-pro-{}.log", std::process::id()));
+    let own = dir.join(format!("depthcut-{}.log", std::process::id()));
     File::create(&own).ok().map(|f| (f, own, false))
 }
 
@@ -201,7 +201,7 @@ fn install_panic_hook() {
 /// Short text for "Copy Details".
 pub fn crash_details(c: &PreviousCrash) -> String {
     format!(
-        "Rust Cut Pro {} ({} {})\nPrevious session ended unexpectedly.\n{}\nLog: {}",
+        "Depthcut {} ({} {})\nPrevious session ended unexpectedly.\n{}\nLog: {}",
         env!("CARGO_PKG_VERSION"),
         std::env::consts::OS,
         std::env::consts::ARCH,

@@ -102,6 +102,19 @@ pub fn install_fonts(ctx: &egui::Context) {
 }
 
 /// Small section heading used in the inspector and browser.
+/// Hover text for features still marked alpha.
+pub const ALPHA_HINT: &str = "Alpha: this feature is still in development. It may give wrong results or not work on every PC yet.";
+
+/// `label` tagged as alpha, for menu items, window titles and section names.
+pub fn alpha(label: &str) -> String {
+    format!("{label}  (alpha)")
+}
+
+/// Small orange "ALPHA" tag to put beside a feature's heading.
+pub fn alpha_badge(ui: &mut egui::Ui) -> egui::Response {
+    ui.label(egui::RichText::new(" ALPHA ").small().strong().color(Color32::BLACK).background_color(SNAP)).on_hover_text(ALPHA_HINT)
+}
+
 pub fn heading(ui: &mut egui::Ui, text: &str) {
     ui.add_space(4.0);
     ui.label(egui::RichText::new(text).size(11.5).strong().color(TEXT_DIM));
