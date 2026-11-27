@@ -2,7 +2,7 @@
 
 use crate::app::App;
 use crate::theme;
-use crate::widgets::slider_f32;
+use crate::widgets::{color_well, slider_f32};
 use eframe::egui::{self, Color32};
 use nle_core::captions::{parse_srt, CaptionTrack, WordFit, HEAVY_FONT, HIGHLIGHT_CORAL, HIGHLIGHT_GREEN, HIGHLIGHT_YELLOW, OUTLINE_MAX_PX, OUTLINE_MIN_PX, SYNC_OFFSET_MAX_MS};
 use nle_core::{Command, Time};
@@ -411,13 +411,13 @@ fn track_and_style_ui(app: &mut App, ui: &mut egui::Ui) {
         continuous_edit |= slider_f32(ui, "Position Y", &mut s.position_y, 0.08..=0.95, "");
         ui.horizontal(|ui| {
             ui.label("Text:");
-            continuous_edit |= ui.color_edit_button_rgba_unmultiplied(&mut s.color).changed();
+            continuous_edit |= color_well(ui, &mut s.color);
             discrete_edit |= ui.checkbox(&mut s.uppercase, "UPPERCASE").changed();
         });
         ui.horizontal(|ui| {
             discrete_edit |= ui.checkbox(&mut s.word_highlight, "Active Word Highlight").changed();
             if s.word_highlight {
-                continuous_edit |= ui.color_edit_button_rgba_unmultiplied(&mut s.highlight_color).changed();
+                continuous_edit |= color_well(ui, &mut s.highlight_color);
                 if ui.small_button("Yellow").on_hover_text("CapCut Yellow #FFE600").clicked() {
                     s.highlight_color = HIGHLIGHT_YELLOW;
                     discrete_edit = true;
@@ -439,14 +439,14 @@ fn track_and_style_ui(app: &mut App, ui: &mut egui::Ui) {
                     .on_hover_text("Words not spoken yet are muted; the spoken word pops in the highlight colour, then turns white")
                     .changed();
                 if s.dim_upcoming {
-                    continuous_edit |= ui.color_edit_button_rgba_unmultiplied(&mut s.dim_color).changed();
+                    continuous_edit |= color_well(ui, &mut s.dim_color);
                 }
             });
         }
         ui.horizontal(|ui| {
             discrete_edit |= ui.checkbox(&mut s.outline, "Outline").changed();
             if s.outline {
-                continuous_edit |= ui.color_edit_button_rgba_unmultiplied(&mut s.outline_color).changed();
+                continuous_edit |= color_well(ui, &mut s.outline_color);
             }
         });
         if s.outline {
@@ -455,7 +455,7 @@ fn track_and_style_ui(app: &mut App, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             discrete_edit |= ui.checkbox(&mut s.pill, "Background Pill").changed();
             if s.pill {
-                continuous_edit |= ui.color_edit_button_rgba_unmultiplied(&mut s.pill_color).changed();
+                continuous_edit |= color_well(ui, &mut s.pill_color);
                 discrete_edit |= ui
                     .add_enabled(s.word_highlight, egui::Checkbox::new(&mut s.word_pill, "Slide with word"))
                     .on_hover_text("The pill backs only the spoken word and glides to the next one")

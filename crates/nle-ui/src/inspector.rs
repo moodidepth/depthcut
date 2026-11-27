@@ -6,7 +6,7 @@
 use crate::app::{drag_key, App, InspectorTab, PunchState};
 use crate::color_ui::{color_management, corrections, mask_editor, ColorView, MaskFocus};
 use crate::theme;
-use crate::widgets::{color_wheel, param_row, slider_f32, ParamSpec};
+use crate::widgets::{color_well, color_wheel, param_row, slider_f32, ParamSpec};
 use eframe::egui::{self, Color32, Stroke};
 use nle_core::{
     AudioRole, BlendMode, Clip, ClipKind, Command, CropAspect, CropMode, Direction, Effect, EffectKind, FadeShape, FrameBlendMode, FrameRate, Interpolation, LutRef, ParamKind,
@@ -1228,7 +1228,7 @@ fn titles_tab(ui: &mut egui::Ui, c: &mut Clip, add_title: &mut Option<bool>, tpl
             slider_f32(ui, "Tracking", &mut tp.tracking, -20.0..=80.0, " px");
             ui.horizontal(|ui| {
                 ui.add_sized([96.0, 20.0], egui::Label::new(egui::RichText::new("Color").color(theme::TEXT_DIM)));
-                ui.color_edit_button_rgba_unmultiplied(&mut tp.color);
+                color_well(ui, &mut tp.color);
             });
             slider_f32(ui, "Position X", &mut tp.position[0], 0.0..=1.0, "");
             slider_f32(ui, "Position Y", &mut tp.position[1], 0.0..=1.0, "");
@@ -1248,7 +1248,7 @@ fn titles_tab(ui: &mut egui::Ui, c: &mut Clip, add_title: &mut Option<bool>, tpl
             if tp.animation == TextAnimation::WordHighlight {
                 ui.horizontal(|ui| {
                     ui.add_sized([96.0, 20.0], egui::Label::new(egui::RichText::new("Highlight").color(theme::TEXT_DIM)));
-                    ui.color_edit_button_rgba_unmultiplied(&mut tp.highlight_color);
+                    color_well(ui, &mut tp.highlight_color);
                 });
             }
             ui.separator();
@@ -1256,7 +1256,7 @@ fn titles_tab(ui: &mut egui::Ui, c: &mut Clip, add_title: &mut Option<bool>, tpl
             ui.add_enabled_ui(tp.outline_enabled, |ui| {
                 ui.horizontal(|ui| {
                     ui.add_sized([96.0, 20.0], egui::Label::new(egui::RichText::new("Outline Color").color(theme::TEXT_DIM)));
-                    ui.color_edit_button_rgba_unmultiplied(&mut tp.outline_color);
+                    color_well(ui, &mut tp.outline_color);
                 });
                 slider_f32(ui, "Outline Width", &mut tp.outline_width, 0.5..=24.0, " px");
             });
@@ -1266,7 +1266,7 @@ fn titles_tab(ui: &mut egui::Ui, c: &mut Clip, add_title: &mut Option<bool>, tpl
             ui.add_enabled_ui(tp.shadow_enabled, |ui| {
                 ui.horizontal(|ui| {
                     ui.add_sized([96.0, 20.0], egui::Label::new(egui::RichText::new("Color").color(theme::TEXT_DIM)));
-                    ui.color_edit_button_rgba_unmultiplied(&mut tp.shadow_color);
+                    color_well(ui, &mut tp.shadow_color);
                 });
                 slider_f32(ui, "Offset X", &mut tp.shadow_offset[0], -40.0..=40.0, " px");
                 slider_f32(ui, "Offset Y", &mut tp.shadow_offset[1], -40.0..=40.0, " px");
@@ -1278,7 +1278,7 @@ fn titles_tab(ui: &mut egui::Ui, c: &mut Clip, add_title: &mut Option<bool>, tpl
             ui.add_enabled_ui(tp.pill_enabled, |ui| {
                 ui.horizontal(|ui| {
                     ui.add_sized([96.0, 20.0], egui::Label::new(egui::RichText::new("Color").color(theme::TEXT_DIM)));
-                    ui.color_edit_button_rgba_unmultiplied(&mut tp.pill_color);
+                    color_well(ui, &mut tp.pill_color);
                 });
                 slider_f32(ui, "Padding", &mut tp.pill_padding, 0.0..=120.0, " px");
                 slider_f32(ui, "Radius", &mut tp.pill_radius, 0.0..=120.0, " px");

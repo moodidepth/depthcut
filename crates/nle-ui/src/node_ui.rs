@@ -2,7 +2,7 @@
 //! solids, merges and mixers) as boxes and wires on a canvas.
 
 use crate::theme;
-use crate::widgets::{param_row, ParamSpec};
+use crate::widgets::{color_well, param_row, ParamSpec};
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Vec2};
 use nle_core::clip::BlendMode;
 use nle_core::color::ColorCorrection;
@@ -349,7 +349,7 @@ fn node_params(ui: &mut egui::Ui, id: u64, kind: &mut NodeKind, assets: &[(Asset
         NodeKind::Solid { color } => {
             ui.horizontal(|ui| {
                 ui.label("Colour");
-                ui.color_edit_button_rgba_unmultiplied(color);
+                color_well(ui, color);
             });
         }
         NodeKind::MediaIn { asset, offset } => {

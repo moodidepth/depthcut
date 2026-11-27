@@ -100,6 +100,18 @@ pub fn slider_f32(ui: &mut egui::Ui, label: &str, v: &mut f32, range: std::ops::
     .inner
 }
 
+/// A colour button that writes back only what the user picks. egui's own
+/// button round-trips the colour through HSVA every frame, which nudges
+/// values like 0.04 to 0.04000002: an edit nobody made, recorded on sight.
+pub fn color_well(ui: &mut egui::Ui, color: &mut [f32; 4]) -> bool {
+    let mut c = *color;
+    let changed = ui.color_edit_button_rgba_unmultiplied(&mut c).changed();
+    if changed {
+        *color = c;
+    }
+    changed
+}
+
 /// [`slider_f32`] that clamps only what the user drags or types, so a value already
 /// beyond `range` is shown as-is rather than rewritten (and recorded) on sight.
 pub fn slider_f32_edits(ui: &mut egui::Ui, label: &str, v: &mut f32, range: std::ops::RangeInclusive<f32>, suffix: &str) -> bool {
@@ -190,5 +202,29 @@ pub fn secs_label(t: Time) -> String {
         format!("{}:{:04.1}", (s / 60.0).floor(), s % 60.0)
     } else {
         format!("{s:.1}s")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn color_well_leaves_an_untouched_colour_alone() {
+        let ctx = egui::Context::default();
+        let start = [0.04, 0.52, 1.0, 0.85];
+        let mut c = start;
+        // the raw egui button drifts this colour; the well must not
+        let mut raw = start;
+        for _ in 0..3 {
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    assert!(!color_well(ui, &mut c));
+                    ui.color_edit_button_rgba_unmultiplied(&mut raw);
+                });
+            });
+        }
+        assert_eq!(c, start);
+        assert_ne!(raw, start, "egui no longer drifts colours; color_well may be unnecessary");
     }
 }
