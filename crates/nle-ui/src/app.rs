@@ -1265,7 +1265,7 @@ impl App {
                 .collect();
             Ok(markers)
         }));
-        self.status("Scanning gameplay audio for kills & multi-kill spikes…");
+        self.status("Scanning gameplay audio for kills…");
     }
 
     pub fn sync_clips_to_beats(&mut self) {
@@ -1888,6 +1888,22 @@ impl App {
         }
     }
 
+    /// Jump to the previous/next marker. Beat, kick and snare ticks are
+    /// skipped: there are hundreds of them and they are not places to visit.
+    pub fn jump_marker(&mut self, forward: bool) {
+        let t = self.playhead;
+        let mut stops = self.project.timeline.markers.iter().filter(|m| !matches!(m.kind, MarkerKind::Beat | MarkerKind::SubBass | MarkerKind::Snare));
+        let target = if forward { stops.find(|m| m.time > t) } else { stops.rev().find(|m| m.time < t) };
+        match target.map(|m| (m.time, m.name.clone())) {
+            Some((at, name)) => {
+                self.seek(at);
+                let tc = nle_core::format_timecode(at, self.project.timeline.format.rate);
+                self.status(if name.is_empty() { format!("Marker at {tc}") } else { format!("Marker \u{201C}{name}\u{201D} at {tc}") });
+            }
+            None => self.status(if forward { "No marker after the playhead" } else { "No marker before the playhead" }),
+        }
+    }
+
     /// Time shown in the viewer: the skimmer wins over the playhead.
     pub fn view_time(&self) -> Time {
         if self.source_active() {
@@ -2285,6 +2301,8 @@ impl App {
             Action::StepBack10 => self.step(-10),
             Action::StepForward10 => self.step(10),
             Action::PrevEdit => self.jump_edit(false),
+            Action::PrevMarker => self.jump_marker(false),
+            Action::NextMarker => self.jump_marker(true),
             Action::NextEdit => self.jump_edit(true),
             Action::GoToStart => self.seek_cursor(Time::ZERO),
             Action::GoToEnd => {
@@ -2836,6 +2854,15 @@ impl App {
                     self.open_named_marker_dialog();
                     ui.close_menu();
                 }
+                if ui.button(self.menu_label("Previous Marker", Action::PrevMarker)).clicked() {
+                    self.jump_marker(false);
+                    ui.close_menu();
+                }
+                if ui.button(self.menu_label("Next Marker", Action::NextMarker)).clicked() {
+                    self.jump_marker(true);
+                    ui.close_menu();
+                }
+                ui.separator();
                 if ui.add_enabled(self.beat_job.is_none(), egui::Button::new(self.menu_label("Analyze Beats", Action::AnalyzeBeats))).clicked() {
                     self.analyze_selected_beats();
                     ui.close_menu();

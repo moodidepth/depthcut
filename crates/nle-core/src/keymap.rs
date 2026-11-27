@@ -95,6 +95,8 @@ actions! {
     ToggleRetime => "Show Retime Editor", "Animation";
     AddMarker => "Add Marker", "Markers";
     AddNamedMarker => "Add Named / Colored Marker", "Markers";
+    PrevMarker => "Previous Marker", "Markers";
+    NextMarker => "Next Marker", "Markers";
     AnalyzeBeats => "Analyze Beats", "Markers";
     ScanKills => "Scan VOD for Kills", "Montage";
     SyncToBeats => "Sync Clips & Velocity to Beats", "Montage";
@@ -448,6 +450,8 @@ impl ActionMap {
                 (ToggleRetime, &[B::ctrl(K::R)]),
                 (AddMarker, &[B::key(K::M)]),
                 (AddNamedMarker, &[B::alt(K::M)]),
+                (PrevMarker, &[B::shift(K::ArrowUp)]),
+                (NextMarker, &[B::shift(K::ArrowDown)]),
                 (AnalyzeBeats, &[B::alt(K::B)]),
                 (ScanKills, &[B::shift_alt(K::K)]),
                 (SyncToBeats, &[B::alt(K::S)]),
@@ -575,6 +579,8 @@ impl ActionMap {
                 (ToggleRetime, &[B::ctrl(K::R)]),
                 (AddMarker, &[B::key(K::M)]),
                 (AddNamedMarker, &[B::alt(K::M)]),
+                (PrevMarker, &[B::ctrl(K::Semicolon), B::shift(K::ArrowUp)]),
+                (NextMarker, &[B::ctrl(K::Quote), B::shift(K::ArrowDown)]),
                 (AnalyzeBeats, &[B::alt(K::B)]),
                 (ScanKills, &[B::shift_alt(K::K)]),
                 (SyncToBeats, &[B::alt(K::S)]),
@@ -702,6 +708,8 @@ impl ActionMap {
                 (ToggleRetime, &[B::ctrl(K::R)]),
                 (AddMarker, &[B::key(K::M)]),
                 (AddNamedMarker, &[B::alt(K::M)]),
+                (PrevMarker, &[B::shift(K::ArrowUp)]),
+                (NextMarker, &[B::shift(K::ArrowDown)]),
                 (AnalyzeBeats, &[B::alt(K::B)]),
                 (ScanKills, &[B::shift_alt(K::K)]),
                 (SyncToBeats, &[B::alt(K::S)]),
