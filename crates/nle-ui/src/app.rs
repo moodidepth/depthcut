@@ -194,6 +194,10 @@ pub struct App {
     selection_at: std::collections::HashMap<u64, Vec<ClipId>>,
     /// A File / Edit / … menu is open: keys go to it, not to shortcuts.
     menubar_open: bool,
+    /// A text field had the keyboard when the last frame ended. egui drops
+    /// focus on Esc before the frame starts, so this is how that Esc is told
+    /// apart from one meant for the timeline.
+    text_focus_last_frame: bool,
     pub playhead: Time,
     /// Compound clips / storylines stepped into (double-click). While any
     /// are open, `project.timeline` shows the innermost one's contents and
@@ -363,6 +367,7 @@ impl App {
             selection: Vec::new(),
             selection_at: Default::default(),
             menubar_open: false,
+            text_focus_last_frame: false,
             playhead: Time::ZERO,
             focus: Focus::default(),
             hold_connections: false,
@@ -2499,6 +2504,10 @@ impl App {
         if self.shortcuts_ui.recording.is_some() || ctx.wants_keyboard_input() {
             return;
         }
+        // Esc that left a text field only leaves it (not Clear Selection too)
+        if self.text_focus_last_frame && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+            return;
+        }
         // an open menu or popup gets the keys: Esc closes it (instead of being
         // eaten by Clear Selection), and nothing edits the timeline behind it
         if self.menubar_open || ctx.is_context_menu_open() || ctx.memory(|m| m.any_popup_open()) {
@@ -3465,6 +3474,7 @@ impl eframe::App for App {
             }
         }
         crate::debug_dump::tick(self, ctx);
+        self.text_focus_last_frame = ctx.wants_keyboard_input();
         // keep decoding/thumbnail jobs flowing
         if self.library.importing > 0 || self.export.running() || self.preview.as_ref().is_some_and(|p| p.renderer.stats().missing_frames > 0) {
             ctx.request_repaint_after(Duration::from_millis(30));
