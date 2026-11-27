@@ -3,7 +3,10 @@
 All notable changes to Depthcut. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.1.0] — 2026-11-27
+
+First public build. Windows 10/11 x64 only; Linux is experimental (build from source); macOS is
+not supported yet.
 
 ### NVIDIA and AMD GPUs
 - Export and proxies use the hardware encoder of the GPU Depthcut renders on: **NVENC** on
@@ -26,11 +29,6 @@ versions follow [SemVer](https://semver.org/).
   (12 workers on CPUs 4–15).
 - FFmpeg processes (decode, proxies, export, audio) run only on the worker CPUs. x264, x265,
   Whisper and ONNX thread counts follow the same budget.
-
-## [0.1.0] — 2026-11-27
-
-First public build. Windows 10/11 x64 only; Linux is experimental (build from source); macOS is
-not supported yet.
 
 ### Name, welcome and alpha labels
 - The app is now **Depthcut** (formerly Rust Cut Pro). On first launch the old
