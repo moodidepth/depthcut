@@ -847,9 +847,26 @@ fn metadata(app: &mut App, ui: &mut egui::Ui, a: &MediaAsset) {
                 row("Subclip of file", format!("{} - {}", format_timecode(i, a.frame_rate()), format_timecode(o, a.frame_rate())));
             }
             if let Some(v) = &a.video {
-                row("Video", format!("{}×{} · {} · {}", v.width, v.height, v.frame_rate.label(), v.codec));
+                let vfr = if v.is_vfr { " · variable rate" } else { "" };
+                row("Video", format!("{}×{} · {}{vfr} · {}", v.width, v.height, v.frame_rate.label(), v.codec));
                 row("Format", format!("{} · {}-bit", v.pix_fmt, v.bit_depth));
-                row("Color", format!("{} / {} / {}", v.color_space, v.color_primaries, v.color_transfer));
+                // Show the tags the file carries; untagged files say what they are read as.
+                let tags: Vec<&str> = [&v.color_space, &v.color_primaries, &v.color_transfer]
+                    .into_iter()
+                    .map(|t| t.as_str())
+                    .filter(|t| !t.is_empty() && *t != "unknown" && *t != "unspecified")
+                    .collect();
+                let color = if tags.is_empty() {
+                    let read_as = match v.yuv_matrix() {
+                        nle_core::YuvMatrix::Bt709 => "Rec. 709",
+                        nle_core::YuvMatrix::Bt601 => "Rec. 601",
+                        nle_core::YuvMatrix::Bt2020 => "Rec. 2020",
+                    };
+                    format!("Untagged, read as {read_as}")
+                } else {
+                    tags.join(" / ")
+                };
+                row("Color", color);
             }
             if let Some(au) = &a.audio {
                 row("Audio", format!("{} Hz · {} ch · {}", au.sample_rate, au.channels, au.codec));
