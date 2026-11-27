@@ -1373,21 +1373,51 @@ impl App {
     }
 
     /// Add the default transition (Cross Dissolve, 1 s) to selected clips.
+    /// Add a transition as Final Cut does: on both ends of each selected
+    /// storyline clip, or with nothing selected on the edit point nearest
+    /// the playhead. (The cut before a clip is stored on the clip before it.)
     pub fn add_transition(&mut self, kind: TransitionKind) {
-        let ids = if self.selection.is_empty() { self.target_clip().into_iter().collect() } else { self.selection.clone() };
-        let key = coalesce_key();
-        for id in ids {
-            if !nle_core::command::is_spine(&self.project.timeline, id) {
-                continue;
+        let spine: Vec<(ClipId, Time)> = self.project.timeline.spine.iter().map(|c| (c.id, c.duration)).collect();
+        if spine.is_empty() {
+            return self.status("Add clips to the storyline first");
+        }
+        // edit point i sits before spine[i]; the last one is the timeline end
+        let edge = |i: usize| if i == 0 { (spine[0].0, false) } else { (spine[i - 1].0, true) };
+        let mut edges: Vec<(ClipId, bool)> = Vec::new();
+        if self.selection.is_empty() {
+            let mut at = Time::ZERO;
+            let mut nearest = (0, Time(i64::MAX));
+            for i in 0..=spine.len() {
+                let d = (at - self.playhead).abs();
+                if d < nearest.1 {
+                    nearest = (i, d);
+                }
+                if let Some((_, len)) = spine.get(i) {
+                    at += *len;
+                }
             }
-            let t = Transition::new(kind, Time::from_secs(1));
-            self.exec_key(Command::SetTransition { id, at_end: true, transition: Some(t) }, Some(key));
-            let first = self.project.timeline.spine.first().map(|c| c.id) == Some(id);
-            if first {
-                self.exec_key(Command::SetTransition { id, at_end: false, transition: Some(Transition::new(kind, Time::from_secs(1))) }, Some(key));
+            edges.push(edge(nearest.0));
+        } else {
+            for (i, (id, _)) in spine.iter().enumerate() {
+                if self.selection.contains(id) {
+                    for e in [edge(i), (*id, true)] {
+                        if !edges.contains(&e) {
+                            edges.push(e);
+                        }
+                    }
+                }
+            }
+            if edges.is_empty() {
+                return self.status("Transitions go between storyline clips: select one, or put the playhead near an edit");
             }
         }
+        let key = coalesce_key();
+        let n = edges.len();
+        for (id, at_end) in edges {
+            self.exec_key(Command::SetTransition { id, at_end, transition: Some(Transition::new(kind, Time::from_secs(1))) }, Some(key));
+        }
         self.history.seal();
+        self.status(format!("{} on {n} edit{}", kind.label(), if n == 1 { "" } else { "s" }));
     }
 
     /// Remove the keyframes (all parameters) at clip-local `t` as one undo step.
