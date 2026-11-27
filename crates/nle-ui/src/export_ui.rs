@@ -188,6 +188,27 @@ impl Default for ExportDialog {
 }
 
 impl ExportDialog {
+    /// Settings and job state for the debug state dump.
+    pub fn debug_state(&self) -> serde_json::Value {
+        let progress = self.job.as_ref().and_then(|j| *j.progress.lock());
+        serde_json::json!({
+            "running": self.running(),
+            "target": self.job.as_ref().map(|j| j.path.clone()).or_else(|| self.path.clone()),
+            "frame": progress.map(|p| p.frame),
+            "total": progress.map(|p| p.total),
+            "fps": progress.map(|p| p.fps),
+            "delivery": format!("{:?}", self.delivery),
+            "preset": self.preset.map(|p| format!("{p:?}")),
+            "range": format!("{:?}", self.range),
+            "loudness": (["off", "-14 LUFS", "-16 LUFS"].get(self.loudness).copied()),
+            "queued": self.queue.len(),
+            "queue_running": self.queue_running,
+            "queue_log": self.queue_log,
+            "last_result": self.last_result,
+            "done_path": self.done_path,
+        })
+    }
+
     pub fn running(&self) -> bool {
         self.job.as_ref().is_some_and(|j| j.result.lock().is_none())
     }

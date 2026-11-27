@@ -619,6 +619,7 @@ fn card(app: &mut App, ui: &mut egui::Ui, a: &MediaAsset, used: bool) -> Option<
         p.rect_stroke(rect, CornerRadius::same(6), Stroke::new(2.0_f32, theme::SELECTION), StrokeKind::Inside);
     }
     asset_interaction(app, &resp, a.id, used);
+    app.dbg.rect(format!("asset:{}", a.id.0), resp.rect);
     resp.on_hover_text(hover_summary(app, a, used));
     skim
 }

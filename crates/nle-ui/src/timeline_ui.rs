@@ -328,6 +328,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let column = Rect::from_min_max(full.min, Pos2::new(split, full.bottom()));
     let area = Rect::from_min_max(Pos2::new(split, full.top()), full.max);
     let resp = ui.interact(area, ui.id().with("timeline-lanes"), Sense::click_and_drag());
+    app.dbg.rect("timeline:lanes", area);
     let painter = ui.painter_at(area);
     painter.rect_filled(area, CornerRadius::ZERO, theme::BG);
 
@@ -520,6 +521,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             painter.circle_filled(Pos2::new(cx, b), 2.5, theme::TEXT_DIM);
         }
         draw_clip(app, &painter, rect, clip, sel.contains(&clip.id));
+        app.dbg.rect(format!("clip:{}", clip.id.0), rect.intersect(area));
         draw_duck_overlay(app, &painter, rect, clip, *start);
         let track = app.project.timeline.track(*lane);
         if track.hidden || track.locked {
@@ -578,6 +580,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 
     // ----- ruler & captions row
     let ruler = Rect::from_min_size(area.min, Vec2::new(area.width(), RULER_H));
+    app.dbg.rect("timeline:ruler", ruler);
     draw_ruler(&painter, ruler, &geo, rate, &app.project.timeline.markers);
     let cap_rect = has_captions.then(|| {
         let cr = Rect::from_min_size(Pos2::new(area.left(), ruler.bottom()), Vec2::new(area.width(), CAPTIONS_H));

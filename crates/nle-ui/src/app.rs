@@ -284,6 +284,8 @@ pub struct App {
     ctrl_v_was_down: bool,
     /// Clips on the editor's own clipboard.
     pub(crate) copied: Vec<nle_core::edit_ops::CopiedClip>,
+    /// Hidden JSON state dump for automated testing (see `debug_dump`).
+    pub dbg: crate::debug_dump::DebugDump,
 }
 
 static COALESCE: AtomicU64 = AtomicU64::new(1);
@@ -437,6 +439,7 @@ impl App {
             #[cfg(windows)]
             ctrl_v_was_down: false,
             copied: Vec::new(),
+            dbg: crate::debug_dump::DebugDump::from_env(),
         };
         app.after_project_loaded();
         app
@@ -575,6 +578,21 @@ impl App {
         let m = msg.into();
         log::info!("{m}");
         self.status = Some((m, Instant::now()));
+    }
+
+    /// The last status message and how long ago it was set (kept after it fades).
+    pub fn last_status(&self) -> Option<(&str, Duration)> {
+        self.status.as_ref().map(|(m, t)| (m.as_str(), t.elapsed()))
+    }
+
+    /// A File / Edit / … menu is open.
+    pub fn menu_open(&self) -> bool {
+        self.menubar_open
+    }
+
+    /// The "Save changes?" prompt is up.
+    pub fn has_pending_switch(&self) -> bool {
+        self.pending_switch.is_some()
     }
 
     pub fn status_text(&self) -> Option<&str> {
@@ -3259,6 +3277,7 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.dbg.begin_frame(ctx);
         self.poll_media(ctx);
         self.poll_media_job(ctx);
         self.poll_jobs(ctx);
@@ -3268,40 +3287,48 @@ impl eframe::App for App {
         self.advance_playback(ctx);
         self.sync_audio();
 
-        egui::TopBottomPanel::top("menu").frame(egui::Frame::new().fill(theme::BG).inner_margin(egui::Margin::symmetric(8, 4))).show(ctx, |ui| self.menu_bar(ui));
+        let r = egui::TopBottomPanel::top("menu").frame(egui::Frame::new().fill(theme::BG).inner_margin(egui::Margin::symmetric(8, 4))).show(ctx, |ui| self.menu_bar(ui));
+        self.dbg.rect("panel:menu", r.response.rect);
         crate::ffmpeg_setup::show(self, ctx);
-        egui::TopBottomPanel::bottom("timeline")
+        let r = egui::TopBottomPanel::bottom("timeline")
             .resizable(true)
             .default_height(390.0)
             .min_height(200.0)
             .frame(egui::Frame::new().fill(theme::BG).inner_margin(egui::Margin::same(0)))
-            .show(ctx, |ui| timeline_ui::show(self, ui));
+            .show(ctx, |ui| timeline_ui::show(self, ui))
+            .response
+            .rect;
+        self.dbg.rect("panel:timeline", r);
         if self.mixer_view.open {
             // never more than ~60 % of what the timeline leaves, so the viewer
             // and the browser keep usable room in a small window
             let room = ctx.available_rect().height();
-            egui::TopBottomPanel::bottom("audio-mixer")
+            let r = egui::TopBottomPanel::bottom("audio-mixer")
                 .resizable(true)
                 .default_height(400.0)
                 .min_height(260.0)
                 .max_height((room * 0.6).max(260.0))
                 .frame(egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin::same(6)).stroke(egui::Stroke::new(1.0_f32, theme::BORDER)))
                 .show(ctx, |ui| self.mixer_drawer(ui));
+            self.dbg.rect("panel:mixer", r.response.rect);
         }
-        egui::SidePanel::left("browser")
+        let r = egui::SidePanel::left("browser")
             .resizable(true)
             .default_width(380.0)
             .min_width(260.0)
             .frame(egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin::same(8)).stroke(egui::Stroke::new(1.0_f32, theme::BORDER)))
             .show(ctx, |ui| browser::show(self, ui));
+        self.dbg.rect("panel:browser", r.response.rect);
         copilot_ui::show(self, ctx);
-        egui::SidePanel::right("inspector")
+        let r = egui::SidePanel::right("inspector")
             .resizable(true)
             .default_width(380.0)
             .min_width(280.0)
             .frame(egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin::same(8)).stroke(egui::Stroke::new(1.0_f32, theme::BORDER)))
             .show(ctx, |ui| inspector::show(self, ui));
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::BG).inner_margin(egui::Margin::same(6))).show(ctx, |ui| viewer::show(self, ui));
+        self.dbg.rect("panel:inspector", r.response.rect);
+        let r = egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::BG).inner_margin(egui::Margin::same(6))).show(ctx, |ui| viewer::show(self, ui));
+        self.dbg.rect("panel:viewer", r.response.rect);
 
         // the movie export always renders the whole project, also while stepped into a compound
         let exporting = self.export.open || self.export.running() || self.audio_export.open || self.audio_export.running();
@@ -3360,6 +3387,7 @@ impl eframe::App for App {
                 self.status(format!("Autosave failed: {e}"));
             }
         }
+        crate::debug_dump::tick(self, ctx);
         // keep decoding/thumbnail jobs flowing
         if self.library.importing > 0 || self.export.running() || self.preview.as_ref().is_some_and(|p| p.renderer.stats().missing_frames > 0) {
             ctx.request_repaint_after(Duration::from_millis(30));

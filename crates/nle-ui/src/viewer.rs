@@ -673,6 +673,7 @@ fn transport(app: &mut App, ui: &mut egui::Ui) {
                 Some(text) => {
                     let out = egui::TextEdit::singleline(text).font(egui::FontId::monospace(18.0)).desired_width(130.0).show(ui);
                     let r = out.response;
+                    app.dbg.rect("viewer:timecode", r.rect);
                     if !r.has_focus() {
                         // Just opened: select it all so typed digits replace the old timecode.
                         let mut state = out.state;
@@ -693,6 +694,7 @@ fn transport(app: &mut App, ui: &mut egui::Ui) {
                 None => {
                     let tc = format_timecode(shown, rate);
                     let r = ui.add(egui::Label::new(egui::RichText::new(&tc).monospace().size(20.0).color(theme::TEXT)).sense(Sense::click()));
+                    app.dbg.rect("viewer:timecode", r.rect);
                     if r.on_hover_text("Click to enter a timecode").clicked() {
                         app.viewer.editing_tc = Some(tc);
                     }

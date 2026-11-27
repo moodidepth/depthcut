@@ -14,6 +14,7 @@ mod browser;
 mod captions_ui;
 mod color_ui;
 mod copilot_ui;
+mod debug_dump;
 mod demo;
 mod diagnostics;
 mod discord;
@@ -108,7 +109,7 @@ fn main() -> eframe::Result<()> {
         Box::new(|cc| {
             let mut app = app::App::new(cc);
             // "Open with" / double-clicked .rcp file
-            if let Some(path) = std::env::args_os().nth(1).map(std::path::PathBuf::from).filter(|p| p.is_file()) {
+            if let Some(path) = std::env::args_os().skip(1).find(|a| !a.to_string_lossy().starts_with("--")).map(std::path::PathBuf::from).filter(|p| p.is_file()) {
                 app.open_path(&path);
             }
             Ok(Box::new(app))
