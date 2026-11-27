@@ -28,7 +28,8 @@ env:
 jobs:
   windows:
     runs-on: windows-latest
-    timeout-minutes: 90
+    # a cold cache needs ~22 min check + ~40 min test + ~30 min release build
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
 
