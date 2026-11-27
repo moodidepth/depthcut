@@ -6,7 +6,7 @@ montage tools built for CS2 and Valorant clips: zoom punches, beat sync, kill
 scanning, 9:16 reframing, Whisper auto-captions and an optional AI Copilot.
 
 > **Status: v0.1.0, early release.** Windows 10/11 x64 is the supported
-> platform. Linux builds from source but is experimental. macOS is not supported.
+> platform. Linux builds from source but is experimental. macOS is not supported (yet).
 >
 > Features marked **(alpha)** in the app are still in development and may not
 > work reliably yet: AI Copilot, Auto Captions and the transcript editor, AI

@@ -5,7 +5,8 @@ versions follow [SemVer](https://semver.org/).
 
 ## [0.1.0] — unreleased
 
-First public build. Windows 10/11 x64 only; Linux is experimental (build from source).
+First public build. Windows 10/11 x64 only; Linux is experimental (build from source); macOS is
+not supported yet.
 
 ### Name, welcome and alpha labels
 - The app is now **Depthcut** (formerly Rust Cut Pro). On first launch the old

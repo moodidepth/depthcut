@@ -10,7 +10,7 @@ now, and what is still open. "Verified" means it was run on the dev machine
 
 **Decision.** Windows 10 1809+ / 11, x86-64, is the only supported release
 target. Linux builds from source and is labelled *experimental*. There are no
-macOS builds.
+macOS builds yet.
 
 **Why.** The dev machine and every hardware path (D3D11VA/QSV decode, QSV
 encode, the Arc DX12 workaround) are tested on Windows only. Linux code paths
