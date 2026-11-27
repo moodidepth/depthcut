@@ -387,14 +387,14 @@ impl Command {
     /// Apply to `tl`. On error the timeline may be partially modified; the
     /// [`History`] restores the snapshot in that case.
     ///
-    /// Captions follow the speech they transcribe through every edit
-    /// (see [`crate::caption_follow`]).
+    /// Captions follow the speech they transcribe, and kill/beat markers the
+    /// moment they mark, through every edit (see [`crate::caption_follow`]).
     pub fn apply(&self, tl: &mut Timeline) -> EditResult<()> {
         if !self.moves_media() {
             return self.apply_inner(tl);
         }
         let edit = |tl: &mut Timeline| crate::tracks::with_locks(tl, |tl| self.apply_linked(tl));
-        if tl.captions.segments.is_empty() {
+        if tl.captions.segments.is_empty() && !tl.markers.iter().any(crate::caption_follow::marker_follows_media) {
             return edit(tl);
         }
         let anchors = crate::caption_follow::anchor_captions(tl);

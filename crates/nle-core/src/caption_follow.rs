@@ -6,11 +6,15 @@
 //! moved to wherever that source point now sits. Captions whose speech was
 //! removed from the timeline are dropped; captions that were not over any
 //! media clip follow the storyline clip under them, or stay where they are.
+//!
+//! Analysis markers (kills, beats) are handled the same way: they mark a
+//! moment in the gameplay or the music, so they move with it and vanish when
+//! it is cut out. Markers placed by hand keep their timeline position.
 
 use crate::clip::{AudioRole, Clip, ClipKind};
 use crate::ids::{AssetId, ClipId};
 use crate::time::Time;
-use crate::timeline::{PlacedClip, Timeline};
+use crate::timeline::{Marker, MarkerKind, PlacedClip, Timeline};
 
 /// Where one caption's speech lives before an edit.
 #[derive(Clone, Debug)]
@@ -23,9 +27,19 @@ enum Anchor {
     Free,
 }
 
-/// Snapshot of every caption's anchor, taken before an edit.
+/// Snapshot of every caption's (and analysis marker's) anchor, taken before an edit.
 #[derive(Clone, Debug)]
-pub struct CaptionAnchors(Vec<Anchor>);
+pub struct CaptionAnchors {
+    captions: Vec<Anchor>,
+    /// One per timeline marker; `None` for markers that stay put.
+    markers: Vec<Option<Anchor>>,
+}
+
+/// Kill and beat markers come from analysing the media, so they mark a moment
+/// in it and travel with it. Markers placed by hand stay where they are.
+pub fn marker_follows_media(m: &Marker) -> bool {
+    m.kind != MarkerKind::Standard
+}
 
 fn audible(c: &Clip) -> bool {
     c.enabled && c.has_audio() && !c.audio.muted && !c.is_gap()
@@ -46,84 +60,117 @@ fn local_for_source(c: &Clip, source: Time) -> Option<Time> {
     (local >= Time::ZERO - Time(1) && local < c.duration).then_some(local.max(Time::ZERO))
 }
 
-/// Anchor every caption to the media under it. Cheap when there are no captions.
+/// Anchor the moment `at` to the media under it. Among the media clips there,
+/// the lowest `rank` wins, then the storyline before connected lanes.
+fn anchor_at(placed: &[PlacedClip], at: Time, rank: impl Fn(&Clip) -> u8) -> Anchor {
+    let under = |p: &&PlacedClip| p.start <= at && at < p.end();
+    let media = placed.iter().filter(under).filter(|p| is_media(p.clip)).min_by_key(|p| (rank(p.clip), p.lane != 0, p.lane.abs()));
+    if let Some(p) = media {
+        return Anchor::Speech { clip: p.clip.id, asset: p.clip.asset_id(), source: p.clip.source_time(at - p.start), at };
+    }
+    match placed.iter().filter(under).find(|p| p.lane == 0) {
+        Some(p) => Anchor::Local { clip: p.clip.id, local: at - p.start, at },
+        None => Anchor::Free,
+    }
+}
+
+/// Audible clips of `role` first, then other audible media, then the rest.
+fn role_rank(c: &Clip, role: AudioRole) -> u8 {
+    2 * u8::from(!audible(c)) + u8::from(c.audio.role != role)
+}
+
+/// How far an anchored moment moved in the edit; `None` if its media is gone.
+fn shift_for(placed: &[PlacedClip], anchor: &Anchor) -> Option<Time> {
+    match anchor {
+        Anchor::Speech { clip, asset, source, at } => {
+            // the same clip first, then any other piece of the same media
+            // (blades and duplicates), nearest to where it was
+            let candidates = placed.iter().filter(|p| p.clip.id == *clip || (asset.is_some() && p.clip.asset_id() == *asset));
+            let found = candidates.filter_map(|p| local_for_source(p.clip, *source).map(|l| (p.clip.id != *clip, p.start + l))).min_by_key(|(other, t)| (*other, (t.0 - at.0).abs()));
+            match found {
+                Some((_, t)) => Some(t - *at),
+                None => {
+                    let still_there = placed.iter().find(|p| p.clip.id == *clip);
+                    // a reversed/ramped clip we cannot invert: leave it alone
+                    let unmappable = still_there.is_some_and(|p| p.clip.retime.as_ref().is_some_and(|r| !r.is_monotonic()));
+                    unmappable.then_some(Time::ZERO)
+                }
+            }
+        }
+        Anchor::Local { clip, local, at } => Some(placed.iter().find(|p| p.clip.id == *clip && *local < p.clip.duration).map_or(Time::ZERO, |p| p.start + *local - *at)),
+        Anchor::Free => Some(Time::ZERO),
+    }
+}
+
+/// Anchor every caption and analysis marker to the media under it. Cheap when there are none.
 pub fn anchor_captions(tl: &Timeline) -> CaptionAnchors {
-    if tl.captions.segments.is_empty() {
-        return CaptionAnchors(Vec::new());
+    let follow_markers = tl.markers.iter().any(marker_follows_media);
+    if tl.captions.segments.is_empty() && !follow_markers {
+        return CaptionAnchors { captions: Vec::new(), markers: Vec::new() };
     }
     let placed = tl.placed_clips();
-    let anchors = tl
+    // captions: audible dialogue first, then other audible media, then any media
+    let captions = tl
         .captions
         .segments
         .iter()
-        .map(|seg| {
-            let at = Time((seg.start.0 + seg.end.0) / 2);
-            let under = |p: &&PlacedClip| p.start <= at && at < p.end();
-            // audible dialogue first, then other audible media, then any media;
-            // within each, the storyline before connected lanes
-            let speech =
-                placed.iter().filter(under).filter(|p| is_media(p.clip)).min_by_key(|p| (!audible(p.clip), p.clip.audio.role != AudioRole::Dialogue, p.lane != 0, p.lane.abs()));
-            if let Some(p) = speech {
-                return Anchor::Speech { clip: p.clip.id, asset: p.clip.asset_id(), source: p.clip.source_time(at - p.start), at };
-            }
-            match placed.iter().filter(under).find(|p| p.lane == 0) {
-                Some(p) => Anchor::Local { clip: p.clip.id, local: at - p.start, at },
-                None => Anchor::Free,
-            }
-        })
+        .map(|seg| anchor_at(&placed, Time((seg.start.0 + seg.end.0) / 2), |c| role_rank(c, AudioRole::Dialogue)))
         .collect();
-    CaptionAnchors(anchors)
+    let markers = if follow_markers {
+        tl.markers
+            .iter()
+            .map(|m| {
+                marker_follows_media(m).then(|| match m.kind {
+                    // beats belong to the music; kills to the gameplay
+                    MarkerKind::Beat | MarkerKind::SubBass | MarkerKind::Snare => anchor_at(&placed, m.time, |c| role_rank(c, AudioRole::Music)),
+                    _ => anchor_at(&placed, m.time, |c| u8::from(!audible(c))),
+                })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    CaptionAnchors { captions, markers }
 }
 
-/// Move captions after an edit so they stay on their speech (see module docs).
-/// `anchors` must come from [`anchor_captions`] on the same caption track.
+/// Move captions and analysis markers after an edit so they stay on their media
+/// (see module docs). `anchors` must come from [`anchor_captions`] on the same timeline.
 pub fn follow_edit(tl: &mut Timeline, anchors: &CaptionAnchors) {
-    if anchors.0.len() != tl.captions.segments.len() || anchors.0.is_empty() {
+    let captions_ok = anchors.captions.len() == tl.captions.segments.len() && !anchors.captions.is_empty();
+    let markers_ok = anchors.markers.len() == tl.markers.len() && !anchors.markers.is_empty();
+    if !captions_ok && !markers_ok {
         return;
     }
     let placed = tl.placed_clips();
-    let mut keep = vec![true; anchors.0.len()];
-    let mut shifts = vec![Time::ZERO; anchors.0.len()];
-    for (i, anchor) in anchors.0.iter().enumerate() {
-        match anchor {
-            Anchor::Speech { clip, asset, source, at } => {
-                // the same clip first, then any other piece of the same media
-                // (blades and duplicates), nearest to where the caption was
-                let candidates = placed.iter().filter(|p| p.clip.id == *clip || (asset.is_some() && p.clip.asset_id() == *asset));
-                let found =
-                    candidates.filter_map(|p| local_for_source(p.clip, *source).map(|l| (p.clip.id != *clip, p.start + l))).min_by_key(|(other, t)| (*other, (t.0 - at.0).abs()));
-                match found {
-                    Some((_, t)) => shifts[i] = t - *at,
-                    None => {
-                        let still_there = placed.iter().find(|p| p.clip.id == *clip);
-                        // a reversed/ramped clip we cannot invert: leave the caption alone
-                        let unmappable = still_there.is_some_and(|p| p.clip.retime.as_ref().is_some_and(|r| !r.is_monotonic()));
-                        keep[i] = unmappable;
-                    }
-                }
-            }
-            Anchor::Local { clip, local, at } => {
-                if let Some(p) = placed.iter().find(|p| p.clip.id == *clip && *local < p.clip.duration) {
-                    shifts[i] = p.start + *local - *at;
-                }
-            }
-            Anchor::Free => {}
-        }
-    }
+    let caption_shifts: Vec<Option<Time>> = if captions_ok { anchors.captions.iter().map(|a| shift_for(&placed, a)).collect() } else { Vec::new() };
+    let marker_shifts: Vec<Option<Time>> =
+        if markers_ok { anchors.markers.iter().map(|a| a.as_ref().map_or(Some(Time::ZERO), |a| shift_for(&placed, a))).collect() } else { Vec::new() };
     drop(placed);
-    if keep.iter().all(|k| *k) && shifts.iter().all(|s| s.is_zero()) {
-        return;
+    let unchanged = |v: &[Option<Time>]| v.iter().all(|s| s.is_some_and(|d| d.is_zero()));
+    if captions_ok && !unchanged(&caption_shifts) {
+        let mut i = 0;
+        tl.captions.segments.retain_mut(|seg| {
+            let shift = caption_shifts[i];
+            i += 1;
+            if let Some(d) = shift.filter(|d| !d.is_zero()) {
+                seg.shift(d);
+            }
+            shift.is_some()
+        });
+        tl.captions.sort();
     }
-    let mut i = 0;
-    tl.captions.segments.retain_mut(|seg| {
-        let (k, d) = (keep[i], shifts[i]);
-        i += 1;
-        if k && !d.is_zero() {
-            seg.shift(d);
-        }
-        k
-    });
-    tl.captions.sort();
+    if markers_ok && !unchanged(&marker_shifts) {
+        let mut i = 0;
+        tl.markers.retain_mut(|m| {
+            let shift = marker_shifts[i];
+            i += 1;
+            if let Some(d) = shift {
+                m.time = (m.time + d).max(Time::ZERO);
+            }
+            shift.is_some()
+        });
+        tl.markers.sort_by_key(|m| m.time);
+    }
 }
 
 #[cfg(test)]
@@ -155,6 +202,37 @@ mod tests {
         assert_eq!(tl.captions.segments.len(), 1, "caption over deleted speech is removed");
         assert_eq!(tl.captions.segments[0].start, secs(2));
         assert_eq!(tl.captions.segments[0].text, "in second");
+    }
+
+    #[test]
+    fn kill_markers_follow_the_gameplay_and_hand_markers_stay() {
+        // one 54 s gameplay clip with kills at 9.5, 39.4 and 43.8 s
+        let a = MediaAsset::new("game", "/m/game.mp4", secs(54));
+        let mut tl = Timeline::default();
+        tl.append(Clip::from_asset(&a)).unwrap();
+        let ms = |ms: i64| Time::from_secs_f64(ms as f64 / 1000.0);
+        tl.markers = vec![Marker::kill(ms(9500), "Kill"), Marker::new(secs(20), "note"), Marker::kill(ms(39400), "Kill"), Marker::kill(ms(43800), "Double Kill")];
+        // keep 6-11 s and 36.5-46 s, as an editor would with blade + ripple delete
+        for t in [6000, 11000, 36500, 46000] {
+            Command::Blade { at: ms(t) }.apply(&mut tl).unwrap();
+        }
+        for i in [4, 2, 0] {
+            let id = tl.spine[i].id;
+            Command::DeleteRipple { id }.apply(&mut tl).unwrap();
+        }
+        let kills: Vec<i64> = tl.markers.iter().filter(|m| m.kind == MarkerKind::Kill).map(|m| (m.time.as_secs_f64() * 1000.0).round() as i64).collect();
+        assert_eq!(kills, vec![3500, 7900, 12300], "kills sit on the same frames of gameplay");
+        let note = tl.markers.iter().find(|m| m.kind == MarkerKind::Standard).expect("hand marker kept");
+        assert_eq!(note.time, secs(20), "hand-placed markers keep their timeline position");
+    }
+
+    #[test]
+    fn kill_marker_in_a_deleted_section_is_removed() {
+        let (mut tl, first, _) = two_clips();
+        tl.markers = vec![Marker::kill(secs(4), "Kill"), Marker::kill(secs(14), "Kill")];
+        Command::DeleteRipple { id: first }.apply(&mut tl).unwrap();
+        assert_eq!(tl.markers.len(), 1);
+        assert_eq!(tl.markers[0].time, secs(4));
     }
 
     #[test]
