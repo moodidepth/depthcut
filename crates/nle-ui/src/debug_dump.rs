@@ -3,10 +3,12 @@
 //! * `DEPTHCUT_STATE_DUMP=<file>` (or `--state-dump=<file>`): the app keeps
 //!   `<file>` up to date with its state as JSON. It rewrites it when anything
 //!   in it changes, at least once a second, and right away when `<file>.req`
-//!   appears (the request file's text comes back as `request`, then the
-//!   request file is removed). A driver writes a nonce to `.req` after an
-//!   action and waits for that nonce in the dump. Later writes keep echoing
-//!   the last nonce, so a change written right after the answer cannot hide it.
+//!   holds a new nonce (it comes back as `request`). A driver replaces `.req`
+//!   atomically after an action, waits for that nonce in the dump, then
+//!   deletes `.req` itself: the app only reads it, so it can neither see a
+//!   half-written nonce nor delete one written right after its answer. Later
+//!   writes keep echoing the last nonce, so a change written right after the
+//!   answer cannot hide it.
 //! * Ctrl+Alt+Shift+D writes a one-off dump to the logs folder.
 //!
 //! The dump holds the project format, every timeline clip (placement, source
@@ -70,10 +72,17 @@ impl DebugDump {
             self.watcher = true;
             let req = request_path(path);
             let ctx = ctx.clone();
-            let _ = std::thread::Builder::new().name("state-dump-watch".into()).spawn(move || loop {
-                std::thread::sleep(Duration::from_millis(25));
-                if req.exists() {
-                    ctx.request_repaint();
+            let _ = std::thread::Builder::new().name("state-dump-watch".into()).spawn(move || {
+                // wake once per new request; a request file left behind by a
+                // crashed driver must not keep the UI repainting
+                let mut seen = None;
+                loop {
+                    std::thread::sleep(Duration::from_millis(25));
+                    let stamp = std::fs::metadata(&req).and_then(|m| m.modified()).ok();
+                    if stamp.is_some() && stamp != seen {
+                        ctx.request_repaint();
+                    }
+                    seen = stamp;
                 }
             });
         }
@@ -146,7 +155,8 @@ pub fn tick(app: &mut App, ctx: &egui::Context) {
         return;
     };
     let req_path = request_path(&path);
-    let request = std::fs::read_to_string(&req_path).ok().map(|r| r.trim().to_owned());
+    // a nonce answered before is no request (the driver deletes the file)
+    let request = std::fs::read_to_string(&req_path).ok().map(|r| r.trim().to_owned()).filter(|r| !r.is_empty() && Some(r) != app.dbg.last_request.as_ref());
     let body = body(app, ctx);
     let text = serde_json::to_string(&body).unwrap_or_default();
     let stale = app.dbg.last_write.is_none_or(|t| t.elapsed() > Duration::from_secs(1));
@@ -160,7 +170,6 @@ pub fn tick(app: &mut App, ctx: &egui::Context) {
     let tmp = PathBuf::from(format!("{}.tmp", path.display()));
     if std::fs::write(&tmp, out).is_ok() && std::fs::rename(&tmp, &path).is_ok() {
         if request.is_some() {
-            let _ = std::fs::remove_file(&req_path);
             app.dbg.last_request = request;
         }
         app.dbg.last_body = text;

@@ -37,7 +37,7 @@ Steps (arguments separated by spaces; quote a step that holds spaces):
     widgets [FILTER|RECT]      list labelled widgets (role, label, value, rect)
     shot NAME [MAXW]           screenshot, cropped to a rect name (or 'window'),
                                scaled to MAXW px wide (default 900)
-    log [N]                    print the last N log lines (default 15)
+    log [N] [TEXT]             print the last N new log lines (default 15), only those with TEXT
     probe FILE                 ffprobe summary of a rendered file
     loudness FILE              integrated loudness (ffmpeg ebur128)
     saved                      compare the saved project file with the dump
@@ -159,6 +159,10 @@ def mouse(button: str, up: bool) -> None:
 
 # ----------------------------------------------------------------- the window
 
+# steps that send keyboard / mouse input (to the foreground window)
+INPUT_STEPS = {"key", "type", "hover", "click", "drag", "seek", "import", "save"}
+
+
 def find_window(pid: int) -> int:
     found = []
 
@@ -182,11 +186,27 @@ def client_origin(hwnd: int) -> tuple[int, int]:
     return pt.x, pt.y
 
 
+def window_pid(hwnd: int) -> int:
+    p = wt.DWORD()
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(p))
+    return p.value
+
+
 def bring_front(hwnd: int, maximize: bool = True) -> None:
-    # a tapped Alt lets SetForegroundWindow through the focus-stealing guard
-    _send(_key(0x12, False), _key(0x12, True))
-    user32.ShowWindow(hwnd, 3 if maximize else 9)
-    user32.SetForegroundWindow(hwnd)
+    # Windows refuses SetForegroundWindow from a background process unless it
+    # shares the foreground thread's input queue; a tapped Alt helps too.
+    fg = user32.GetForegroundWindow()
+    fg_thread = user32.GetWindowThreadProcessId(fg, None) if fg else 0
+    me = ctypes.windll.kernel32.GetCurrentThreadId()
+    attached = bool(fg_thread) and fg_thread != me and user32.AttachThreadInput(me, fg_thread, True)
+    try:
+        _send(_key(0x12, False), _key(0x12, True))
+        user32.ShowWindow(hwnd, 3 if maximize else 9)
+        user32.BringWindowToTop(hwnd)
+        user32.SetForegroundWindow(hwnd)
+    finally:
+        if attached:
+            user32.AttachThreadInput(me, fg_thread, False)
     time.sleep(0.4)
 
 
@@ -247,7 +267,8 @@ class Driver:
         if launch:
             env = dict(os.environ, DEPTHCUT_STATE_DUMP=str(dump))
             dump.unlink(missing_ok=True)
-            pid = subprocess.Popen([launch] + ([str(Path(open_file).resolve())] if open_file else []), env=env, cwd=str(Path(launch).parent)).pid
+            exe = Path(launch).resolve()  # cwd below would otherwise re-anchor a relative path
+            pid = subprocess.Popen([str(exe)] + ([str(Path(open_file).resolve())] if open_file else []), env=env, cwd=str(exe.parent)).pid
             self._wait_file(30)
         elif pid is None:
             pid = self._read_raw().get("app", {}).get("pid")
@@ -277,11 +298,15 @@ class Driver:
     def _roundtrip(self, timeout: float = 5.0) -> dict:
         nonce = uuid.uuid4().hex[:12]
         req = Path(str(self.dump) + ".req")
-        req.write_text(nonce, encoding="utf-8")
+        # replace atomically: the app must never read a truncated, empty file
+        tmp = Path(str(req) + ".tmp")
+        tmp.write_text(nonce, encoding="utf-8")
+        os.replace(tmp, req)
         end = time.time() + timeout
         while time.time() < end:
             s = self._read_raw()
             if s.get("request") == nonce:
+                req.unlink(missing_ok=True)  # the requester owns the file
                 return s
             time.sleep(0.03)
         req.unlink(missing_ok=True)
@@ -294,6 +319,20 @@ class Driver:
         return self.s
 
     # --- geometry
+    def rect(self, name: str):
+        """A named rect: a panel/clip rect from the dump, 'window:TITLE' for a
+        floating window (dialog) by its title, or 'X,Y,W,H' in points."""
+        if name in self.s["rects"]:
+            return self.s["rects"][name]
+        if name.startswith("window:"):
+            title = name[7:].lower()
+            for w in self.s.get("widgets", []):
+                if w[0] == "Window" and w[1].lower() == title:
+                    return w[3]
+        if m := re.fullmatch(r"([\d.]+),([\d.]+),([\d.]+),([\d.]+)", name):
+            return [float(v) for v in m.groups()]
+        return None
+
     def point(self, target: str) -> tuple[int, int]:
         """Screen pixel for a target (see the module doc)."""
         s = self.s
@@ -339,9 +378,9 @@ class Driver:
                 if not hits:
                     raise StepFailed(f"no asset matching {name!r}")
                 target = f"asset:{hits[0]['id']}"
-            if target not in rects:
+            r = rects.get(target) or self.rect(target)
+            if r is None:
                 raise StepFailed(f"{target!r} is not on screen (rects: {', '.join(sorted(rects)[:30])})")
-            r = rects[target]
             if anchor:
                 fx, fy = (float(v) for v in anchor.split(","))
                 x, y = r[0] + r[2] * fx, r[1] + r[3] * fy
@@ -356,7 +395,7 @@ class Driver:
         nth, inside = 0, None
         if "@" in spec:
             spec, name = spec.rsplit("@", 1)
-            inside = self.s["rects"].get(name)
+            inside = self.rect(name)
             if inside is None:
                 raise StepFailed(f"no rect {name!r}")
         if m := re.fullmatch(r"(.*)#(\d+)", spec):
@@ -421,6 +460,8 @@ class Driver:
                 rest = shlex.split(tail, posix=True)
             before = self.s
             try:
+                if name in INPUT_STEPS:
+                    self.ensure_front()
                 out = getattr(self, "do_" + name.replace("-", "_"))(*rest)
             except StepFailed as e:
                 print(f"FAIL {raw}: {e}")
@@ -447,6 +488,17 @@ class Driver:
     def do_front(self):
         bring_front(self.hwnd)
         self._after_input(0.3)
+
+    def ensure_front(self) -> None:
+        """Keys and clicks go to whatever window is in front: never send them
+        unless that is the app under test (another Depthcut may be open)."""
+        for _ in range(3):
+            fg = user32.GetForegroundWindow()
+            if fg and window_pid(fg) == self.pid:
+                return
+            bring_front(self.hwnd)
+        fg = user32.GetForegroundWindow()
+        raise StepFailed(f"pid {self.pid} is not the foreground window (pid {window_pid(fg) if fg else None} is); no input sent")
 
     def do_key(self, chord, times="1"):
         for _ in range(int(times)):
@@ -587,8 +639,8 @@ class Driver:
         self.fresh()
         ws = self.s.get("widgets", [])
         f = " ".join(filt)
-        if f in self.s["rects"]:
-            x, y, w, h = self.s["rects"][f]
+        if f and (r := self.rect(f)) is not None:
+            x, y, w, h = r
             ws = [v for v in ws if x <= v[3][0] + v[3][2] / 2 <= x + w and y <= v[3][1] + v[3][3] / 2 <= y + h]
         elif f:
             ws = [v for v in ws if f.lower() in (v[1] + " " + v[2]).lower() or f.lower() == v[0].lower()]
@@ -620,7 +672,7 @@ class Driver:
     def do_shot(self, name="window", maxw="900"):
         img = capture(self.hwnd)
         if name != "window":
-            r = self.s["rects"].get(name)
+            r = self.rect(name)
             if r is None:
                 raise StepFailed(f"no rect {name!r}")
             ppp = self.s["window"]["pixels_per_point"]
@@ -633,9 +685,12 @@ class Driver:
         img.save(out)
         return str(out)
 
-    def do_log(self, n="15"):
-        lines = self.new_log_lines()
-        return "\n" + "\n".join("  " + l for l in lines[-int(n):]) if lines else "no new log lines"
+    def do_log(self, *args):
+        """`log [N] [TEXT]`: the last N (15) new log lines, only those containing TEXT."""
+        n = next((int(a) for a in args if a.isdigit()), 15)
+        needle = " ".join(a for a in args if not a.isdigit())
+        lines = [l for l in self.new_log_lines() if needle in l]
+        return "\n" + "\n".join("  " + l for l in lines[-n:]) if lines else "no new log lines" + (f" containing {needle!r}" if needle else "")
 
     def do_probe(self, path):
         p = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
