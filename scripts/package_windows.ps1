@@ -24,7 +24,9 @@
 [CmdletBinding()]
 param(
     [switch]$SkipBuild,
-    [string]$Features = ""
+    [string]$Features = "",
+    # package this exe instead of target\release\rust-cut-pro.exe (implies -SkipBuild)
+    [string]$Exe = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -44,6 +46,7 @@ $Stage = Join-Path $Dist "stage"
 Step "Rust Cut Pro $Version"
 
 # ---- build -----------------------------------------------------------------
+if ($Exe) { $SkipBuild = $true; $Exe = (Resolve-Path $Exe).Path }
 if (-not $SkipBuild) {
     Step "cargo build --release"
     $cargoArgs = @("build", "--release", "-p", "nle-ui", "--bin", "rust-cut-pro")
@@ -51,7 +54,7 @@ if (-not $SkipBuild) {
     & cargo @cargoArgs
     if ($LASTEXITCODE -ne 0) { throw "cargo build failed ($LASTEXITCODE)" }
 }
-$Exe = Join-Path $Root "target\release\rust-cut-pro.exe"
+if (-not $Exe) { $Exe = Join-Path $Root "target\release\rust-cut-pro.exe" }
 if (-not (Test-Path $Exe)) { throw "missing $Exe (build first or drop -SkipBuild)" }
 
 # ---- VC++ runtime (app-local, redistributable per Microsoft's redist list) --
