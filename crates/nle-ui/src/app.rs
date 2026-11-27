@@ -2286,13 +2286,19 @@ impl App {
             _ => rfd::FileDialog::new().add_filter("Depthcut project", &["rcp"]).set_file_name(format!("{}.rcp", self.project.name)).save_file(),
         };
         let Some(path) = path else { return };
-        // An untitled project takes the name it is saved under, so the
-        // title, the timeline and default export names follow it.
+        // An untitled project takes the name it is saved under, and so does
+        // one named after its file (Save As "x-shorts" from "x.rcp"), so the
+        // title, the timeline and default export names follow the file.
         const UNTITLED: &str = "Untitled Project";
-        if self.focus.is_empty() && self.project.name == UNTITLED && self.root_timeline_name() == UNTITLED {
-            if let Some(stem) = path.file_stem().map(|s| s.to_string_lossy().trim().to_owned()).filter(|s| !s.is_empty() && s != UNTITLED) {
+        let old_stem = self.project_path.as_deref().and_then(Path::file_stem).map(|s| s.to_string_lossy().trim().to_owned());
+        let follows_file = self.project.name == UNTITLED || old_stem.as_deref() == Some(self.project.name.as_str());
+        if follows_file {
+            if let Some(stem) = path.file_stem().map(|s| s.to_string_lossy().trim().to_owned()).filter(|s| !s.is_empty() && s != UNTITLED && *s != self.project.name) {
+                let timeline_too = self.focus.is_empty() && self.root_timeline_name() == self.project.name;
                 self.project.name.clone_from(&stem);
-                self.exec(Command::Rename { name: stem });
+                if timeline_too {
+                    self.exec(Command::Rename { name: stem });
+                }
             }
         }
         let result = self.full_project().save(&path);
