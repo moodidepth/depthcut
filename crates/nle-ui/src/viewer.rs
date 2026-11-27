@@ -674,21 +674,25 @@ fn transport(app: &mut App, ui: &mut egui::Ui) {
                     let out = egui::TextEdit::singleline(text).font(egui::FontId::monospace(18.0)).desired_width(130.0).show(ui);
                     let r = out.response;
                     app.dbg.rect("viewer:timecode", r.rect);
-                    if !r.has_focus() {
-                        // Just opened: select it all so typed digits replace the old timecode.
-                        let mut state = out.state;
-                        let all = egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(text.chars().count()));
-                        state.cursor.set_char_range(Some(all));
-                        state.store(ui.ctx(), r.id);
-                    }
-                    r.request_focus();
-                    if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                        if let Some(t) = parse_timecode(text, rate) {
-                            app.seek_cursor(t);
+                    let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    if enter || r.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        if enter {
+                            if let Some(t) = parse_timecode(text, rate) {
+                                app.seek_cursor(t);
+                            }
                         }
                         app.viewer.editing_tc = None;
-                    } else if ui.input(|i| i.key_pressed(egui::Key::Escape)) || r.lost_focus() {
-                        app.viewer.editing_tc = None;
+                        // hand the keyboard back to the editor's shortcuts
+                        r.surrender_focus();
+                    } else {
+                        if !r.has_focus() {
+                            // Just opened: select it all so typed digits replace the old timecode.
+                            let mut state = out.state;
+                            let all = egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(text.chars().count()));
+                            state.cursor.set_char_range(Some(all));
+                            state.store(ui.ctx(), r.id);
+                        }
+                        r.request_focus();
                     }
                 }
                 None => {
