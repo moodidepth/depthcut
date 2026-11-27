@@ -35,8 +35,9 @@ consider supporting it on [Ko-fi](https://ko-fi.com/moodidepth).
    video, but does not ship it. If FFmpeg isn't found, a banner at the top offers:
    - **Download FFmpeg Automatically**: fetches the gyan.dev "release essentials"
      build (about 100 MB), checks its SHA-256 and puts it in
-     `%LOCALAPPDATA%\Depthcut\bin`. That build is GPL-licensed; its license is
-     saved next to it.
+     `%LOCALAPPDATA%\Depthcut\bin`. It includes the NVIDIA (NVENC/NVDEC), AMD
+     (AMF) and Intel (Quick Sync) encoders and D3D11VA decoding. That build is
+     GPL-licensed; its license is saved next to it.
    - **Locate Existing ffmpeg.exe…**: use one you already have.
    - Or install it yourself (`winget install Gyan.FFmpeg`) and restart.
 
@@ -52,14 +53,51 @@ normal uninstaller under *Settings → Apps*.
 | | Minimum | Tested on |
 |---|---|---|
 | OS | Windows 10 1809+ or Windows 11, 64-bit | Windows 11 Pro |
-| GPU | DirectX 12 GPU **with a Vulkan 1.2 driver** (the exe needs `vulkan-1.dll`, which every current AMD / NVIDIA / Intel driver installs) | Intel Arc A750 8 GB |
-| CPU | 4 cores, x86-64 | Ryzen 7 5800X |
+| GPU | DirectX 12 GPU **with a Vulkan 1.2 driver** (the exe needs `vulkan-1.dll`, which every current AMD / NVIDIA / Intel driver installs) | Intel Arc A750 8 GB, NVIDIA RTX 3080, AMD RX 7800 XT |
+| CPU | 4 cores, x86-64 (any Intel or AMD, hybrid P/E-core chips included) | Ryzen 7 5800X, Ryzen 7 7800X3D, Ryzen 7 5700X |
 | RAM | 8 GB (16 GB for 1440p/4K timelines or the large Whisper model) | 32 GB |
 | Disk | 200 MB for the app, plus about 100 MB for FFmpeg, 60 MB to 550 MB per Whisper model, and space for proxies | |
 
-On Intel GPUs export uses Quick Sync; on Windows decoding uses D3D11VA. Without a
-working hardware encoder, export falls back to software (`libx264`), which works
-but is slower.
+**GPU encoding and decoding.** Depthcut uses the hardware encoder of the GPU it
+renders on:
+
+| GPU | Export and proxies | Decode (Windows) |
+|---|---|---|
+| NVIDIA (GTX 10-series / RTX) | NVENC: H.264, HEVC, AV1 on RTX 40+ | D3D11VA |
+| AMD (RX 400+ / Radeon iGPU) | AMF: H.264, HEVC, AV1 on RX 7000+ | D3D11VA |
+| Intel (Arc, Iris Xe, UHD) | Quick Sync: H.264, HEVC, AV1 on Arc | D3D11VA |
+
+At start-up a short test encode (3 frames) checks every hardware encoder
+FFmpeg offers. The Export dialog lists only the ones that worked, the render GPU's own
+first. A laptop with two GPUs can therefore still use the other GPU's encoder.
+Without a working hardware encoder, export falls back to software (`libx264`),
+which works but is slower. Decoding also falls back to software by itself.
+
+> **Tested on three systems (Windows 11):**
+> - Ryzen 7 5800X + Intel Arc A750 (main development machine)
+> - Ryzen 7 7800X3D + NVIDIA RTX 3080
+> - Ryzen 7 5700X + AMD RX 7800 XT
+>
+> The RTX 3080 has no AV1 encoder (NVENC AV1 needs an RTX 40-series card), so
+> it exports H.264 and HEVC in hardware. Please open an issue if an encoder is
+> missing or an export fails on your GPU.
+
+**CPU cores.** Background work (decoding, proxies, thumbnails, waveforms,
+captions, x264/x265) never takes every core. Depthcut keeps a few whole cores
+free so the UI, audio playback and the GPU driver stay responsive while it
+works:
+
+| Physical cores | Kept free | Example |
+|---|---|---|
+| 1 | its second thread (if it has SMT) | |
+| 2–4 | 1 core | 4c/8t: 6 worker threads |
+| 5–16 | 2 cores | Ryzen 7 5800X (8c/16t): 12 worker threads; Ryzen 9 7950X (16c/32t): 28 |
+| 17+ | 3 cores | Threadripper 7960X (24c/48t): 42 worker threads |
+
+On Intel hybrid CPUs (12th gen and newer) the free cores are performance cores,
+counted over all cores. A Core i7-13700K (8P + 8E) keeps two P-cores free and
+runs 20 workers. FFmpeg processes started by Depthcut run on the worker CPUs
+only.
 
 **If the app won't start:** update your graphics driver first (a missing
 `vulkan-1.dll` means no Vulkan driver is installed). The VC++ runtime DLLs are
@@ -178,7 +216,8 @@ OTIO / AAF interchange · CS2 / Valorant montage tools.
   audio can be detached as a linked or unlinked clip.
 - **Interchange.** FCPXML 1.10 import/export, CMX 3600 EDL, OpenTimelineIO, and
   AAF export for Avid / Pro Tools *(alpha)*.
-- **Export.** AV1 / HEVC / H.264 via Quick Sync, or software H.264 (x264) / H.265
+- **Export.** AV1 / HEVC / H.264 via NVENC (NVIDIA), AMF (AMD) or Quick Sync
+  (Intel), or software H.264 (x264) / H.265
   (x265, slow). 24, 30 or 60 fps or the project's rate. A movie export that fails
   or is cancelled leaves any existing file of that name untouched; image
   sequences are written in place. A render queue, In/Out export ranges,
@@ -299,8 +338,10 @@ Mouse:
 ## For developers
 
 Everything below covers building from source and how the code is laid out.
-The editor was tuned for an **AMD Ryzen 7 5800X** with an **Intel Arc A750**, on Windows
-(DX12/Vulkan, D3D11VA decode, Quick Sync encode) and Linux (Vulkan + Quick Sync over VA-API `iHD`).
+The editor was developed on an **AMD Ryzen 7 5800X** with an **Intel Arc A750**, and also tested on a **Ryzen 7 7800X3D + RTX 3080** and a **Ryzen 7 5700X + RX 7800 XT**. It runs on Windows
+(DX12/Vulkan, D3D11VA decode, NVENC / AMF / Quick Sync encode) and Linux (Vulkan, CUDA / VA-API / Quick Sync).
+GPU-specific choices follow the vendor of the adapter wgpu renders on (`hwaccel::set_render_gpu`).
+The CPU budget comes from the real core topology (`nle_media::threads`), so it works on any CPU.
 
 ### Workspace
 
@@ -332,14 +373,14 @@ There are no circular dependencies: `nle-core` ← `nle-media` ← `nle-render` 
 
 #### nle-media
 
-- **Hardware decode.** Planned per codec and bit depth. Windows: D3D11VA, then software. QSV decode is not used there, because after a seek it returns pictures 3–5 frames early (see `tests/decode_end.rs`). Linux: Quick Sync (`h264_qsv` / `hevc_qsv` / `av1_qsv`, child device `vaapi=va:/dev/dri/renderD128,driver=iHD` → `qsv=hw@va`), then VA-API, then software. If any step fails, decoding falls back to software without interrupting the user.
+- **Hardware decode.** Planned per codec, bit depth and render-GPU vendor. Windows: D3D11VA on any vendor, then software. QSV decode is not used there, because after a seek it returns pictures 3–5 frames early (see `tests/decode_end.rs`). Linux on NVIDIA: CUDA (NVDEC), then software. Linux on AMD: VA-API (Mesa), then software. Linux on Intel: Quick Sync (`h264_qsv` / `hevc_qsv` / `av1_qsv`, child device `vaapi=va:/dev/dri/renderD128,driver=iHD` → `qsv=hw@va`), then VA-API, then software. If any step fails, decoding falls back to software without interrupting the user.
 - **Decoders.** Two backends:
   - the default decoder streams raw NV12/P010 from the `ffmpeg` executable;
   - the `ffmpeg` cargo feature enables in-process decoding through `ffmpeg-next`.
 - **Threading and decode pipeline.**
   - Bounded ring-buffer frame queues.
   - A "latest wins" frame server with one decode worker per asset.
-  - A **rayon pool capped at 12 workers** that always leaves **4 threads** free for the UI, audio and the GPU driver. Workers are pinned to the top CPUs.
+  - A **rayon pool sized from the CPU topology.** It reads physical cores, SMT siblings and P/E efficiency classes from `GetLogicalProcessorInformationEx` on Windows and from sysfs on Linux. Whole fast cores are kept free for the UI, audio and the GPU driver: 1 core on 2–4-core CPUs, 2 on 5–16, 3 on 17+. Workers are pinned to the remaining CPUs, and FFmpeg children are confined to them by a job object with an affinity limit (a plain process mask is not enough: x265 widens it from inside). Whisper, ONNX, x264 and x265 thread counts follow the same budget. On a 5800X this gives 12 workers on CPUs 4–15.
 - **Audio & Loudness / Beat Analysis.**
   - Kaiser-windowed sinc resampling to **48 kHz stereo f32**, offline mixdown & 16 kHz mono conversion.
   - A 3-band biquad EQ, **Vocal Clarity** chain (80 Hz HPF + 3 kHz presence + limiter), and EBU R128 / BS.1770 integrated loudness (`-14 LUFS` normalize).
@@ -347,9 +388,9 @@ There are no circular dependencies: `nle-core` ← `nle-media` ← `nle-render` 
   - Spectral-flux onset & tempo/beat detector (`60–200 BPM`) for timeline beat markers.
   - A lock-free `rtrb` ring feeds the `cpal` callback, and the audio clock is the master clock.
 - **Whisper Auto Captions & Online Audio/SFX.**
-  - Offline speech-to-text via `whisper-rs` (`transcribe`), accelerated on Vulkan GPU (Intel Arc) with CPU fallback and GGML model management (`base-q5_1`, `large-v3-turbo-q5_0`).
+  - Offline speech-to-text via `whisper-rs` (`transcribe`), accelerated on any Vulkan GPU with CPU fallback and GGML model management (`base-q5_1`, `large-v3-turbo-q5_0`).
   - Royalty-free online search (Openverse & Internet Archive), streaming FFmpeg → `rtrb` → `cpal` URL preview (`AudioPreview`), streamed downloads with CC attribution tracking, and optional `yt-dlp` URL import.
-- **Media analysis.** Parallel filmstrip thumbnails, RMS/peak waveforms, integrated LUFS loudness, and a background proxy transcoder (QSV first).
+- **Media analysis.** Parallel filmstrip thumbnails, RMS/peak waveforms, integrated LUFS loudness, and a background proxy transcoder (the render GPU's encoder first: NVENC, AMF or QSV, then VA-API, then x264).
 
 #### nle-render
 
@@ -369,7 +410,7 @@ All pixel work runs in WGSL compute shaders on the GPU:
 - **Transitions:** Cross Dissolve, Dip to Black, Dip to White, Whip Pan (directional blur), Slide, Push and Luma Wipe.
 - Slow-motion and retimed footage **Frame Blending** and **block-matching motion-compensated interpolation** (`Optical Flow`).
 - Titles, lower thirds, animated text presets, active-word highlighted captions, outline and pill backgrounds.
-- NV12 packing for the encoders, with **export** via `av1_qsv`, `hevc_qsv`, `h264_qsv` and `h264_vaapi` (or software `libx264` / `libx265`). When timeline-used online media requires credit (`CC-BY`, etc.), `project_credits.txt` is written automatically beside the exported video.
+- NV12 packing for the encoders, with **export** via `*_nvenc`, `*_amf`, `*_qsv` (AV1 / HEVC / H.264) and `h264_vaapi` (or software `libx264` / `libx265`). Quality maps onto each encoder's scale (NVENC AV1 `-cq` 0–63, AMF AV1 QP 0–255). When timeline-used online media requires credit (`CC-BY`, etc.), `project_credits.txt` is written automatically beside the exported video.
 - Decoded frames stay in VRAM in an **LRU cache capped at 2,560 MB**.
 
 #### nle-ui
@@ -436,12 +477,15 @@ sudo apt install libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
 
 Check Quick Sync with `vainfo --display drm --device /dev/dri/renderD128`. It should list the `iHD` driver and the AV1/HEVC/H.264 profiles. Your user must be in the `render` and `video` groups.
 
+- **AMD on Linux:** `mesa-va-drivers` (VA-API decode and `h264_vaapi` proxies/export) and `mesa-vulkan-drivers`.
+- **NVIDIA on Linux:** the proprietary driver (it provides NVENC, NVDEC/CUDA and Vulkan) and an FFmpeg built with `nvenc`/`cuda` (check with `ffmpeg -hide_banner -encoders | grep nvenc`).
+
 #### Windows 10/11
 
 - Rust via <https://rustup.rs> (MSVC toolchain, with Visual Studio Build Tools and the "Desktop development with C++" workload).
 - **Whisper + Vulkan build toolchain (default `whisper-vulkan` feature):** requires CMake (`cmake`), LLVM (`libclang` via `LIBCLANG_PATH`), and the **Vulkan SDK** (`VULKAN_SDK`). The repository includes [`.cargo/config.toml`](.cargo/config.toml) (setting default fallback paths with `force = false`) and [`Directory.Build.props`](Directory.Build.props) (redirecting MSBuild `.tlog` / marker files into `%TEMP%\rcp-tlog` so `whisper-rs-sys` Vulkan shader generation stays well within Windows' 260-character `MAX_PATH` limit). To build without Whisper, pass `--no-default-features` to `nle-ui`.
-- An up-to-date **Intel Arc graphics driver** (it provides DX12, Vulkan and Quick Sync).
-- **FFmpeg** with QSV support on `PATH` (for example the gyan.dev "full" build: `winget install Gyan.FFmpeg`). The editor finds FFmpeg even if Explorer still has an old `PATH` (for example, right after `winget install`). It looks next to the exe, then on `PATH`, then in the winget, Scoop and Chocolatey folders. You can also point `RCP_FFMPEG` / `RCP_FFPROBE` at the executables.
+- An up-to-date **graphics driver** (NVIDIA, AMD or Intel). It provides DX12, Vulkan and the hardware encoder (NVENC, AMF or Quick Sync).
+- **FFmpeg** with hardware encoders on `PATH` (any gyan.dev build has NVENC, AMF and QSV, for example `winget install Gyan.FFmpeg`). The editor finds FFmpeg even if Explorer still has an old `PATH` (for example, right after `winget install`). It looks next to the exe, then on `PATH`, then in the winget, Scoop and Chocolatey folders. You can also point `RCP_FFMPEG` / `RCP_FFPROBE` at the executables.
 - Optional, for the `ffmpeg` feature: the FFmpeg 9 **shared** build, which includes headers and `.lib` files, plus LLVM for libclang. Steps:
 
   1. `winget install Gyan.FFmpeg.Shared LLVM.LLVM`
@@ -526,6 +570,8 @@ regenerate the license file with `python scripts/gen_third_party_notices.py`.
 - D3D11VA decode works for H.264, HEVC Main10 and AV1;
 - proxies use `h264_qsv`;
 - exports work through `av1_qsv`, `hevc_qsv`, `h264_qsv`, `libx264` and `libx265`.
+
+**Also tested on** Windows 11 with a Ryzen 7 7800X3D + RTX 3080 (NVENC, D3D11VA) and a Ryzen 7 5700X + RX 7800 XT (AMF, D3D11VA). Not yet verified on hardware: CUDA decode and VA-API on AMD under Linux. The encoder arguments are checked against `ffmpeg -h encoder=…` for FFmpeg 9.0.2 and covered by unit tests. The start-up probe hides any encoder that fails its test encode.
 
 The `ffmpeg` feature (`ffmpeg-next` 9.1) was built and tested against the same FFmpeg 9.0.2, using the winget `Gyan.FFmpeg.Shared` package. The Windows section above has the commands.
 

@@ -78,20 +78,19 @@ pub fn preferred_backends() -> wgpu::Backends {
     }
 }
 
-/// Score adapters: discrete Intel Arc > other discrete > integrated > rest.
+/// Score adapters: any discrete GPU (NVIDIA, AMD, Intel Arc) > integrated >
+/// virtual > software. Within a class, Intel Arc and then the DX12 / Vulkan
+/// backend break ties; they never lift an integrated GPU over a discrete one.
 pub fn adapter_score(info: &wgpu::AdapterInfo) -> i32 {
     let mut s = match info.device_type {
-        wgpu::DeviceType::DiscreteGpu => 100,
-        wgpu::DeviceType::IntegratedGpu => 50,
-        wgpu::DeviceType::VirtualGpu => 20,
-        wgpu::DeviceType::Cpu => 1,
-        wgpu::DeviceType::Other => 10,
+        wgpu::DeviceType::DiscreteGpu => 1000,
+        wgpu::DeviceType::IntegratedGpu => 500,
+        wgpu::DeviceType::VirtualGpu => 200,
+        wgpu::DeviceType::Other => 100,
+        wgpu::DeviceType::Cpu => 10,
     };
-    if info.vendor == INTEL_VENDOR_ID {
-        s += 40;
-    }
-    if info.name.to_ascii_lowercase().contains("arc") {
-        s += 40;
+    if info.vendor == INTEL_VENDOR_ID && info.name.to_ascii_lowercase().contains("arc") {
+        s += 20;
     }
     match info.backend {
         wgpu::Backend::Dx12 if cfg!(target_os = "windows") => s += 5,

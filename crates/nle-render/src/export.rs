@@ -211,6 +211,23 @@ impl ExportPreset {
     pub fn is_hardware(self) -> bool {
         self.is_qsv() || self.is_nvenc() || self.is_amf() || self == ExportPreset::H264Vaapi
     }
+    /// Top of `-cq` for NVENC (AV1 uses 0-63).
+    pub fn nvenc_cq_max(self) -> u32 {
+        if self.codec() == ExportCodec::Av1 {
+            63
+        } else {
+            51
+        }
+    }
+    /// Top of `-qp_*` for AMF (AV1 uses 0-255).
+    pub fn amf_qp_max(self) -> u32 {
+        if self.codec() == ExportCodec::Av1 {
+            255
+        } else {
+            51
+        }
+    }
+
     /// Sensible default quality (ICQ / CQ / QP / CRF).
     pub fn default_quality(self) -> u8 {
         match self.codec() {
@@ -223,6 +240,11 @@ impl ExportPreset {
     pub fn supported_on(self, platform: Platform) -> bool {
         !(self == ExportPreset::H264Vaapi && platform != Platform::Linux)
     }
+}
+
+/// Map the dialog's 1-51 quality value onto an encoder's 0..=`max` scale.
+pub fn quality_on_scale(q: u8, max: u32) -> u32 {
+    ((q.min(51) as u32 * max + 25) / 51).min(max)
 }
 
 /// Presets the installed FFmpeg was *built* with (best first). Prefer
@@ -519,6 +541,11 @@ impl ExportSettings {
 
     /// x265 parameters (HDR10 static metadata for PQ).
     fn x265_params(&self) -> String {
+        // x265 sizes its pool from every CPU; keep it on the worker cores
+        format!("pools={}:{}", nle_media::threads::budget().ffmpeg_threads(), self.x265_color_params())
+    }
+
+    fn x265_color_params(&self) -> String {
         match self.hdr_output() {
             HdrOutput::Pq { peak_nits } => {
                 let peak = peak_nits.round().max(203.0) as u32;
@@ -616,17 +643,25 @@ impl ExportSettings {
                 a.extend(["-preset", "slow"].map(String::from));
                 a.extend(abr(k));
             }
+            // NVENC: -cq is 0-51 for H.264/HEVC and 0-63 for AV1
             (p, RateControl::Quality(q)) if p.is_nvenc() => {
-                a.extend(["-preset", "p5", "-rc", "vbr", "-cq"].map(String::from));
-                a.extend([q.to_string(), "-b:v".into(), "0".into()]);
+                a.extend(["-preset", "p5", "-tune", "hq", "-rc", "vbr", "-cq"].map(String::from));
+                a.extend([quality_on_scale(q, p.nvenc_cq_max()).to_string(), "-b:v".into(), "0".into()]);
+                a.extend(["-spatial-aq", "1", "-rc-lookahead", "20"].map(String::from));
             }
             (p, RateControl::Bitrate(k)) if p.is_nvenc() => {
-                a.extend(["-preset", "p5", "-rc", "vbr"].map(String::from));
+                a.extend(["-preset", "p5", "-tune", "hq", "-rc", "vbr"].map(String::from));
                 a.extend(abr(k));
+                a.extend(["-spatial-aq", "1", "-rc-lookahead", "20"].map(String::from));
             }
+            // AMF: QP is 0-51 for H.264/HEVC and 0-255 for AV1; hevc_amf has no B-frame QP
             (p, RateControl::Quality(q)) if p.is_amf() => {
+                let qp = quality_on_scale(q, p.amf_qp_max()).to_string();
                 a.extend(["-quality", "quality", "-rc", "cqp"].map(String::from));
-                a.extend(["-qp_i".into(), q.to_string(), "-qp_p".into(), q.to_string()]);
+                a.extend(["-qp_i".into(), qp.clone(), "-qp_p".into(), qp.clone()]);
+                if p.codec() != ExportCodec::Hevc {
+                    a.extend(["-qp_b".into(), qp]);
+                }
             }
             (p, RateControl::Bitrate(k)) if p.is_amf() => {
                 a.extend(["-quality", "quality", "-rc", "vbr_peak"].map(String::from));
@@ -639,6 +674,10 @@ impl ExportSettings {
                 a.extend(["-preset", "medium"].map(String::from));
                 a.extend(abr(k));
             }
+        }
+        if self.preset == ExportPreset::H264Software {
+            // one x264 thread per worker CPU; FFmpeg runs confined to those
+            a.extend(["-threads".into(), nle_media::threads::budget().ffmpeg_threads().to_string()]);
         }
         if ten && self.preset.codec() == ExportCodec::Hevc && (self.preset.is_nvenc() || self.preset.is_amf()) {
             a.extend(["-profile:v", "main10"].map(String::from));
@@ -941,7 +980,7 @@ pub fn run_export(
     }
     let args = output.ffmpeg_args(Platform::current(), wav.as_deref());
     log::info!("export: ffmpeg {}", args.join(" "));
-    let mut child = ffmpeg_cli::command(&ffmpeg_cli::ffmpeg_path()).args(&args).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn()?;
+    let mut child = ffmpeg_cli::spawn_confined(ffmpeg_cli::command(&ffmpeg_cli::ffmpeg_path()).args(&args).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped()))?;
     let mut stdin = child.stdin.take().ok_or_else(|| ExportError::Encoder("no stdin".into()))?;
 
     let mut renderer = Renderer::new(gpu, w, h);
@@ -1070,6 +1109,7 @@ mod tests {
         s.audio = AudioExport::Pcm;
         let a = s.ffmpeg_args(Platform::Windows, Some(Path::new("a.wav"))).join(" ");
         assert!(a.contains("-c:v libx264") && a.contains("-crf 18") && a.contains("pcm_s24le"));
+        assert!(a.contains(&format!("-threads {}", nle_media::threads::budget().ffmpeg_threads())), "{a}");
         assert!(!ExportPreset::H264Vaapi.supported_on(Platform::Windows));
     }
 
@@ -1087,12 +1127,20 @@ mod tests {
     #[test]
     fn nvenc_and_amf_args() {
         let a = settings(ExportPreset::HevcNvenc, RateControl::Quality(24)).ffmpeg_args(Platform::Windows, None).join(" ");
-        assert!(a.contains("-c:v hevc_nvenc -preset p5 -rc vbr -cq 24 -b:v 0") && a.contains("-tag:v hvc1"), "{a}");
+        assert!(a.contains("-c:v hevc_nvenc -preset p5 -tune hq -rc vbr -cq 24 -b:v 0 -spatial-aq 1 -rc-lookahead 20") && a.contains("-tag:v hvc1"), "{a}");
         assert!(!a.contains("hwupload") && !a.contains("init_hw_device"));
         let a = settings(ExportPreset::Av1Nvenc, RateControl::Bitrate(25_000)).ffmpeg_args(Platform::Windows, None).join(" ");
         assert!(a.contains("-c:v av1_nvenc") && a.contains("-b:v 25000k -maxrate 37500k -bufsize 50000k"), "{a}");
         let a = settings(ExportPreset::H264Amf, RateControl::Quality(22)).ffmpeg_args(Platform::Windows, None).join(" ");
-        assert!(a.contains("-c:v h264_amf -quality quality -rc cqp -qp_i 22 -qp_p 22"), "{a}");
+        assert!(a.contains("-c:v h264_amf -quality quality -rc cqp -qp_i 22 -qp_p 22 -qp_b 22"), "{a}");
+        let a = settings(ExportPreset::HevcAmf, RateControl::Quality(24)).ffmpeg_args(Platform::Windows, None).join(" ");
+        assert!(a.contains("-qp_i 24 -qp_p 24") && !a.contains("qp_b"), "hevc_amf has no -qp_b: {a}");
+        // AV1 scales: 28 of 51 -> NVENC cq 35 of 63, AMF qp 140 of 255
+        let a = settings(ExportPreset::Av1Nvenc, RateControl::Quality(28)).ffmpeg_args(Platform::Windows, None).join(" ");
+        assert!(a.contains("-cq 35 "), "{a}");
+        let a = settings(ExportPreset::Av1Amf, RateControl::Quality(28)).ffmpeg_args(Platform::Windows, None).join(" ");
+        assert!(a.contains("-qp_i 140 -qp_p 140 -qp_b 140"), "{a}");
+        assert_eq!((quality_on_scale(51, 255), quality_on_scale(1, 63), quality_on_scale(22, 51)), (255, 1, 22));
         let mut s = settings(ExportPreset::HevcAmf, RateControl::Bitrate(8_000));
         s.size_capped = true;
         let a = s.ffmpeg_args(Platform::Windows, None).join(" ");

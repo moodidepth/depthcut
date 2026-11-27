@@ -2753,6 +2753,7 @@ dependencies = [
  "tokio",
  "vst3",
  "whisper-rs",
+ "windows-sys 0.59.0",
  "zip",
 ]
 

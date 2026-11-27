@@ -1,12 +1,15 @@
 //! Background proxy-media transcoder.
 //!
 //! Proxies are half-resolution (max 1080p, typically 960×540 for HD and
-//! 1920×1080 for 4K) H.264 files encoded on the Arc's media engine
-//! (`h264_qsv` / `h264_vaapi`) with a `libx264` fallback. Jobs run on the
-//! 12-thread media pool and report progress via `-progress pipe:1`.
+//! 1920×1080 for 4K) H.264 files encoded on the GPU's media engine: the
+//! render GPU's encoder first (`h264_nvenc`, `h264_amf` or `h264_qsv`), then
+//! the other vendors', `h264_vaapi` on Linux, and `libx264` last. On Windows
+//! the source is decoded through D3D11VA. Jobs run on the media pool (worker
+//! cores only) and report progress via `-progress pipe:1`.
 
+use crate::encoder_probe::{self, EncoderBackend};
 use crate::ffmpeg_cli;
-use crate::hwaccel::{self, Platform};
+use crate::hwaccel::{self, GpuVendor, Platform};
 use crate::MediaError;
 use nle_core::{AssetId, MediaAsset};
 use parking_lot::Mutex;
@@ -24,19 +27,54 @@ pub enum ProxyStatus {
     Failed(String),
 }
 
-/// Encoder choices for proxies, best first.
-pub fn proxy_encoder_args(platform: Platform, caps: &hwaccel::HwCaps) -> Vec<(String, Vec<String>, Vec<String>)> {
-    let mut v = Vec::new();
+/// Encoder choices for proxies, best first: (encoder, input-side args, output args).
+/// `vendor` is the render GPU's; its encoder goes first.
+pub fn proxy_encoder_args(platform: Platform, caps: &hwaccel::HwCaps, vendor: GpuVendor) -> Vec<(String, Vec<String>, Vec<String>)> {
+    // Windows: decode the source on the GPU too (FFmpeg falls back to
+    // software when it can't); frames come back to system memory for scaling
+    let d3d = |extra: &[&str]| -> Vec<String> {
+        if platform == Platform::Windows && caps.has_hwaccel("d3d11va") {
+            let mut a: Vec<String> = ["-hwaccel", "d3d11va"].map(String::from).to_vec();
+            a.extend(extra.iter().map(|s| s.to_string()));
+            a
+        } else {
+            Vec::new()
+        }
+    };
+    let mut hw: Vec<(EncoderBackend, String, Vec<String>, Vec<String>)> = Vec::new();
     if caps.has_encoder("h264_qsv") {
         let mut pre = hwaccel::qsv_device_args(platform);
         pre.extend(["-filter_hw_device".into(), "hw".into()]);
-        v.push(("h264_qsv".into(), pre, ["-c:v", "h264_qsv", "-preset", "veryfast", "-global_quality", "26", "-look_ahead", "0"].map(String::from).to_vec()));
+        // decode on the same Intel device the encoder uses
+        pre.extend(d3d(&["-hwaccel_device", "dx"]));
+        hw.push((EncoderBackend::Qsv, "h264_qsv".into(), pre, ["-c:v", "h264_qsv", "-preset", "veryfast", "-global_quality", "26", "-look_ahead", "0"].map(String::from).to_vec()));
     }
-    if platform == Platform::Linux && caps.has_encoder("h264_vaapi") {
+    if caps.has_encoder("h264_nvenc") {
+        hw.push((EncoderBackend::Nvenc, "h264_nvenc".into(), d3d(&[]), ["-c:v", "h264_nvenc", "-preset", "p2", "-rc", "vbr", "-cq", "26", "-b:v", "0"].map(String::from).to_vec()));
+    }
+    if caps.has_encoder("h264_amf") {
+        hw.push((
+            EncoderBackend::Amf,
+            "h264_amf".into(),
+            d3d(&[]),
+            ["-c:v", "h264_amf", "-quality", "speed", "-rc", "cqp", "-qp_i", "24", "-qp_p", "26", "-qp_b", "28"].map(String::from).to_vec(),
+        ));
+    }
+    let prefer = encoder_probe::backend_for(vendor);
+    hw.sort_by_key(|(b, ..)| Some(*b) != prefer);
+    let mut v: Vec<(String, Vec<String>, Vec<String>)> = hw.into_iter().map(|(_, n, p, a)| (n, p, a)).collect();
+    if platform == Platform::Linux && vendor != GpuVendor::Nvidia && caps.has_encoder("h264_vaapi") {
         v.push(("h264_vaapi".into(), ["-vaapi_device", "/dev/dri/renderD128"].map(String::from).to_vec(), ["-c:v", "h264_vaapi", "-qp", "26"].map(String::from).to_vec()));
     }
-    v.push(("libx264".into(), Vec::new(), ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-threads", "8"].map(String::from).to_vec()));
+    let threads = crate::threads::budget().ffmpeg_threads().to_string();
+    v.push(("libx264".into(), d3d(&[]), ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-threads", &threads].map(String::from).to_vec()));
     v
+}
+
+/// Whether the start-up encoder probe ruled `encoder` out (unknown = keep).
+fn probe_rejects(encoder: &str) -> bool {
+    let probed = encoder_probe::CANDIDATES.iter().any(|(n, _)| *n == encoder);
+    probed && encoder_probe::result().is_some_and(|p| !p.works(encoder))
 }
 
 /// Target proxy dimensions (half size, max 1920×1080, even).
@@ -108,12 +146,13 @@ pub fn transcode(asset: &MediaAsset, out_dir: &Path, mut progress: impl FnMut(f3
     let total = asset.duration.as_secs_f64().max(0.001);
     let platform = Platform::current();
     let mut last_err = String::new();
-    for (enc, pre, args) in proxy_encoder_args(platform, hwaccel::probe_caps()) {
+    for (enc, pre, args) in proxy_encoder_args(platform, hwaccel::probe_caps(), hwaccel::render_vendor()).into_iter().filter(|(e, ..)| !probe_rejects(e)) {
         // proxies are progressive: interlaced sources are deinterlaced first
         let di = asset.deinterlace_fields().map(|f| format!("{},", crate::decode::deinterlace_filter(f))).unwrap_or_default();
         let vf = match enc.as_str() {
             "h264_qsv" => format!("{di}scale={pw}:{ph},format=nv12,{}", hwaccel::qsv_upload_filter(platform)),
             "h264_vaapi" => format!("{di}scale={pw}:{ph},format=nv12,hwupload"),
+            "h264_nvenc" | "h264_amf" => format!("{di}scale={pw}:{ph},format=nv12"),
             _ => format!("{di}scale={pw}:{ph}"),
         };
         let mut cmd = ffmpeg_cli::command(&ffmpeg_cli::ffmpeg_path());
@@ -125,7 +164,7 @@ pub fn transcode(asset: &MediaAsset, out_dir: &Path, mut progress: impl FnMut(f3
         cmd.args(["-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", "-progress", "pipe:1"]);
         cmd.arg(&out);
         cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-        let mut child = match cmd.spawn() {
+        let mut child = match ffmpeg_cli::spawn_confined(&mut cmd) {
             Ok(c) => c,
             Err(e) => {
                 last_err = e.to_string();
@@ -166,10 +205,16 @@ mod tests {
 
     #[test]
     fn encoder_preference() {
-        let caps = hwaccel::HwCaps::assume_full(Platform::Linux);
-        let encs: Vec<String> = proxy_encoder_args(Platform::Linux, &caps).into_iter().map(|e| e.0).collect();
-        assert_eq!(encs, vec!["h264_qsv", "h264_vaapi", "libx264"]);
-        let encs: Vec<String> = proxy_encoder_args(Platform::Windows, &hwaccel::HwCaps::default()).into_iter().map(|e| e.0).collect();
-        assert_eq!(encs, vec!["libx264"]);
+        let names = |platform, caps: &hwaccel::HwCaps, vendor| proxy_encoder_args(platform, caps, vendor).into_iter().map(|e| e.0).collect::<Vec<_>>();
+        let linux = hwaccel::HwCaps::assume_full(Platform::Linux);
+        assert_eq!(names(Platform::Linux, &linux, GpuVendor::Intel), ["h264_qsv", "h264_nvenc", "h264_amf", "h264_vaapi", "libx264"]);
+        assert_eq!(names(Platform::Linux, &linux, GpuVendor::Nvidia), ["h264_nvenc", "h264_qsv", "h264_amf", "libx264"]);
+        let windows = hwaccel::HwCaps::assume_full(Platform::Windows);
+        assert_eq!(names(Platform::Windows, &windows, GpuVendor::Amd), ["h264_amf", "h264_qsv", "h264_nvenc", "libx264"]);
+        assert_eq!(names(Platform::Windows, &hwaccel::HwCaps::default(), GpuVendor::Other), ["libx264"]);
+        // Windows decodes the source with D3D11VA; QSV reuses its Intel device
+        let args = proxy_encoder_args(Platform::Windows, &windows, GpuVendor::Nvidia);
+        assert_eq!(args[0].1, ["-hwaccel", "d3d11va"]);
+        assert!(args.iter().find(|a| a.0 == "h264_qsv").is_some_and(|a| a.1.join(" ").ends_with("-hwaccel d3d11va -hwaccel_device dx")));
     }
 }

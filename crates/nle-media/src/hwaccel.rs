@@ -1,10 +1,16 @@
-//! Hardware-acceleration planning for the Intel Arc A750.
+//! Hardware-acceleration planning for Intel, NVIDIA and AMD GPUs.
 //!
-//! Decode priority: D3D11VA on Windows; Intel Quick Sync (`qsv`, child device
-//! derived from VA-API `iHD`) then VA-API on Linux; then multi-threaded
-//! software decode. The Arc A750 (DG2,
-//! Alchemist) decodes H.264, HEVC Main/Main10 (8/10-bit), VP9 and AV1 in
-//! hardware and has two media engines for AV1/HEVC/H.264 encode.
+//! Decode priority:
+//! - Windows: D3D11VA, which drives the media engine of any vendor's GPU
+//!   (Intel, NVIDIA NVDEC, AMD VCN); FFmpeg falls back to software by itself
+//!   when the GPU can't decode a profile.
+//! - Linux: Intel Quick Sync (`qsv`, child device derived from VA-API `iHD`)
+//!   then VA-API on Intel; VA-API on AMD; CUDA (NVDEC) on NVIDIA.
+//! - Then multi-threaded software decode on the worker cores.
+//!
+//! The GPU is the one the UI renders on (see [`set_render_gpu`]). Developed
+//! on an Intel Arc A750; the NVIDIA and AMD paths follow FFmpeg's
+//! documentation and have not been run on those GPUs yet.
 
 use crate::ffmpeg_cli;
 use std::collections::BTreeSet;
@@ -34,6 +40,8 @@ pub enum HwBackend {
     Qsv,
     Vaapi,
     D3d11va,
+    /// NVIDIA NVDEC through FFmpeg's CUDA hwaccel (Linux).
+    Cuda,
     Software,
 }
 
@@ -43,6 +51,7 @@ impl HwBackend {
             HwBackend::Qsv => "Intel Quick Sync",
             HwBackend::Vaapi => "VA-API",
             HwBackend::D3d11va => "D3D11VA",
+            HwBackend::Cuda => "NVIDIA CUDA",
             HwBackend::Software => "Software",
         }
     }
@@ -120,6 +129,64 @@ impl VideoCodec {
     }
 }
 
+/// GPU maker, from the PCI vendor id.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum GpuVendor {
+    Intel,
+    Nvidia,
+    Amd,
+    #[default]
+    Other,
+}
+
+impl GpuVendor {
+    pub fn from_pci_id(id: u32) -> Self {
+        match id {
+            0x8086 => GpuVendor::Intel,
+            0x10DE => GpuVendor::Nvidia,
+            0x1002 | 0x1022 => GpuVendor::Amd,
+            _ => GpuVendor::Other,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            GpuVendor::Intel => "Intel",
+            GpuVendor::Nvidia => "NVIDIA",
+            GpuVendor::Amd => "AMD",
+            GpuVendor::Other => "unknown",
+        }
+    }
+}
+
+/// The GPU the UI renders on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RenderGpu {
+    pub vendor: GpuVendor,
+    pub vendor_id: u32,
+    pub name: String,
+}
+
+static RENDER_GPU: OnceLock<RenderGpu> = OnceLock::new();
+
+/// Record the render adapter (wgpu `AdapterInfo::vendor` / `name`). Call once
+/// at start-up, before the encoder probe and the first decode; later calls
+/// are ignored.
+pub fn set_render_gpu(vendor_id: u32, name: &str) {
+    let gpu = RenderGpu { vendor: GpuVendor::from_pci_id(vendor_id), vendor_id, name: name.trim().to_string() };
+    log::info!("render GPU: {} ({}, vendor id 0x{vendor_id:04X})", gpu.name, gpu.vendor.label());
+    let _ = RENDER_GPU.set(gpu);
+}
+
+pub fn render_gpu() -> Option<&'static RenderGpu> {
+    RENDER_GPU.get()
+}
+
+/// Vendor of the render GPU (`Other` before [`set_render_gpu`]).
+pub fn render_vendor() -> GpuVendor {
+    render_gpu().map(|g| g.vendor).unwrap_or_default()
+}
+
 /// Fixed-function media capabilities of a GPU.
 #[derive(Clone, Debug)]
 pub struct GpuProfile {
@@ -139,10 +206,40 @@ pub const INTEL_ARC_A750: GpuProfile = GpuProfile {
     media_engines: 2,
 };
 
+/// Codecs current GPUs of every vendor decode. Older GPUs lack some (AV1
+/// before RTX 30 / RX 6000 / Arc); D3D11VA, VA-API and CUDA then fail to set
+/// up and FFmpeg decodes that file in software.
+const MODERN_DECODE: &[(VideoCodec, u8)] = &[(VideoCodec::H264, 8), (VideoCodec::Hevc, 12), (VideoCodec::Av1, 12), (VideoCodec::Vp9, 12), (VideoCodec::Mpeg2, 8)];
+
+pub const INTEL_GPU: GpuProfile = GpuProfile { name: "Intel GPU", vendor_id: 0x8086, vram_mb: 0, decode: MODERN_DECODE, media_engines: 1 };
+pub const NVIDIA_GPU: GpuProfile = GpuProfile { name: "NVIDIA GPU", vendor_id: 0x10DE, vram_mb: 0, decode: MODERN_DECODE, media_engines: 1 };
+pub const AMD_GPU: GpuProfile = GpuProfile { name: "AMD GPU", vendor_id: 0x1002, vram_mb: 0, decode: MODERN_DECODE, media_engines: 1 };
+pub const OTHER_GPU: GpuProfile = GpuProfile { name: "GPU", vendor_id: 0, vram_mb: 0, decode: MODERN_DECODE, media_engines: 1 };
+
 impl GpuProfile {
     pub fn can_decode(&self, codec: VideoCodec, bit_depth: u8) -> bool {
         self.decode.iter().any(|(c, d)| *c == codec && bit_depth <= *d)
     }
+
+    pub fn vendor(&self) -> GpuVendor {
+        GpuVendor::from_pci_id(self.vendor_id)
+    }
+
+    /// Profile for a GPU by PCI vendor id and adapter name.
+    pub fn for_gpu(vendor_id: u32, name: &str) -> &'static GpuProfile {
+        match GpuVendor::from_pci_id(vendor_id) {
+            GpuVendor::Intel if name.to_ascii_lowercase().contains("a750") => &INTEL_ARC_A750,
+            GpuVendor::Intel => &INTEL_GPU,
+            GpuVendor::Nvidia => &NVIDIA_GPU,
+            GpuVendor::Amd => &AMD_GPU,
+            GpuVendor::Other => &OTHER_GPU,
+        }
+    }
+}
+
+/// Profile of the render GPU ([`OTHER_GPU`] before [`set_render_gpu`]).
+pub fn active_gpu() -> &'static GpuProfile {
+    render_gpu().map_or(&OTHER_GPU, |g| GpuProfile::for_gpu(g.vendor_id, &g.name))
 }
 
 /// What the installed FFmpeg build + driver can actually do.
@@ -169,6 +266,7 @@ impl HwCaps {
     pub fn assume_full(platform: Platform) -> Self {
         let mut c = HwCaps::default();
         c.hwaccels.insert("qsv".into());
+        c.hwaccels.insert("cuda".into());
         match platform {
             Platform::Windows => {
                 c.hwaccels.insert("d3d11va".into());
@@ -177,7 +275,7 @@ impl HwCaps {
                 c.hwaccels.insert("vaapi".into());
             }
         }
-        for e in ["av1_qsv", "hevc_qsv", "h264_qsv", "h264_vaapi", "hevc_vaapi", "libx264", "libx265", "aac"] {
+        for e in ["av1_qsv", "hevc_qsv", "h264_qsv", "h264_nvenc", "h264_amf", "h264_vaapi", "hevc_vaapi", "libx264", "libx265", "aac"] {
             c.encoders.insert(e.into());
         }
         for d in ["h264_qsv", "hevc_qsv", "av1_qsv", "vp9_qsv", "mpeg2_qsv"] {
@@ -281,6 +379,9 @@ pub struct DecoderPlan {
 /// H.264 4:2:2 fails with "Error querying IO surface"), and 4:4:4 never does
 /// (untested). D3D11VA / VA-API stay in the list: FFmpeg itself falls back to
 /// software there when the GPU can't decode the profile.
+///
+/// Vendors: QSV only on Intel. Linux VA-API on Intel (`iHD`), AMD (Mesa,
+/// picked by libva) and unknown GPUs; CUDA (NVDEC) on NVIDIA.
 pub fn plan_decode(codec: VideoCodec, bit_depth: u8, chroma: Chroma, platform: Platform, caps: &HwCaps, gpu: &GpuProfile) -> Vec<DecoderPlan> {
     let mut plans = Vec::new();
     let hw_ok = gpu.can_decode(codec, bit_depth);
@@ -290,7 +391,8 @@ pub fn plan_decode(codec: VideoCodec, bit_depth: u8, chroma: Chroma, platform: P
         Chroma::Yuv444 => false,
     };
     if hw_ok {
-        if let Some(dec) = codec.qsv_decoder().filter(|_| qsv_chroma_ok && platform != Platform::Windows) {
+        let vendor = gpu.vendor();
+        if let Some(dec) = codec.qsv_decoder().filter(|_| qsv_chroma_ok && platform != Platform::Windows && vendor == GpuVendor::Intel) {
             if caps.has_hwaccel("qsv") && (caps.decoders.is_empty() || caps.has_decoder(dec)) {
                 let mut args = qsv_device_args(platform);
                 args.extend(["-hwaccel", "qsv", "-hwaccel_device", "hw", "-c:v", dec].map(String::from));
@@ -303,22 +405,30 @@ pub fn plan_decode(codec: VideoCodec, bit_depth: u8, chroma: Chroma, platform: P
             }
         }
         match platform {
-            Platform::Linux if caps.has_hwaccel("vaapi") => plans.push(DecoderPlan {
+            // no output format: frames come back to system memory, and FFmpeg
+            // decodes in software when NVDEC can't take the stream
+            Platform::Linux if vendor == GpuVendor::Nvidia && caps.has_hwaccel("cuda") => plans.push(DecoderPlan {
+                backend: HwBackend::Cuda,
+                decoder: None,
+                input_args: ["-hwaccel", "cuda"].map(String::from).to_vec(),
+                reason: format!("CUDA (NVDEC) hwaccel on {}", gpu.name),
+            }),
+            Platform::Linux if vendor != GpuVendor::Nvidia && caps.has_hwaccel("vaapi") => plans.push(DecoderPlan {
                 backend: HwBackend::Vaapi,
                 decoder: None,
                 input_args: ["-hwaccel", "vaapi", "-hwaccel_device", "/dev/dri/renderD128"].map(String::from).to_vec(),
-                reason: "VA-API (iHD) hwaccel".into(),
+                reason: format!("VA-API hwaccel on {}", gpu.name),
             }),
             Platform::Windows if caps.has_hwaccel("d3d11va") => plans.push(DecoderPlan {
                 backend: HwBackend::D3d11va,
                 decoder: None,
                 input_args: ["-hwaccel", "d3d11va"].map(String::from).to_vec(),
-                reason: "D3D11VA hwaccel".into(),
+                reason: format!("D3D11VA hwaccel on {}", gpu.name),
             }),
             _ => {}
         }
     }
-    let threads = crate::threads::MAX_MEDIA_WORKERS.to_string();
+    let threads = crate::threads::budget().ffmpeg_threads().to_string();
     plans.push(DecoderPlan {
         backend: HwBackend::Software,
         decoder: None,
@@ -373,6 +483,35 @@ mod tests {
         assert_eq!(Chroma::Yuv422.hw_download_format(10), "y210le");
         assert_eq!(Chroma::Yuv422.hw_download_format(8), "yuyv422");
         assert_eq!(Chroma::Yuv420.hw_download_format(10), "p010le");
+    }
+
+    #[test]
+    fn plans_follow_the_gpu_vendor() {
+        let backends = |platform, gpu: &GpuProfile| {
+            plan_decode(VideoCodec::Hevc, 10, Chroma::Yuv420, platform, &HwCaps::assume_full(platform), gpu).iter().map(|p| p.backend).collect::<Vec<_>>()
+        };
+        // Windows: D3D11VA for every vendor
+        for gpu in [&INTEL_GPU, &NVIDIA_GPU, &AMD_GPU, &OTHER_GPU] {
+            assert_eq!(backends(Platform::Windows, gpu), [HwBackend::D3d11va, HwBackend::Software], "{}", gpu.name);
+        }
+        // Linux: QSV is Intel-only; NVIDIA uses CUDA, AMD VA-API
+        assert_eq!(backends(Platform::Linux, &INTEL_GPU), [HwBackend::Qsv, HwBackend::Vaapi, HwBackend::Software]);
+        assert_eq!(backends(Platform::Linux, &NVIDIA_GPU), [HwBackend::Cuda, HwBackend::Software]);
+        assert_eq!(backends(Platform::Linux, &AMD_GPU), [HwBackend::Vaapi, HwBackend::Software]);
+        let mut no_cuda = HwCaps::assume_full(Platform::Linux);
+        no_cuda.hwaccels.remove("cuda");
+        let plans = plan_decode(VideoCodec::H264, 8, Chroma::Yuv420, Platform::Linux, &no_cuda, &NVIDIA_GPU);
+        assert_eq!(plans.iter().map(|p| p.backend).collect::<Vec<_>>(), [HwBackend::Software]);
+    }
+
+    #[test]
+    fn vendor_ids() {
+        assert_eq!(GpuVendor::from_pci_id(0x10DE), GpuVendor::Nvidia);
+        assert_eq!(GpuVendor::from_pci_id(0x1002), GpuVendor::Amd);
+        assert_eq!(GpuVendor::from_pci_id(0x8086), GpuVendor::Intel);
+        assert_eq!(GpuVendor::from_pci_id(0x5143), GpuVendor::Other);
+        assert_eq!(GpuProfile::for_gpu(0x8086, "Intel(R) Arc(TM) A750 Graphics").name, INTEL_ARC_A750.name);
+        assert_eq!(GpuProfile::for_gpu(0x10DE, "NVIDIA GeForce RTX 4070").vendor(), GpuVendor::Nvidia);
     }
 
     #[test]

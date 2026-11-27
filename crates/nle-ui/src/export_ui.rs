@@ -1,5 +1,6 @@
 //! Share / Export dialog: AV1 / HEVC / H.264 on whichever hardware encoder
-//! the startup probe found working (QSV → NVENC → AMF), or software x264,
+//! the startup probe found working (the render GPU's own encoder first:
+//! NVENC on NVIDIA, AMF on AMD, Quick Sync on Intel), or software x264,
 //! plus mastering formats (ProRes, DNxHR, PNG / TIFF / EXR sequences).
 //! Rendering runs on a worker thread on the shared GPU. Jobs can be queued
 //! (each with a snapshot of the project) and rendered one after another.

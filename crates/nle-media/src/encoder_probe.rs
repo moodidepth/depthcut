@@ -2,14 +2,16 @@
 //!
 //! `ffmpeg -encoders` only lists what the build was *compiled* with — an
 //! Intel machine still lists `h264_nvenc`. This module runs a tiny real
-//! encode per candidate, in priority order (Intel QSV → NVIDIA NVENC → AMD
-//! AMF → `libx264` / `libx265`), once, on a background thread, so the export dialog can
+//! encode per candidate, once, on a background thread. The render GPU's own
+//! encoder goes first (NVENC on an NVIDIA card, AMF on AMD, Quick Sync on
+//! Intel), then the other vendors' (a laptop's integrated GPU), then
+//! `libx264` / `libx265`, so the export dialog can
 //! pre-select the fastest encoder that actually works and never blocks the
 //! UI. Any failure (no FFmpeg, driver missing, timeout) degrades to the next
 //! candidate and finally to an empty, CPU-only result — never a panic.
 
 use crate::ffmpeg_cli;
-use crate::hwaccel::{self, HwCaps, Platform};
+use crate::hwaccel::{self, GpuVendor, HwCaps, Platform};
 use std::process::Stdio;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -76,11 +78,33 @@ impl EncoderProbe {
     }
 }
 
+/// Hardware encoder family of a GPU vendor.
+pub fn backend_for(vendor: GpuVendor) -> Option<EncoderBackend> {
+    match vendor {
+        GpuVendor::Intel => Some(EncoderBackend::Qsv),
+        GpuVendor::Nvidia => Some(EncoderBackend::Nvenc),
+        GpuVendor::Amd => Some(EncoderBackend::Amf),
+        GpuVendor::Other => None,
+    }
+}
+
+/// Candidates with `prefer`'s encoders moved to the front (stable otherwise).
+pub fn candidates(prefer: Option<EncoderBackend>) -> Vec<(&'static str, EncoderBackend)> {
+    let mut list = CANDIDATES.to_vec();
+    list.sort_by_key(|(_, b)| Some(*b) != prefer);
+    list
+}
+
 /// Run `test` over every candidate the FFmpeg build lists (an empty
-/// `listed` set means "unknown — try everything").
+/// `listed` set means "unknown — try everything"), in the default order.
 pub fn probe_with(listed: &HwCaps, test: impl Fn(&str, EncoderBackend) -> bool) -> EncoderProbe {
+    probe_preferring(listed, None, test)
+}
+
+/// [`probe_with`], trying `prefer`'s encoders first.
+pub fn probe_preferring(listed: &HwCaps, prefer: Option<EncoderBackend>, test: impl Fn(&str, EncoderBackend) -> bool) -> EncoderProbe {
     let encoders: Vec<(&'static str, EncoderBackend)> =
-        CANDIDATES.into_iter().filter(|(name, backend)| (listed.encoders.is_empty() || listed.has_encoder(name)) && test(name, *backend)).collect();
+        candidates(prefer).into_iter().filter(|(name, backend)| (listed.encoders.is_empty() || listed.has_encoder(name)) && test(name, *backend)).collect();
     EncoderProbe { backend: encoders.first().map_or(EncoderBackend::Cpu, |(_, b)| *b), encoders: encoders.into_iter().map(|(n, _)| n).collect() }
 }
 
@@ -134,7 +158,8 @@ pub fn probe_blocking() -> &'static EncoderProbe {
             return EncoderProbe::default();
         }
         let started = Instant::now();
-        let probe = probe_with(hwaccel::probe_caps(), |name, backend| test_encoder(name, backend, Duration::from_secs(20)));
+        let prefer = backend_for(hwaccel::render_vendor());
+        let probe = probe_preferring(hwaccel::probe_caps(), prefer, |name, backend| test_encoder(name, backend, Duration::from_secs(20)));
         log::info!("encoder probe: {} — {:?} ({} ms)", probe.backend.label(), probe.encoders, started.elapsed().as_millis());
         probe
     })
@@ -182,6 +207,20 @@ mod tests {
 
         let amd = probe_with(&HwCaps::default(), |n, _| n.ends_with("_amf") && n != "av1_amf");
         assert_eq!((amd.backend, amd.best()), (EncoderBackend::Amf, Some("hevc_amf")));
+    }
+
+    #[test]
+    fn render_gpu_vendor_goes_first() {
+        // NVIDIA card in a machine whose Intel iGPU also encodes
+        let both = |_: &str, b| matches!(b, EncoderBackend::Qsv | EncoderBackend::Nvenc | EncoderBackend::Cpu);
+        let p = probe_preferring(&HwCaps::default(), backend_for(GpuVendor::Nvidia), both);
+        assert_eq!(p.backend, EncoderBackend::Nvenc);
+        assert_eq!(p.encoders, ["av1_nvenc", "hevc_nvenc", "h264_nvenc", "av1_qsv", "hevc_qsv", "h264_qsv", "libx264", "libx265"]);
+        let p = probe_preferring(&HwCaps::default(), backend_for(GpuVendor::Amd), |_, _| true);
+        assert_eq!(p.encoders[..3], ["av1_amf", "hevc_amf", "h264_amf"]);
+        assert_eq!(p.encoders[3], "av1_qsv");
+        // unknown vendor: default order
+        assert_eq!(probe_preferring(&HwCaps::default(), backend_for(GpuVendor::Other), |_, _| true).best(), Some("av1_qsv"));
     }
 
     #[test]

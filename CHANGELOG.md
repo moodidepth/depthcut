@@ -3,6 +3,30 @@
 All notable changes to Depthcut. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### NVIDIA and AMD GPUs
+- Export and proxies use the hardware encoder of the GPU Depthcut renders on: **NVENC** on
+  NVIDIA, **AMF** on AMD, **Quick Sync** on Intel. The other vendors' working encoders are still
+  listed (for example on a laptop with two GPUs). Software x264 remains the fallback.
+- NVENC exports use `-tune hq`, spatial AQ and a 20-frame lookahead. AV1 quality maps onto
+  NVENC's 0–63 `-cq` scale and AMF's 0–255 QP scale. H.264 and AV1 on AMF also set the
+  B-frame QP.
+- Linux: CUDA (NVDEC) decode on NVIDIA, and VA-API decode on AMD without forcing Intel's
+  `iHD` driver. Windows decoding stays on D3D11VA for every vendor.
+- The GPU picker prefers any discrete GPU (NVIDIA, AMD or Intel Arc) over an integrated one.
+- Tested on Windows 11 with a Ryzen 7 7800X3D + RTX 3080 and a Ryzen 7 5700X + RX 7800 XT, as
+  well as the Ryzen 7 5800X + Arc A750 development machine. Linux CUDA / AMD VA-API decode is not
+  hardware-tested yet. The start-up probe hides any encoder that fails.
+
+### CPU cores on any processor
+- The worker pool now comes from the real core topology instead of a fixed "12 workers, 4 free"
+  rule. Whole fast cores are kept free for the UI, audio and GPU driver: 1 on 2–4-core CPUs, 2 on
+  5–16, 3 on 17+. On Intel hybrid CPUs these are P-cores. The Ryzen 7 5800X keeps its old split
+  (12 workers on CPUs 4–15).
+- FFmpeg processes (decode, proxies, export, audio) run only on the worker CPUs. x264, x265,
+  Whisper and ONNX thread counts follow the same budget.
+
 ## [0.1.0] — 2026-11-27
 
 First public build. Windows 10/11 x64 only; Linux is experimental (build from source); macOS is

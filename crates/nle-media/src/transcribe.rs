@@ -72,9 +72,10 @@ impl TranscribeOptions {
     }
 }
 
-/// Every hardware thread, at least one (`n_threads = 0` makes whisper.cpp fail).
+/// One thread per worker CPU, so the cores kept free for the UI, audio and
+/// GPU driver stay free; at least one (`n_threads = 0` makes whisper.cpp fail).
 pub fn cpu_threads() -> usize {
-    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).max(1)
+    crate::threads::budget().workers.max(1)
 }
 
 /// Whether this build can transcribe at all.

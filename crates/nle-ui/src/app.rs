@@ -317,8 +317,13 @@ pub fn drag_key(tag: u64, id: ClipId) -> u64 {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        // Detect working hardware encoders off the UI thread; the export
-        // dialog reads the cached result.
+        // Media work follows the render GPU's vendor (NVENC / AMF / Quick Sync
+        // first, its decoder). Then detect working hardware encoders off the
+        // UI thread; the export dialog reads the cached result.
+        if let Some(rs) = cc.wgpu_render_state.as_ref() {
+            let info = rs.adapter.get_info();
+            nle_media::hwaccel::set_render_gpu(info.vendor, &info.name);
+        }
         nle_media::encoder_probe::start_background_probe();
         theme::apply(&cc.egui_ctx);
         theme::install_fonts(&cc.egui_ctx);

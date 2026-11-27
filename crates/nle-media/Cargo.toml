@@ -1,6 +1,6 @@
 [package]
 name = "nle-media"
-description = "Media I/O for Depthcut: hardware-accelerated decode (QSV/VA-API/D3D11VA), frame queues, proxies, audio DSP and playback"
+description = "Media I/O for Depthcut: hardware-accelerated decode (D3D11VA/QSV/VA-API/CUDA), frame queues, proxies, audio DSP and playback"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -47,3 +47,7 @@ whisper-rs = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
 zip = { workspace = true, optional = true }
 vst3 = "0.3"
+
+# CPU topology (P/E cores, SMT siblings) and process / thread affinity.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_SystemInformation", "Win32_System_Threading"] }

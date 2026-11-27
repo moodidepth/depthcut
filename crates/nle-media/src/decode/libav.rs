@@ -64,11 +64,18 @@ fn attach_hw_device(ctx: &mut ff::codec::Context) -> Option<HwBackend> {
     };
     unsafe {
         let mut opts: *mut ffi::AVDictionary = ptr::null_mut();
+        let gpu = crate::hwaccel::render_gpu();
         if cfg!(not(target_os = "windows")) {
-            // Intel Arc needs the iHD (intel-media-driver) VA-API driver
-            ffi::av_dict_set(&mut opts, c"driver".as_ptr(), c"iHD".as_ptr(), 0);
-        } else {
-            ffi::av_dict_set(&mut opts, c"vendor_id".as_ptr(), c"0x8086".as_ptr(), 0);
+            // Intel needs the iHD (intel-media-driver) VA-API driver; libva
+            // picks Mesa's driver for AMD by itself
+            if gpu.is_none_or(|g| g.vendor == crate::hwaccel::GpuVendor::Intel) {
+                ffi::av_dict_set(&mut opts, c"driver".as_ptr(), c"iHD".as_ptr(), 0);
+            }
+        } else if let Some(g) = gpu.filter(|g| g.vendor_id != 0) {
+            // decode on the render GPU; without one D3D11 takes the default adapter
+            if let Ok(id) = std::ffi::CString::new(format!("0x{:04x}", g.vendor_id)) {
+                ffi::av_dict_set(&mut opts, c"vendor_id".as_ptr(), id.as_ptr(), 0);
+            }
         }
         let mut hw: *mut ffi::AVBufferRef = ptr::null_mut();
         let rc = ffi::av_hwdevice_ctx_create(&mut hw, kind, dev.as_ref().map_or(ptr::null(), |d| d.as_ptr()), opts, 0);

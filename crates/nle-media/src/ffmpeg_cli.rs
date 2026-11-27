@@ -173,6 +173,20 @@ pub fn command(program: &std::path::Path) -> Command {
     c
 }
 
+/// Spawn a heavy FFmpeg job (decode, transcode, export) on the worker CPUs,
+/// off the cores kept free for the UI, audio and GPU driver.
+pub fn spawn_confined(cmd: &mut Command) -> std::io::Result<std::process::Child> {
+    let child = cmd.spawn()?;
+    crate::threads::confine_child(&child);
+    Ok(child)
+}
+
+/// [`Command::output`] for a heavy job, confined like [`spawn_confined`].
+/// Captures stdout and stderr; stdin is the null device.
+pub fn output_confined(cmd: &mut Command) -> std::io::Result<std::process::Output> {
+    spawn_confined(cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()))?.wait_with_output()
+}
+
 /// Run a tool and capture stdout (stderr discarded).
 pub fn run_capture(program: &std::path::Path, args: &[&str]) -> Option<String> {
     let out = command(program).args(args).stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;

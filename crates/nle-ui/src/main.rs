@@ -60,13 +60,13 @@ fn main() -> eframe::Result<()> {
     let budget = nle_media::threads::init_media_pool();
     #[cfg(feature = "neural-voice")]
     nle_ai::voice::register();
-    log::info!("media pool: {} workers, {} threads reserved for UI/audio ({} logical CPUs)", budget.workers, budget.reserved, budget.logical);
+    log::info!("media pool: {} workers, {} threads reserved for UI/audio ({} cores / {} logical CPUs)", budget.workers, budget.reserved, budget.physical_cores, budget.logical);
 
     let backends = nle_render::gpu::preferred_backends();
     let setup = egui_wgpu::WgpuSetupCreateNew {
         instance_descriptor: wgpu::InstanceDescriptor { backends, ..Default::default() },
         power_preference: wgpu::PowerPreference::HighPerformance,
-        // prefer the Intel Arc A750 when several adapters are present
+        // prefer a discrete GPU (NVIDIA, AMD or Intel Arc) over an integrated one
         native_adapter_selector: Some(Arc::new(|adapters: &[wgpu::Adapter], surface: Option<&wgpu::Surface<'_>>| {
             adapters
                 .iter()

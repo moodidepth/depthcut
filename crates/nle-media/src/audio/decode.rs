@@ -6,7 +6,6 @@ use crate::frame::AudioBuffer;
 use crate::probe;
 use crate::MediaError;
 use nle_core::MediaAsset;
-use std::process::Stdio;
 
 /// Decode all audio of `asset` and convert to 48 kHz stereo.
 pub fn decode_audio(asset: &MediaAsset) -> Result<AudioBuffer, MediaError> {
@@ -17,14 +16,17 @@ pub fn decode_audio(asset: &MediaAsset) -> Result<AudioBuffer, MediaError> {
     if !ffmpeg_cli::available() {
         return Err(MediaError::FfmpegMissing);
     }
-    let out = ffmpeg_cli::command(&ffmpeg_cli::ffmpeg_path())
-        .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"])
-        .arg(&asset.path)
-        .args(["-map", "0:a:0", "-vn", "-f", "f32le", "-acodec", "pcm_f32le", "pipe:1"])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .map_err(MediaError::Io)?;
+    let out = ffmpeg_cli::output_confined(ffmpeg_cli::command(&ffmpeg_cli::ffmpeg_path()).args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"]).arg(&asset.path).args([
+        "-map",
+        "0:a:0",
+        "-vn",
+        "-f",
+        "f32le",
+        "-acodec",
+        "pcm_f32le",
+        "pipe:1",
+    ]))
+    .map_err(MediaError::Io)?;
     if !out.status.success() && out.stdout.is_empty() {
         return Err(MediaError::Decode(format!("audio decode failed for {}", asset.path.display())));
     }

@@ -9,7 +9,6 @@ use nle_media::audio::StemTap;
 use nle_media::{ffmpeg_cli, AudioBuffer};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -179,7 +178,7 @@ fn encode(pcm: &[f32], out: &Path, codec: Option<&[String]>, id: &str) -> Result
     args.push(wav.to_string_lossy().into_owned());
     args.extend(codec.iter().cloned());
     args.push(out.to_string_lossy().into_owned());
-    let res = ffmpeg_cli::command(&ffmpeg_cli::ffmpeg_path()).args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).output();
+    let res = ffmpeg_cli::output_confined(ffmpeg_cli::command(&ffmpeg_cli::ffmpeg_path()).args(&args));
     let _ = std::fs::remove_file(&wav);
     let res = res?;
     if !res.status.success() {

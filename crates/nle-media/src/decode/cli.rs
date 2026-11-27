@@ -10,7 +10,7 @@
 use super::{deinterlace_for, preroll_frames, scaled_dims, DecodeOptions, VideoDecoder};
 use crate::ffmpeg_cli;
 use crate::frame::{PixelFormat, VideoFrame};
-use crate::hwaccel::{self, Chroma, DecoderPlan, HwBackend, Platform, VideoCodec, INTEL_ARC_A750};
+use crate::hwaccel::{self, Chroma, DecoderPlan, HwBackend, Platform, VideoCodec};
 use crate::MediaError;
 use nle_core::{AssetKind, FrameRate, MediaAsset, Time};
 use std::io::{ErrorKind, Read};
@@ -74,7 +74,7 @@ impl CliDecoder {
         let codec = if use_proxy { VideoCodec::H264 } else { VideoCodec::from_ffmpeg_name(&v.codec) };
         let depth = if use_proxy { 8 } else { v.bit_depth };
         let chroma = if use_proxy { Chroma::Yuv420 } else { Chroma::from_pix_fmt(&v.pix_fmt) };
-        let plans = hwaccel::plan_decode(codec, depth, chroma, Platform::current(), hwaccel::probe_caps(), &INTEL_ARC_A750);
+        let plans = hwaccel::plan_decode(codec, depth, chroma, Platform::current(), hwaccel::probe_caps(), hwaccel::active_gpu());
         let (width, height) = scaled_dims(v.width, v.height, opts.max_height);
         log::debug!("{}: decode plan {:?}", asset.name, plans.iter().map(|p| p.backend).collect::<Vec<_>>());
         let deinterlace = deinterlace_for(asset, opts);
@@ -164,7 +164,7 @@ impl CliDecoder {
         cmd.args(["-fps_mode", "cfr", "-r", &format!("{}/{}", self.rate.num, self.rate.den)]);
         cmd.args(["-pix_fmt", self.format.ffmpeg_name(), "-f", "rawvideo", "pipe:1"]);
         cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
-        let mut child = cmd.spawn().map_err(MediaError::Io)?;
+        let mut child = ffmpeg_cli::spawn_confined(&mut cmd).map_err(MediaError::Io)?;
         self.stdout = child.stdout.take();
         self.child = Some(child);
         self.next_index = frame_index.max(0);
@@ -303,7 +303,7 @@ impl VideoDecoder for CliDecoder {
         seek_args(&mut cmd, &self.path, t.frames_floor(self.rate), self.rate);
         let di = self.deinterlace.as_ref().map(|d| format!("{d},")).unwrap_or_default();
         cmd.args(["-map", "0:v:0", "-frames:v", "1", "-vf", &format!("{di}scale={tw}:{th}:flags=area"), "-pix_fmt", "rgba", "-f", "rawvideo", "pipe:1"]);
-        let out = cmd.stdin(Stdio::null()).stderr(Stdio::null()).output().map_err(MediaError::Io)?;
+        let out = ffmpeg_cli::output_confined(&mut cmd).map_err(MediaError::Io)?;
         if out.stdout.len() == (tw * th * 4) as usize {
             Ok((tw, th, out.stdout))
         } else {

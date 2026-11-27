@@ -6,10 +6,10 @@ use nle_core::{ClipId, MediaAsset, Time, Timeline};
 use nle_media::ffmpeg_cli;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 
-/// Transcode `source` to a lightweight 480p 15fps H.264 MP4 proxy (`h264_qsv` first,
-/// falling back to `libx264`) suitable for fast cloud AI video understanding uploads.
+/// Transcode `source` to a lightweight 480p 15fps H.264 MP4 proxy (the render
+/// GPU's H.264 encoder first, then the other vendors', then `libx264`) suitable
+/// for fast cloud AI video understanding uploads.
 pub fn encode_proxy_480p15(source: &Path, out: &Path) -> Result<PathBuf, String> {
     if !ffmpeg_cli::available() {
         return Err("FFmpeg executable not found (cannot encode 480p 15fps proxy)".into());
@@ -21,8 +21,18 @@ pub fn encode_proxy_480p15(source: &Path, out: &Path) -> Result<PathBuf, String>
     let src_s = source.to_string_lossy().into_owned();
     let out_s = out.to_string_lossy().into_owned();
 
-    let attempts: [(&str, &[&str]); 2] =
-        [("h264_qsv", &["-c:v", "h264_qsv", "-b:v", "900k", "-maxrate", "1200k"]), ("libx264", &["-c:v", "libx264", "-preset", "veryfast", "-crf", "28"])];
+    let threads = nle_media::threads::budget().ffmpeg_threads().to_string();
+    let mut attempts: Vec<(&str, Vec<&str>)> = vec![
+        ("h264_qsv", vec!["-c:v", "h264_qsv", "-b:v", "900k", "-maxrate", "1200k"]),
+        ("h264_nvenc", vec!["-c:v", "h264_nvenc", "-preset", "p2", "-b:v", "900k", "-maxrate", "1200k", "-pix_fmt", "yuv420p"]),
+        ("h264_amf", vec!["-c:v", "h264_amf", "-quality", "speed", "-b:v", "900k", "-maxrate", "1200k", "-pix_fmt", "yuv420p"]),
+    ];
+    let prefer = nle_media::encoder_probe::backend_for(nle_media::hwaccel::render_vendor());
+    let backend = |n: &str| nle_media::encoder_probe::CANDIDATES.iter().find(|(c, _)| *c == n).map(|(_, b)| *b);
+    attempts.sort_by_key(|(n, _)| backend(n) != prefer);
+    // skip GPU encoders the start-up probe found not working
+    attempts.retain(|(n, _)| nle_media::encoder_probe::result().is_none_or(|p| p.works(n)));
+    attempts.push(("libx264", vec!["-c:v", "libx264", "-preset", "veryfast", "-crf", "28", "-threads", &threads]));
 
     let mut last_err = String::new();
     for (codec_name, v_args) in attempts {
@@ -30,13 +40,7 @@ pub fn encode_proxy_480p15(source: &Path, out: &Path) -> Result<PathBuf, String>
             vec!["-hide_banner".into(), "-loglevel".into(), "error".into(), "-y".into(), "-i".into(), src_s.clone(), "-vf".into(), "scale=-2:480,fps=15".into()];
         args.extend(v_args.iter().map(|s| (*s).to_string()));
         args.extend(["-c:a".into(), "aac".into(), "-b:a".into(), "96k".into(), "-movflags".into(), "+faststart".into(), out_s.clone()]);
-        let output = ffmpeg_cli::command(&ffmpeg)
-            .args(&args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .map_err(|e| format!("spawn ffmpeg ({codec_name}): {e}"))?;
+        let output = ffmpeg_cli::output_confined(ffmpeg_cli::command(&ffmpeg).args(&args)).map_err(|e| format!("spawn ffmpeg ({codec_name}): {e}"))?;
         if output.status.success() && out.is_file() {
             return Ok(out.to_path_buf());
         }

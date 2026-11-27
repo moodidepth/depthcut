@@ -235,8 +235,9 @@ mod onnx {
     use ort::session::Session;
     use ort::value::Tensor;
 
+    /// One intra-op thread per worker CPU (the reserved cores stay free), at most 8.
     pub fn threads() -> usize {
-        std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 8)
+        nle_media::threads::budget().workers.clamp(1, 8)
     }
 
     fn library_name() -> &'static str {
