@@ -205,7 +205,7 @@ maintainer creates one Discord application and bakes its ID into release builds.
   or VM GPUs may not. A future option: load Vulkan dynamically, or ship a CPU-only
   Whisper build. This is documented in README → System requirements.
 - **CI:** `.github/workflows/ci.yml` (Windows) runs check, test and package on
-  every push. It **hasn't run yet**: the repo has no GitHub remote.
+  every push to main and every PR (branches: `gh workflow run CI --ref <branch>`).
 - **Release smoke test:** `crates/nle-render/tests/e2e_smoke.rs` (`#[ignore]`,
   needs TTS, ffmpeg, a GPU and the Whisper base model). It runs import → trim →
   Zoom Punch → Whisper captions → look-ahead ducking → export → ffprobe, and

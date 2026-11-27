@@ -1,5 +1,5 @@
 # Windows CI: check, test, and build the portable zip.
-# NOTE: written 2026-11-17 without a GitHub remote, so this workflow has not run yet.
+# Branch pushes do not trigger it; run it on a branch with: gh workflow run CI --ref <branch>
 name: CI
 
 on:

@@ -76,6 +76,10 @@ pub fn open(asset: &MediaAsset, opts: DecodeOptions) -> Result<Box<dyn VideoDeco
         }
     }
     if !crate::ffmpeg_cli::available() {
+        // Missing media stays offline, as it does with FFmpeg installed.
+        if !asset.path.exists() {
+            return Err(MediaError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, format!("{} not found", asset.path.display()))));
+        }
         // Keep the UI alive with a placeholder pattern.
         return Ok(Box::new(synthetic::SyntheticDecoder::new(asset, opts.max_height)));
     }
