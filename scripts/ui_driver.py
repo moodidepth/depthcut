@@ -320,7 +320,17 @@ class Driver:
                 spine = [c for c in s["timeline"]["clips"] if c["lane"] == 0]
                 target = f"clip:{spine[int(m[1])]['id']}"
             elif target.startswith("text="):
+                # a menu that just opened is laid out off-screen for a frame:
+                # wait until the widget stops moving
                 w = self.find_widget(target[5:])
+                for _ in range(10):
+                    time.sleep(0.05)
+                    self.fresh()
+                    again = self.find_widget(target[5:])
+                    if again[3] == w[3]:
+                        break
+                    w = again
+                s, rects = self.s, self.s["rects"]
                 target = "_w"
                 rects = dict(rects, _w=w[3])
             elif target.startswith("asset="):
@@ -453,10 +463,13 @@ class Driver:
         self._after_input()
 
     def do_click(self, target, *mods):
+        if bad := [m for m in mods if m not in ("shift", "ctrl", "alt", "right", "double")]:
+            raise StepFailed(f"unknown click modifier {bad[0]!r}; quote a target with spaces: click 'text={target[5:]} {' '.join(bad)}'")
         x, y = self.point(target)
         button = "right" if "right" in mods else "left"
         held = [VK[m] for m in mods if m in ("shift", "ctrl", "alt")]
         move_to(x, y)
+        time.sleep(0.05)  # let the app see the hover before the press
         for vk in held:
             _send(_key(vk, False))
         for _ in range(2 if "double" in mods else 1):
@@ -562,7 +575,11 @@ class Driver:
         self.fresh()
         v = self.s
         for k in [p for p in path.split(".") if p]:
-            v = v[int(k)] if isinstance(v, list) else v[k]
+            try:
+                v = v[int(k)] if isinstance(v, list) else v[k]
+            except (KeyError, IndexError, ValueError, TypeError):
+                have = list(v) if isinstance(v, dict) else f"{len(v)} items" if isinstance(v, list) else type(v).__name__
+                raise StepFailed(f"no {k!r} in state.{path}; have: {have}")
         return json.dumps(v, indent=None if path else 1)[:4000]
 
     def do_widgets(self, *filt):
