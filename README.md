@@ -1,5 +1,7 @@
 # Depthcut
 
+**Website: [depthcut.com](https://depthcut.com)**
+
 [![Support on Ko-fi](https://img.shields.io/badge/Support%20on-Ko--fi-FF5E5B?logo=ko-fi&logoColor=white)](https://ko-fi.com/moodidepth)
 
 A fast, GPU-accelerated video editor for gaming montages and short-form edits,
