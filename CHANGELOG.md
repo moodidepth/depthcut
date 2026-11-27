@@ -3,7 +3,7 @@
 All notable changes to Depthcut. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [SemVer](https://semver.org/).
 
-## [0.1.0] — unreleased
+## [0.1.0] — 2026-11-27
 
 First public build. Windows 10/11 x64 only; Linux is experimental (build from source); macOS is
 not supported yet.
@@ -29,9 +29,28 @@ not supported yet.
   with crash recovery.
 - Retime editor: 25–400 % presets, speed ramps, reverse, hold frames, frame blending and optical flow.
 - Keyframe diamonds on every continuous inspector parameter, Bézier easing, animation lane.
-- 16 GPU effects, colour wheels, `.cube` LUTs, 7 transitions, titles and lower thirds, all in WGSL.
-- FCPXML 1.10 import/export. `.rcp` project files can be opened from the command line, or by
-  double-clicking them when the installer's file association is enabled.
+- GPU effects, 14 blend modes, `.cube` LUTs, transitions, titles and lower thirds, all in WGSL.
+- Several timelines per project, bins, keyword and smart collections, ratings, metadata, list view.
+- Source viewer with In/Out marks, three-point edits, subclips and match frame; track targeting,
+  lane overwrite/insert, Lift / Extract.
+- Secondary storylines, Open in Timeline for compounds, Position tool, auditions, audio lanes by role.
+- Multicam: audio / timecode sync, multicam clips, angle viewer, cut-and-switch.
+- Motion: point / region / planar trackers, stabilization, scene-cut detection, Speed Warp, AI
+  mattes *(alpha)*.
+- Motion graphics: graph editor, Bézier roto masks, shapes, rolling credits, title templates.
+- Text-based editing *(alpha)*: delete words, fillers and pauses in the transcript panel.
+
+### Colour
+- Colour management, stacked corrections (wheels, log wheels, curves), HSL qualifier, window and
+  Bézier masks, node compositor graph.
+- Grade copy/paste, Paste Attributes, node keyframes, stills gallery with shot match, HDR export.
+- GPU scopes: waveform, parade, vectorscope, histogram.
+
+### Interchange and delivery
+- FCPXML 1.10 import/export, CMX 3600 EDL, OpenTimelineIO, AAF export *(alpha)*.
+- `.rcp` project files open from the command line, or by double-click when the installer's file
+  association is enabled.
+- Render queue, In/Out export range, deinterlacing, subtitle tracks and WebVTT.
 
 ### Montage tools
 - **Zoom Punch** (`Z`) and **Hard Zoom Punch** (`Shift+Z`) at the playhead.
@@ -44,7 +63,10 @@ not supported yet.
 ### Audio
 - Look-ahead auto-ducking: music and SFX duck before the voice starts. It is computed offline, so
   preview and export are identical.
-- 3-band EQ, Vocal Clarity, −14 LUFS normalize with a peak limiter, waveforms.
+- Bus mixer with submixes, automation and LUFS metering; parametric EQ, dynamics, restoration.
+- VST3 and CLAP plug-in inserts *(alpha)*; neural voice isolation (DeepFilterNet 3) *(alpha)*;
+  voiceover recording *(alpha)*; stem and audio-only export.
+- Vocal Clarity, −14 LUFS normalize with a peak limiter, waveforms.
 - Online CC0/CC-BY audio search (Openverse, Internet Archive) with preview, download and automatic
   credits file.
 

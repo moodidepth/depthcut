@@ -23,7 +23,8 @@ consider supporting it on [Ko-fi](https://ko-fi.com/moodidepth).
 
 ## Install (Windows)
 
-1. Download `Depthcut-v0.1.0-win64-setup.exe` (installer) **or**
+1. From the [**Releases page**](../../releases/latest), download
+   `Depthcut-v0.1.0-win64-setup.exe` (installer) **or**
    `Depthcut-v0.1.0-win64-portable.zip` (unzip anywhere and run `depthcut.exe`).
    You can check the download against `SHA256SUMS.txt`:
    `Get-FileHash .\Depthcut-v0.1.0-win64-portable.zip`
@@ -85,6 +86,11 @@ and tells you where the log is. Please attach it to bug reports.
 
 ## Features
 
+**At a glance:** magnetic timeline · multicam · node-based colour grading with
+scopes · bus mixer with VST3/CLAP plug-ins · Whisper captions and text-based
+editing · motion tracking and stabilization · motion graphics · FCPXML / EDL /
+OTIO / AAF interchange · CS2 / Valorant montage tools.
+
 - **Magnetic timeline.** Ripple editing, connected clips, compound clips, gaps,
   adjustment clips, blade/trim/slip/slide, markers, snapping, skimming, and
   unlimited undo with 30-second crash-safe autosave. Also:
@@ -101,6 +107,13 @@ and tells you where the log is. Please attach it to bug reports.
     finalized with `Shift+Alt+Y`.
   - **Audio lanes by role** (`Ctrl+Shift+L`): audio clips below the storyline
     are grouped into collapsible Dialogue / Music / Effects bands.
+  - **Track targeting**, lane overwrite / insert, and **Lift / Extract** of a
+    range.
+- **Library and source viewer.** Several timelines per project, bins, keyword
+  and smart collections, ratings, metadata and a list view. A source viewer with
+  In/Out marks, **three-point edits**, subclips and match frame.
+- **Multicam.** Sync clips by audio waveform or timecode, build multicam clips,
+  watch every angle in the angle viewer and cut-and-switch live.
 - **Montage tools.**
   - **Zoom Punch** (`Z`) and **Hard Zoom Punch** (`Shift+Z`) at the playhead.
   - **16 built-in CS2 / Valorant presets**: RSMB-style motion blur, AWP/Operator
@@ -112,10 +125,18 @@ and tells you where the log is. Please attach it to bug reports.
   the inspector. Bézier easing; an animation lane (`Shift+V`) and a retime editor
   (`Ctrl+R`) with speed ramps, reverse, hold frames, frame blending and optical
   flow.
-- **GPU effects and colour.** 22 effects (five blurs, glow, vignette, sharpen,
-  grain, lens distortion, chroma key, hue/sat/lightness, levels, AI person
-  matte and depth map…), 14 blend modes, colour wheels, `.cube` LUTs, 7
-  transitions, titles. Everything is rendered in WGSL compute shaders.
+- **GPU effects and colour.** Blurs, glow, vignette, sharpen, grain, lens
+  distortion, chroma key, levels, AI person matte, depth map and more, 14 blend
+  modes, `.cube` LUTs, transitions and titles. Everything is rendered in WGSL
+  compute shaders.
+  - **Colour grading**: colour management, stacked corrections with wheels,
+    log wheels and curves, HSL qualifier and window / Bézier masks, and a
+    **node graph** that wires correctors, effects, media and mixers together.
+  - Grade copy / paste, keyframed nodes, a stills gallery with shot match, and
+    **HDR export**.
+  - **GPU scopes**: waveform, RGB parade, vectorscope and histogram.
+- **Motion graphics.** A graph editor with Bézier handles, Bézier roto masks,
+  shapes, rolling credits and title templates.
 - **Motion** (Inspector → Motion tab, with viewer overlays).
   - **Point / Region / Planar trackers** (translation, similarity or
     perspective, fitted with RANSAC on GPU optical flow). Masks, censor boxes
@@ -130,12 +151,20 @@ and tells you where the log is. Please attach it to bug reports.
     range). The person matte also builds a subject track for Smart 9:16
     Reframe on any footage. Support is in the default build; the models
     and ONNX Runtime are not bundled: see *AI mattes* below.
-- **Audio.** EQ, Vocal Clarity, −14 LUFS normalize, and **look-ahead
+- **Audio.** A bus mixer with submixes, automation and LUFS metering;
+  parametric EQ, dynamics and restoration; −14 LUFS normalize; and **look-ahead
   auto-ducking**: music ducks *before* the voice starts. Preview and export
   sound identical.
-- **Auto Captions** (`Ctrl+Shift+C`). Offline Whisper speech-to-text with Vulkan
-  GPU acceleration, word-by-word highlight styles, and `.srt` import/export.
-- **AI Editor Copilot** (`Ctrl+Shift+A`). Optional. Ask for edit suggestions
+  - **VST3 and CLAP plug-ins** on bus inserts *(alpha)*.
+  - **Neural voice isolation** (DeepFilterNet 3) *(alpha)* and **voiceover
+    recording** *(alpha)*.
+  - Stem and audio-only export.
+- **Auto Captions** (`Ctrl+Shift+C`) *(alpha)*. Offline Whisper speech-to-text
+  with Vulkan GPU acceleration, word-by-word highlight styles, and `.srt`
+  import/export.
+- **Text-based editing** *(alpha)*. A transcript panel: delete words, filler
+  words and pauses by editing the text.
+- **AI Editor Copilot** (`Ctrl+Shift+A`) *(alpha)*. Optional. Ask for edit suggestions
   using **Google Gemini**, **OpenAI** or a local **Ollama** model. Your key is
   stored in Windows Credential Manager, not in a text file. Settings has
   **Test Live Connection** and lists the Gemini models your key can use, with
@@ -147,10 +176,13 @@ and tells you where the log is. Please attach it to bug reports.
 - **Tracks.** Every timeline lane has show/hide, mute, solo and lock switches.
   Solo also applies to export. Clips can be copied, pasted and duplicated, and
   audio can be detached as a linked or unlinked clip.
+- **Interchange.** FCPXML 1.10 import/export, CMX 3600 EDL, OpenTimelineIO, and
+  AAF export for Avid / Pro Tools *(alpha)*.
 - **Export.** AV1 / HEVC / H.264 via Quick Sync, or software H.264 (x264) / H.265
   (x265, slow). 24, 30 or 60 fps or the project's rate. A movie export that fails
   or is cancelled leaves any existing file of that name untouched; image
-  sequences are written in place.
+  sequences are written in place. A render queue, In/Out export ranges,
+  deinterlacing, and subtitle tracks with WebVTT export.
 - **Discord Rich Presence** (optional, *Help → Discord Rich Presence…*). Shows
   what you're editing; it does nothing if Discord isn't running. See
   [docs/DISCORD.md](docs/DISCORD.md).
