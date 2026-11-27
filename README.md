@@ -7,7 +7,7 @@ written in Rust. It has a magnetic timeline in the style of Final Cut Pro, plus
 montage tools built for CS2 and Valorant clips: zoom punches, beat sync, kill
 scanning, 9:16 reframing, Whisper auto-captions and an optional AI Copilot.
 
-> **Status: v0.1.0, early release.** Windows 10/11 x64 is the supported
+> **Status: v0.1.0-alpha, early release.** Windows 10/11 x64 is the supported
 > platform. Linux builds from source but is experimental. macOS is not supported (yet).
 >
 > Features marked **(alpha)** in the app are still in development and may not
@@ -24,10 +24,10 @@ consider supporting it on [Ko-fi](https://ko-fi.com/moodidepth).
 ## Install (Windows)
 
 1. From the [**Releases page**](../../releases/latest), download
-   `Depthcut-v0.1.0-win64-setup.exe` (installer) **or**
-   `Depthcut-v0.1.0-win64-portable.zip` (unzip anywhere and run `depthcut.exe`).
+   `Depthcut-v0.1.0-alpha-win64-setup.exe` (installer) **or**
+   `Depthcut-v0.1.0-alpha-win64-portable.zip` (unzip anywhere and run `depthcut.exe`).
    You can check the download against `SHA256SUMS.txt`:
-   `Get-FileHash .\Depthcut-v0.1.0-win64-portable.zip`
+   `Get-FileHash .\Depthcut-v0.1.0-alpha-win64-portable.zip`
 2. **SmartScreen warning.** Builds are **not code-signed yet**, so Windows may say
    *"Windows protected your PC"*. Click **More info → Run anyway**. If you'd rather
    not, build from source (see [Build & run](#build--run)).

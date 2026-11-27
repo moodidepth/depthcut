@@ -3,7 +3,7 @@
 All notable changes to Depthcut. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [SemVer](https://semver.org/).
 
-## [0.1.0] — 2026-11-27
+## [0.1.0-alpha] — 2026-11-27
 
 First public build. Windows 10/11 x64 only; Linux is experimental (build from source); macOS is
 not supported yet.
