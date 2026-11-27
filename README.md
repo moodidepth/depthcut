@@ -19,6 +19,18 @@ with help from AI, and has been in development since 2022. It's free, with no
 subscriptions, watermarks or locked features. If it's useful to you, please
 consider supporting it on [Ko-fi](https://ko-fi.com/moodidepth).
 
+## Screenshots
+
+![Depthcut editor: media browser, viewer with a lower-third title, inspector and magnetic timeline](docs/screenshots/editor.jpg)
+
+| Color | Audio | Titles |
+|---|---|---|
+| ![Color inspector with wheels, color management and LUTs](docs/screenshots/color.jpg) | ![Audio inspector with roles, loudness, fades and restoration](docs/screenshots/audio.jpg) | ![Titles inspector with templates, text and shadow settings](docs/screenshots/titles.jpg) |
+
+<sub>Footage: *Tears of Steel* and *Sintel* by the Blender Foundation
+([mango.blender.org](https://mango.blender.org), [durian.blender.org](https://durian.blender.org)),
+licensed [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/).</sub>
+
 ---
 
 ## Install (Windows)
