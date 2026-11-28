@@ -154,7 +154,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new(preset.name.as_str()).strong().color(Color32::WHITE));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.small_button("⚡ Apply").on_hover_text("Apply at playhead to selected clip").clicked() {
+                            let apply = ui.small_button("⚡ Apply").on_hover_text(format!("Apply \u{201c}{}\u{201d} at the playhead to the selected clip", preset.name));
+                            // one name per card for screen readers and the UI driver
+                            let name = format!("Apply {}", preset.name);
+                            ui.ctx().accesskit_node_builder(apply.id, |n| n.set_label(name));
+                            if apply.clicked() {
                                 apply_name = Some(preset.name.clone());
                             }
                             if !preset.game_tag.is_empty() {
