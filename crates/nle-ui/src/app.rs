@@ -962,7 +962,12 @@ impl App {
         if let Some(id) = self.selection.first() {
             return Some(*id);
         }
-        let t = self.playhead;
+        self.clip_at(self.playhead)
+    }
+
+    /// Topmost non-gap clip under time `t` (connected video above the
+    /// storyline, the storyline above audio lanes).
+    pub fn clip_at(&self, t: Time) -> Option<ClipId> {
         let placed = self.project.timeline.placed_clips();
         placed.iter().filter(|p| t >= p.start && t < p.end() && !p.clip.is_gap()).max_by_key(|p| (p.lane.max(0), p.lane == 0)).map(|p| p.clip.id)
     }
@@ -1707,7 +1712,9 @@ impl App {
                 let s = self.project.timeline.clip_start(*id).unwrap_or(Time::ZERO);
                 self.project.timeline.clip(*id).is_some_and(|c| at > s && at < s + c.duration)
             })
-            .or_else(|| self.target_clip());
+            // A selection elsewhere on the timeline must not steal the trim:
+            // Q / W act on what the playhead is over.
+            .or_else(|| self.clip_at(at));
         let Some(id) = target else { return };
         let cmd = if start_edge { Command::RippleTrimStartTo { id, at } } else { Command::RippleTrimEndTo { id, at } };
         if self.exec(cmd) && start_edge {
