@@ -48,6 +48,12 @@ fn reveal(e: f32, p: f32, s: f32) -> f32 {
     return 1.0 - smoothstep(edge - s, edge, e);
 }
 
+// Interleaved gradient noise in [0, 1): offsets each pixel's blur taps so a
+// long blur reads as fine grain instead of a comb of discrete copies.
+fn ign(px: vec2<f32>) -> f32 {
+    return fract(52.9829189 * fract(dot(px, vec2<f32>(0.06711056, 0.00583715))));
+}
+
 fn blur_mix(uv: vec2<f32>, p: f32, r: f32) -> vec3<f32> {
     var acc = vec3<f32>(0.0);
     for (var j = -2; j <= 2; j = j + 1) {
@@ -82,12 +88,13 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             // whip pan: push with a strong directional motion blur peaking mid-way
             let e = p * p * (3.0 - 2.0 * p);
             let blur = sin(3.14159265 * p) * 0.35;
+            let jit = ign(vec2<f32>(id.xy));
             var acc = vec3<f32>(0.0);
-            for (var i = 0; i < 24; i = i + 1) {
-                let o = (f32(i) / 23.0 - 0.5) * blur;
+            for (var i = 0; i < 64; i = i + 1) {
+                let o = ((f32(i) + jit) / 64.0 - 0.5) * blur;
                 acc = acc + strip(uv + t.dir * o, e);
             }
-            out = acc / 24.0;
+            out = acc / 64.0;
         }
         case 4u: {
             // slide: B moves in over a static A
@@ -117,9 +124,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             let zoom = select(1.0 + 1.4 * u * u, 1.0 + 0.9 * (1.0 - u) * (1.0 - u), is_b);
             let blur = sin(3.14159265 * p) * 0.25;
             let split = sin(3.14159265 * p) * 0.012;
+            let jit = ign(vec2<f32>(id.xy));
             var acc = vec3<f32>(0.0);
-            for (var i = 0; i < 12; i = i + 1) {
-                let s = 1.0 - blur * (f32(i) / 11.0);
+            for (var i = 0; i < 24; i = i + 1) {
+                let s = 1.0 - blur * ((f32(i) + jit) / 24.0);
                 let quv = clamp(c + ((uv - c) / zoom) * s, vec2<f32>(0.0), vec2<f32>(1.0));
                 let ruv = clamp(quv + (uv - c) * split, vec2<f32>(0.0), vec2<f32>(1.0));
                 let buv = clamp(quv - (uv - c) * split, vec2<f32>(0.0), vec2<f32>(1.0));
@@ -129,7 +137,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
                     acc = acc + vec3<f32>(sa(ruv).r, sa(quv).g, sa(buv).b);
                 }
             }
-            out = acc / 12.0;
+            out = acc / 24.0;
         }
         case 8u: {
             // B enters from the side the direction points away from

@@ -734,3 +734,51 @@ fn gpu_impact_flash_fires_at_its_trigger_late_in_the_timeline() {
     assert!(hit > before + 20.0, "white flash on the hit: {hit} vs {before}");
     assert!((after - before).abs() < 2.0, "flash gone 0.6 s later: {after} vs {before}");
 }
+
+/// A dark wide frame with a few thin bright vertical lines.
+struct Lines;
+
+const LW: u32 = 512;
+const LH: u32 = 32;
+
+impl FrameSource for Lines {
+    fn frame_rate(&self, _: AssetId) -> FrameRate {
+        FrameRate::FPS_30
+    }
+    fn frame(&mut self, _: AssetId, index: i64) -> Option<VideoFrame> {
+        let mut data = vec![16u8; (LW * LH) as usize];
+        for y in 0..LH {
+            for x in (100..LW).step_by(150) {
+                for dx in 0..3 {
+                    data[(y * LW + x + dx) as usize] = 235;
+                }
+            }
+        }
+        data.extend(std::iter::repeat_n(128u8, (LW * LH / 2) as usize));
+        Some(VideoFrame::new(LW, LH, PixelFormat::Nv12, data, Time::from_frames(index, FrameRate::FPS_30)))
+    }
+}
+
+#[test]
+fn whip_pan_blur_is_a_smear_not_a_comb_of_copies() {
+    let Some(gpu) = gpu() else { return };
+    let mut r = Renderer::new(gpu, LW, LH);
+    let a = AssetId(9101);
+    let tr = RenderNode::Transition {
+        from: Some(Box::new(media_layer(a))),
+        to: Some(Box::new(media_layer(a))),
+        transition: ResolvedTransition { kind: TransitionKind::WhipPan, direction: Direction::Right, softness: 0.1, progress: 0.5 },
+    };
+    let out = r.render_nv12(&Composition::new(Time::ZERO, vec![tr]), &mut Lines, RenderOptions::default());
+    // column means: the per-pixel tap jitter averages out down a column, a comb does not
+    let col: Vec<f32> = (0..LW).map(|x| (0..LH).map(|y| out[(y * LW + x) as usize] as f32).sum::<f32>() / LH as f32).collect();
+    let ripple = (8..LW as usize - 8)
+        .map(|x| {
+            let local = col[x - 6..=x + 6].iter().sum::<f32>() / 13.0;
+            (col[x] - local).abs()
+        })
+        .fold(0.0, f32::max);
+    let peak = col.iter().cloned().fold(0.0, f32::max);
+    assert!(peak < 120.0, "the 3 px lines are smeared out wide: peak {peak}");
+    assert!(ripple < 2.0, "no comb of discrete copies: ripple {ripple} on {:?}", &col[200..260]);
+}
