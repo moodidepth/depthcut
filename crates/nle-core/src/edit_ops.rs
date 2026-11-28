@@ -150,6 +150,7 @@ impl Timeline {
         a.tracks.clear();
         a.stabilization = None;
         a.preset_base = None;
+        a.preset_bases.clear();
         a.transition_in = None;
         a.transition_out = None;
         a.audio.audio_lead = Time::ZERO;

@@ -58,6 +58,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     if app.selection.len() > 1 {
         ui.label(egui::RichText::new(format!("{} clips selected — editing the first", app.selection.len())).small().color(theme::SNAP));
     }
+    // stacked montage presets (cleared from the Presets panel)
+    crate::presets_ui::applied_badges(ui, &original, false);
     ui.add_space(4.0);
 
     let mut retime_action: Option<RetimeAction> = None;

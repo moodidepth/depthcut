@@ -1273,10 +1273,14 @@ pub struct Clip {
     /// their retime's quality instead.
     #[serde(default)]
     pub rate_conform: FrameBlendMode,
-    /// Clip state from before the first montage preset was applied, so the
-    /// next preset replaces the previous one instead of stacking on it.
+    /// The single preset slot of projects saved before presets stacked per
+    /// category; moved into [`Clip::preset_bases`] by the next preset action.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset_base: Option<Box<crate::presets::PresetBase>>,
+    /// What each category's montage preset changed, so a preset replaces
+    /// the previous one of its own category and stacks on the others.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub preset_bases: std::collections::BTreeMap<crate::presets::PresetCategory, crate::presets::PresetBase>,
     /// Connected clips: the connection point, measured from the clip's own
     /// start (Ctrl+Alt+Click moves it). The parent is the primary storyline
     /// clip under `offset + anchor`.
@@ -1319,6 +1323,7 @@ impl Clip {
             effects: Vec::new(),
             rate_conform: FrameBlendMode::FloorFrame,
             preset_base: None,
+            preset_bases: Default::default(),
             anchor: Time::ZERO,
             audition: Vec::new(),
             tracks: Vec::new(),

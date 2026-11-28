@@ -1464,6 +1464,25 @@ impl App {
         self.status(format!("Applied preset: {}", preset.name));
     }
 
+    /// Take one category's montage preset, or all of them, off a clip as
+    /// one undo step; the other categories and the user's edits stay.
+    pub fn clear_montage_preset(&mut self, id: ClipId, what: presets_ui::ClearPreset) {
+        let Some(mut clip) = self.project.timeline.clip(id).cloned() else { return };
+        let label = match what {
+            presets_ui::ClearPreset::Category(cat) => {
+                nle_core::presets::MontagePreset::clear_category(&mut clip, cat);
+                format!("Cleared the {} preset", cat.label())
+            }
+            presets_ui::ClearPreset::All => {
+                nle_core::presets::MontagePreset::clear_from_clip(&mut clip);
+                "Cleared all presets".to_string()
+            }
+        };
+        if self.exec(Command::ReplaceClip { label: "Clear Preset", clip: Box::new(clip) }) {
+            self.status(label);
+        }
+    }
+
     /// Add the default transition (Cross Dissolve, 1 s) to selected clips.
     /// Add a transition as Final Cut does: on both ends of each selected
     /// storyline clip, or with nothing selected on the edit point nearest

@@ -465,6 +465,11 @@ pub struct Effect {
     /// instead of stacking duplicates on top.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub from_preset: bool,
+    /// The preset category that added it: re-applying or clearing that
+    /// category replaces it, other categories leave it alone. `None` on
+    /// preset effects of projects saved before categories stacked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset_category: Option<crate::presets::PresetCategory>,
     /// Limits the effect to a shape (outside it the clip stays unaffected).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mask: Option<crate::color::ShapeMask>,
@@ -489,6 +494,7 @@ impl Effect {
             enabled: true,
             params: kind.params().iter().map(|d| Param::new(d.default)).collect(),
             from_preset: false,
+            preset_category: None,
             mask: None,
             track: None,
             trigger: Time::ZERO,

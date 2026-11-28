@@ -13,7 +13,7 @@ use crate::time::{FrameRate, Time};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum PresetCategory {
     RsmbMotionBlur,
     VelocityGraph,
@@ -111,10 +111,15 @@ impl<T: Clone + PartialEq> Change<T> {
     }
 }
 
-/// What the last montage preset changed on a clip (see [`Clip::preset_base`]).
+/// What a category's last montage preset changed on a clip (see
+/// [`Clip::preset_bases`]).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PresetBase {
     pub name: String,
+    /// When it was applied relative to the clip's other categories (higher =
+    /// later): presets come off newest first.
+    #[serde(default)]
+    pub order: u32,
     pub retime: Change<Option<Retime>>,
     pub duration: Change<Time>,
     pub source_in: Change<Time>,
@@ -133,6 +138,7 @@ impl PresetBase {
     fn capture(c: &Clip) -> Self {
         PresetBase {
             name: String::new(),
+            order: 0,
             retime: Change::same(c.retime.clone()),
             duration: Change::same(c.duration),
             source_in: Change::same(c.source_in),
@@ -146,9 +152,77 @@ impl PresetBase {
     }
 }
 
-/// Undo the last preset on `clip`; returns the clip's pre-preset state.
-fn revert_preset(clip: &mut Clip) -> PresetBase {
+/// A preset applied after `removed` recorded `removed`'s result as its own
+/// "before"; once `removed` is gone, point it at what `removed` replaced.
+fn rebase<T: Clone + PartialEq>(later: &mut Change<T>, removed: &Change<T>) {
+    if removed.before != removed.after && later.before == removed.after {
+        if later.after == later.before {
+            later.after = removed.before.clone();
+        }
+        later.before = removed.before.clone();
+    }
+}
+
+impl PresetBase {
+    fn rebase_onto(&mut self, removed: &PresetBase) {
+        rebase(&mut self.retime, &removed.retime);
+        rebase(&mut self.duration, &removed.duration);
+        rebase(&mut self.source_in, &removed.source_in);
+        rebase(&mut self.preserve_pitch, &removed.preserve_pitch);
+        rebase(&mut self.color, &removed.color);
+        rebase(&mut self.transition_in, &removed.transition_in);
+        rebase(&mut self.scale_x, &removed.scale_x);
+        rebase(&mut self.scale_y, &removed.scale_y);
+    }
+}
+
+/// Category of a preset saved in the single slot projects used before
+/// presets stacked: a built-in's own, else guessed from what it changed.
+fn legacy_category(b: &PresetBase, clip: &Clip) -> PresetCategory {
+    let q = b.name.trim().to_lowercase();
+    if let Some(p) = MontagePreset::built_in().into_iter().find(|p| p.name.to_lowercase() == q) {
+        return p.category;
+    }
+    let timing = b.retime.before != b.retime.after || b.duration.before != b.duration.after;
+    let look = b.color.before != b.color.after || b.scale_x.before != b.scale_x.after || b.scale_y.before != b.scale_y.after;
+    let mut fx = clip.effects.iter().filter(|e| e.from_preset && e.preset_category.is_none()).peekable();
+    if timing {
+        PresetCategory::VelocityGraph
+    } else if look {
+        PresetCategory::ColorAndSignatureFx
+    } else if b.transition_in.before != b.transition_in.after {
+        PresetCategory::Transitions
+    } else if fx.peek().is_some() && fx.all(|e| e.kind == EffectKind::MotionBlur) {
+        PresetCategory::RsmbMotionBlur
+    } else {
+        PresetCategory::ShakeAndImpact
+    }
+}
+
+fn next_order(clip: &Clip) -> u32 {
+    clip.preset_bases.values().map(|b| b.order).max().unwrap_or(0) + 1
+}
+
+/// Move the single preset slot of an older project into its category.
+fn migrate_legacy(clip: &mut Clip) {
     if let Some(b) = clip.preset_base.take() {
+        let cat = legacy_category(&b, clip);
+        for e in clip.effects.iter_mut().filter(|e| e.from_preset && e.preset_category.is_none()) {
+            e.preset_category = Some(cat);
+        }
+        let base = PresetBase { order: next_order(clip), ..*b };
+        clip.preset_bases.insert(cat, base);
+    }
+}
+
+/// Take category `cat`'s preset off `clip`; returns the clip's state
+/// without it. Other categories' presets and the user's edits stay.
+fn revert_category(clip: &mut Clip, cat: PresetCategory) -> PresetBase {
+    migrate_legacy(clip);
+    // preset effects whose preset record is gone (older projects): any
+    // preset clears those, as it always did
+    clip.effects.retain(|e| !(e.from_preset && e.preset_category.is_none()));
+    if let Some(b) = clip.preset_bases.remove(&cat) {
         // timing reverts as a unit, and only if untouched since: a blade or
         // trim after the preset makes the current timing the new base
         if clip.retime == b.retime.after && clip.duration == b.duration.after && clip.source_in == b.source_in.after {
@@ -161,16 +235,31 @@ fn revert_preset(clip: &mut Clip) -> PresetBase {
         clip.transition_in = b.transition_in.revert(&clip.transition_in);
         clip.video.scale_x = b.scale_x.revert(&clip.video.scale_x);
         clip.video.scale_y = b.scale_y.revert(&clip.video.scale_y);
-        clip.effects.retain(|e| !e.from_preset);
+        clip.effects.retain(|e| e.preset_category != Some(cat));
+        for later in clip.preset_bases.values_mut().filter(|o| o.order > b.order) {
+            later.rebase_onto(&b);
+        }
         for e in b.displaced_effects {
-            if !clip.effects.iter().any(|x| x.id == e.id) {
-                clip.effects.push(e);
+            if clip.effects.iter().any(|x| x.id == e.id) {
+                continue;
+            }
+            // another category's preset holds that kind now: park the user's
+            // effect with it until that one comes off too
+            let owner = clip.effects.iter().find(|x| x.kind == e.kind).and_then(|x| x.preset_category);
+            match owner.and_then(|o| clip.preset_bases.get_mut(&o)) {
+                Some(ob) => ob.displaced_effects.push(e),
+                None => clip.effects.push(e),
             }
         }
-    } else {
-        clip.effects.retain(|e| !e.from_preset);
     }
     PresetBase::capture(clip)
+}
+
+/// One montage preset on a clip, as the preset badges show it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AppliedPreset {
+    pub category: PresetCategory,
+    pub name: String,
 }
 
 fn anim_param(default: f64, keys: &[(f64, f64, Interpolation)]) -> Param {
@@ -564,28 +653,60 @@ impl MontagePreset {
         self.zoom_push_scale = self.zoom_push_scale.filter(|z| z.is_finite()).map(|z| z.clamp(0.25, 4.0));
     }
 
-    /// Remove whatever the last preset applied to `clip` (no-op without one).
-    pub fn clear_from_clip(clip: &mut Clip) {
-        revert_preset(clip);
+    /// Remove every montage preset from `clip`, newest first. Returns
+    /// whether there was any.
+    pub fn clear_from_clip(clip: &mut Clip) -> bool {
+        migrate_legacy(clip);
+        let had = !clip.preset_bases.is_empty() || clip.effects.iter().any(|e| e.from_preset);
+        let mut stack: Vec<(u32, PresetCategory)> = clip.preset_bases.iter().map(|(c, b)| (b.order, *c)).collect();
+        stack.sort_unstable();
+        for (_, cat) in stack.into_iter().rev() {
+            revert_category(clip, cat);
+        }
+        clip.effects.retain(|e| !e.from_preset);
+        had
+    }
+
+    /// Remove only category `cat`'s preset from `clip`; the other
+    /// categories stay. Returns whether that category had one.
+    pub fn clear_category(clip: &mut Clip, cat: PresetCategory) -> bool {
+        migrate_legacy(clip);
+        let had = clip.preset_bases.contains_key(&cat);
+        revert_category(clip, cat);
+        had
+    }
+
+    /// The presets on `clip`, in the order they were applied.
+    pub fn applied(clip: &Clip) -> Vec<AppliedPreset> {
+        let mut out: Vec<(u32, AppliedPreset)> = clip.preset_bases.iter().map(|(c, b)| (b.order, AppliedPreset { category: *c, name: b.name.clone() })).collect();
+        if let Some(b) = &clip.preset_base {
+            out.push((0, AppliedPreset { category: legacy_category(b, clip), name: b.name.clone() }));
+        }
+        out.sort_by_key(|(o, _)| *o);
+        out.into_iter().map(|(_, p)| p).collect()
     }
 
     /// Apply this preset to `clip` at clip-local offset `at_local`.
     ///
-    /// Idempotent: whatever a previous preset set on this clip is reverted
-    /// first (from [`Clip::preset_base`]), so applying presets repeatedly
-    /// replaces instead of stacking effects, multiplying speed or scale.
-    /// Values the user edited after the last preset are kept.
+    /// Presets stack per [`PresetCategory`]: whatever this category's
+    /// previous preset set is reverted first (from [`Clip::preset_bases`]),
+    /// so re-applying replaces instead of stacking effects, multiplying
+    /// speed or scale, while other categories' presets stay. Values the user
+    /// edited since are kept.
     pub fn apply_to_clip(&self, clip: &mut Clip, at_local: Time) {
         let mut preset = self.clone();
         preset.sanitize();
-        let base = revert_preset(clip);
+        let cat = preset.category;
+        let base = revert_category(clip, cat);
         let at_local = at_local.clamp(Time::ZERO, clip.duration);
-        let mut applied = PresetBase { name: preset.name.clone(), ..base.clone() };
+        let mut applied = PresetBase { name: preset.name.clone(), order: next_order(clip), ..base.clone() };
 
         // same-kind user effects are parked in the base (restored by the
-        // next revert) so a preset shake never doubles a user shake
+        // next revert) so a preset shake never doubles a user shake; other
+        // categories' preset effects stay theirs
         if !preset.effects.is_empty() {
-            let (displaced, kept): (Vec<Effect>, Vec<Effect>) = std::mem::take(&mut clip.effects).into_iter().partition(|e| preset.effects.iter().any(|t| t.kind == e.kind));
+            let (displaced, kept): (Vec<Effect>, Vec<Effect>) =
+                std::mem::take(&mut clip.effects).into_iter().partition(|e| e.preset_category.is_none() && preset.effects.iter().any(|t| t.kind == e.kind));
             clip.effects = kept;
             applied.displaced_effects = displaced;
         }
@@ -618,6 +739,7 @@ impl MontagePreset {
             e.params = template.params.clone();
             e.enabled = template.enabled;
             e.from_preset = true;
+            e.preset_category = Some(cat);
             e.trigger = at_local;
             e.normalize();
             if at_local.is_positive() {
@@ -649,7 +771,7 @@ impl MontagePreset {
         applied.transition_in.after = clip.transition_in.clone();
         applied.scale_x.after = clip.video.scale_x.clone();
         applied.scale_y.after = clip.video.scale_y.clone();
-        clip.preset_base = Some(Box::new(applied));
+        clip.preset_bases.insert(cat, applied);
     }
 
     pub fn filename_slug(name: &str) -> String {
@@ -760,7 +882,7 @@ mod tests {
                 assert_eq!(e.params.len(), e.kind.params().len());
             }
         }
-        assert!(MontagePreset::find("Hard Kill Impact").is_some());
+        assert!(MontagePreset::find("Hard Kill Impact (S_Shake Decay)").is_some());
         assert!(MontagePreset::find("Valorant Vibrant Clean CC").is_some());
         assert!(MontagePreset::find("Operator / AWP Scope Pulse").is_some());
         assert!(MontagePreset::find("RSMB Clean Flick").is_some());
@@ -768,7 +890,7 @@ mod tests {
 
     #[test]
     fn a_preset_at_the_playhead_fires_its_hit_there() {
-        let p = MontagePreset::find("Hard Kill Impact").unwrap();
+        let p = MontagePreset::find("Hard Kill Impact (S_Shake Decay)").unwrap();
         let mut c = Clip::gap(Time::from_secs(20));
         p.apply_to_clip(&mut c, Time::from_secs(12));
         let flash = c.effects.iter().find(|e| e.kind == EffectKind::ImpactFlash).unwrap();
@@ -795,26 +917,38 @@ mod tests {
 
     #[test]
     fn reapplying_presets_replaces_instead_of_stacking() {
-        let presets = MontagePreset::built_in();
-        let with_fx: Vec<_> = presets.iter().filter(|p| !p.effects.is_empty()).collect();
-        assert!(with_fx.len() >= 2);
+        let a = MontagePreset::find("Hard Kill Impact (S_Shake Decay)").unwrap();
+        let b = MontagePreset::find("Pre-Drop Build-Up Riser Shake").unwrap();
+        assert_eq!(a.category, b.category);
         let mut c = Clip::gap(Time::from_secs(3));
         let user = Effect::new(EffectKind::FilmGrain);
-        if !with_fx.iter().any(|p| p.effects.iter().any(|e| e.kind == user.kind)) {
-            c.effects.push(user.clone());
-        }
-        let n_user = c.effects.len();
-        let a = with_fx[0];
+        assert!(![&a, &b].iter().any(|p| p.effects.iter().any(|e| e.kind == user.kind)));
+        c.effects.push(user.clone());
         for _ in 0..3 {
             a.apply_to_clip(&mut c, Time::ZERO);
         }
-        assert_eq!(c.effects.len(), n_user + a.effects.len(), "same preset 3× must not stack");
-        let b = with_fx[1];
+        assert_eq!(c.effects.len(), 1 + a.effects.len(), "same preset 3× must not stack");
         b.apply_to_clip(&mut c, Time::ZERO);
-        assert_eq!(c.effects.len(), n_user + b.effects.len(), "switching presets replaces the previous one");
-        if n_user == 1 {
-            assert!(c.effects.iter().any(|e| e.id == user.id), "user effects survive");
-        }
+        assert_eq!(c.effects.len(), 1 + b.effects.len(), "a preset replaces the previous one of its category");
+        assert!(c.effects.iter().any(|e| e.id == user.id), "user effects survive");
+        assert_eq!(MontagePreset::applied(&c), vec![AppliedPreset { category: b.category, name: b.name.clone() }]);
+    }
+
+    fn strip(c: &Clip) -> Clip {
+        let mut c = c.clone();
+        c.effects.iter_mut().for_each(|e| e.id = 0);
+        c
+    }
+
+    /// What a clip looks and plays like, without bookkeeping (effect ids,
+    /// stack order).
+    fn look(c: &Clip) -> (Time, Time, Option<Retime>, ColorParams, Option<Transition>, crate::clip::VideoParams, Vec<Effect>) {
+        let c = strip(c);
+        (c.duration, c.source_in, c.retime, c.color, c.transition_in, c.video, c.effects)
+    }
+
+    fn names(c: &Clip) -> Vec<String> {
+        MontagePreset::applied(c).into_iter().map(|p| p.name).collect()
     }
 
     fn velocity_preset() -> MontagePreset {
@@ -825,36 +959,169 @@ mod tests {
     fn every_preset_pair_applies_idempotently() {
         let all = MontagePreset::built_in();
         let fresh = Clip::gap(Time::from_secs(3));
+        let at = Time::from_millis(400);
         for a in &all {
             let mut once = fresh.clone();
-            a.apply_to_clip(&mut once, Time::from_millis(400));
+            a.apply_to_clip(&mut once, at);
             let mut thrice = once.clone();
-            a.apply_to_clip(&mut thrice, Time::from_millis(400));
-            a.apply_to_clip(&mut thrice, Time::from_millis(400));
-            let strip = |c: &Clip| {
-                let mut c = c.clone();
-                c.effects.iter_mut().for_each(|e| e.id = 0);
-                c
-            };
+            a.apply_to_clip(&mut thrice, at);
+            a.apply_to_clip(&mut thrice, at);
             assert_eq!(strip(&once), strip(&thrice), "'{}' re-applied must be identical", a.name);
             for b in &all {
                 let mut ab = once.clone();
-                b.apply_to_clip(&mut ab, Time::from_millis(400));
+                b.apply_to_clip(&mut ab, at);
                 let mut only_b = fresh.clone();
-                b.apply_to_clip(&mut only_b, Time::from_millis(400));
-                assert_eq!(strip(&ab).preset_base.map(|p| p.name), strip(&only_b).preset_base.map(|p| p.name));
-                let (x, y) = (strip(&ab), strip(&only_b));
-                assert_eq!(
-                    (x.duration, x.retime, x.color, x.transition_in, x.video),
-                    (y.duration, y.retime, y.color, y.transition_in, y.video),
-                    "'{}' then '{}' must equal '{}' alone",
-                    a.name,
-                    b.name,
-                    b.name
-                );
-                assert_eq!(x.effects.len(), y.effects.len());
+                b.apply_to_clip(&mut only_b, at);
+                if a.category == b.category {
+                    // same category: B replaces A
+                    assert_eq!(names(&ab), vec![b.name.clone()]);
+                    assert_eq!(look(&ab), look(&only_b), "'{}' then '{}' must equal '{}' alone", a.name, b.name, b.name);
+                    continue;
+                }
+                // different categories stack, and each comes off on its own
+                assert_eq!(names(&ab), vec![a.name.clone(), b.name.clone()], "'{}' + '{}' must stack", a.name, b.name);
+                assert_eq!(ab.effects.len(), once.effects.len() + only_b.effects.len(), "'{}' + '{}' keeps both effect sets", a.name, b.name);
+                let mut ab_again = ab.clone();
+                b.apply_to_clip(&mut ab_again, at);
+                assert_eq!(strip(&ab_again), strip(&ab), "'{}' re-applied on top of '{}' must be identical", b.name, a.name);
+                let mut minus_a = ab.clone();
+                assert!(MontagePreset::clear_category(&mut minus_a, a.category));
+                assert_eq!(look(&minus_a), look(&only_b), "'{}' + '{}' without '{}' must equal '{}' alone", a.name, b.name, a.name, b.name);
+                assert_eq!(names(&minus_a), vec![b.name.clone()]);
+                let mut minus_b = ab.clone();
+                assert!(MontagePreset::clear_category(&mut minus_b, b.category));
+                assert_eq!(look(&minus_b), look(&once), "'{}' + '{}' without '{}' must equal '{}' alone", a.name, b.name, b.name, a.name);
+                let mut none = ab.clone();
+                assert!(MontagePreset::clear_from_clip(&mut none));
+                assert_eq!(look(&none), look(&fresh));
+                assert!(none.preset_bases.is_empty() && none.preset_base.is_none());
             }
         }
+    }
+
+    #[test]
+    fn a_full_montage_stack_survives_and_comes_apart_cleanly() {
+        let p = |n: &str| MontagePreset::find(n).unwrap_or_else(|| panic!("{n}"));
+        let stack =
+            [p("RSMB 180° Cinematic"), p("CS2 Moody Fragmovie CC"), p("Hard Kill Impact (S_Shake Decay)"), p("Bullet-Time Kill Ramp"), p("Sniper Zoom-In Punch (10 frames)")];
+        let cats: std::collections::BTreeSet<_> = stack.iter().map(|p| p.category).collect();
+        assert_eq!(cats.len(), 5, "one preset per category");
+        let mut fresh = Clip::gap(Time::from_secs(4));
+        let grain = Effect::new(EffectKind::FilmGrain);
+        let shake = Effect::new(EffectKind::CameraShake); // Hard Kill Impact brings its own
+        fresh.effects.extend([grain.clone(), shake.clone()]);
+        let mut c = fresh.clone();
+        for (i, preset) in stack.iter().enumerate() {
+            preset.apply_to_clip(&mut c, Time::from_millis(500));
+            if i == 1 {
+                c.color.exposure = Param::new(0.75); // the user's tweak on top of the grade
+            }
+        }
+        assert_eq!(names(&c), stack.iter().map(|p| p.name.clone()).collect::<Vec<_>>(), "all five stay");
+        assert!(c.effects.iter().any(|e| e.id == grain.id), "the user's grain stays");
+        assert!(!c.effects.iter().any(|e| e.id == shake.id), "the user's shake gives way to the preset's");
+        let preset_fx: usize = stack.iter().map(|p| p.effects.len()).sum();
+        assert_eq!(c.effects.len(), 1 + preset_fx);
+        assert!(c.retime.is_some() && c.transition_in.is_some());
+        assert!(c.effects.iter().any(|e| e.kind == EffectKind::MotionBlur && e.preset_category == Some(PresetCategory::RsmbMotionBlur)));
+
+        // re-applying a middle one keeps the stack and the effect count
+        let mut again = c.clone();
+        stack[2].apply_to_clip(&mut again, Time::from_millis(500));
+        assert_eq!(again.preset_bases.len(), 5);
+        assert_eq!(look(&again), look(&c));
+        let mut thrice = again.clone();
+        stack[2].apply_to_clip(&mut thrice, Time::from_millis(500));
+        assert_eq!(strip(&thrice), strip(&again), "re-applying the newest is strictly idempotent");
+
+        // clearing the grade keeps the rest, and the user's tweak
+        let mut no_cc = c.clone();
+        assert!(MontagePreset::clear_category(&mut no_cc, PresetCategory::ColorAndSignatureFx));
+        assert!(!MontagePreset::clear_category(&mut no_cc, PresetCategory::ColorAndSignatureFx), "nothing left to clear");
+        assert_eq!(no_cc.preset_bases.len(), 4);
+        assert_eq!(no_cc.effects.len(), 1 + preset_fx - stack[1].effects.len());
+        assert_eq!((no_cc.duration, &no_cc.retime, &no_cc.transition_in), (c.duration, &c.retime, &c.transition_in));
+        assert_eq!(no_cc.color.exposure.value, 0.75);
+
+        // clearing the impact gives the user's shake back
+        let mut no_impact = c.clone();
+        MontagePreset::clear_category(&mut no_impact, PresetCategory::ShakeAndImpact);
+        assert!(no_impact.effects.iter().any(|e| e.id == shake.id));
+        assert_eq!(no_impact.preset_bases.len(), 4);
+
+        // everything off: the clip is back, except what the user did
+        let mut bare = c.clone();
+        assert!(MontagePreset::clear_from_clip(&mut bare));
+        assert!(!MontagePreset::clear_from_clip(&mut bare));
+        let mut ids: Vec<u64> = bare.effects.iter().map(|e| e.id).collect();
+        ids.sort_unstable();
+        let mut want = vec![grain.id, shake.id];
+        want.sort_unstable();
+        assert_eq!(ids, want);
+        assert_eq!((bare.duration, &bare.retime, &bare.transition_in, &bare.video), (fresh.duration, &fresh.retime, &fresh.transition_in, &fresh.video));
+        assert_eq!(bare.color.exposure.value, 0.75);
+        assert!(bare.preset_bases.is_empty());
+    }
+
+    #[test]
+    fn clearing_an_older_preset_keeps_a_newer_one_over_the_same_field() {
+        // a user preset may set a field another category also sets
+        let cc = MontagePreset::find("Valorant Vibrant Clean CC").unwrap();
+        let mut graded_wipe = MontagePreset::find("Whip-Pan Directional Blur (8 frames)").unwrap();
+        graded_wipe.color = MontagePreset::find("CS2 Moody Fragmovie CC").unwrap().color;
+        let fresh = Clip::gap(Time::from_secs(3));
+        let mut only_wipe = fresh.clone();
+        graded_wipe.apply_to_clip(&mut only_wipe, Time::ZERO);
+
+        let mut c = fresh.clone();
+        cc.apply_to_clip(&mut c, Time::ZERO);
+        graded_wipe.apply_to_clip(&mut c, Time::ZERO);
+        let mut x = c.clone();
+        MontagePreset::clear_category(&mut x, cc.category);
+        assert_eq!(x.color, only_wipe.color, "the newer grade stays");
+        MontagePreset::clear_category(&mut x, graded_wipe.category);
+        assert_eq!(x.color, fresh.color, "and comes off to the original, not to the older preset's");
+        let mut y = c.clone();
+        MontagePreset::clear_category(&mut y, graded_wipe.category);
+        MontagePreset::clear_category(&mut y, cc.category);
+        assert_eq!(y.color, fresh.color);
+    }
+
+    #[test]
+    fn projects_from_before_stacking_load_and_migrate() {
+        let impact = MontagePreset::find("Hard Kill Impact (S_Shake Decay)").unwrap();
+        let mut c = Clip::gap(Time::from_secs(3));
+        c.effects.push(Effect::new(EffectKind::FilmGrain));
+        impact.apply_to_clip(&mut c, Time::ZERO);
+        // as the single-slot format stored it
+        let mut legacy = c.clone();
+        let b = legacy.preset_bases.remove(&impact.category).unwrap();
+        legacy.preset_base = Some(Box::new(PresetBase { order: 0, ..b }));
+        legacy.effects.iter_mut().for_each(|e| e.preset_category = None);
+        let json = serde_json::to_string(&legacy).unwrap();
+        assert!(json.contains("\"preset_base\"") && !json.contains("preset_bases") && !json.contains("preset_category"));
+        let mut old: Clip = serde_json::from_str(&json).unwrap();
+        assert_eq!(names(&old), vec![impact.name.clone()], "badges show the old preset before any edit");
+
+        let mut stacked = old.clone();
+        MontagePreset::find("CS2 Moody Fragmovie CC").unwrap().apply_to_clip(&mut stacked, Time::ZERO);
+        assert_eq!(names(&stacked), vec![impact.name.clone(), "CS2 Moody Fragmovie CC".to_string()]);
+        assert_eq!(stacked.effects.len(), c.effects.len() + MontagePreset::find("CS2 Moody Fragmovie CC").unwrap().effects.len());
+        assert!(stacked.preset_base.is_none());
+
+        let riser = MontagePreset::find("Pre-Drop Build-Up Riser Shake").unwrap();
+        riser.apply_to_clip(&mut old, Time::ZERO);
+        assert_eq!(names(&old), vec![riser.name.clone()]);
+        assert_eq!(old.effects.len(), 1 + riser.effects.len(), "the old preset is replaced, not doubled");
+
+        // a renamed user preset is placed by what it changed
+        let mut ramp = Clip::gap(Time::from_secs(3));
+        velocity_preset().apply_to_clip(&mut ramp, Time::ZERO);
+        let b = ramp.preset_bases.remove(&PresetCategory::VelocityGraph).unwrap();
+        ramp.preset_base = Some(Box::new(PresetBase { name: "my ramp".into(), ..b }));
+        assert_eq!(MontagePreset::applied(&ramp)[0].category, PresetCategory::VelocityGraph);
+        assert!(MontagePreset::clear_category(&mut ramp, PresetCategory::VelocityGraph));
+        assert!(ramp.retime.is_none() && ramp.preset_base.is_none());
     }
 
     #[test]
@@ -870,7 +1137,7 @@ mod tests {
         }
         assert_eq!(c.duration, d1, "re-applying a speed ramp must not multiply speed");
         MontagePreset::clear_from_clip(&mut c);
-        assert_eq!((c.duration, c.retime.is_none(), c.preset_base.is_none()), (base_dur, true, true));
+        assert_eq!((c.duration, c.retime.is_none(), c.preset_bases.is_empty()), (base_dur, true, true));
     }
 
     #[test]
@@ -951,7 +1218,7 @@ mod tests {
         let mut c = tl.clip(id).cloned().unwrap();
         velocity_preset().apply_to_clip(&mut c, Time::ZERO);
         h.execute_coalesced(&mut tl, Command::ReplaceClip { label: "Apply Preset", clip: Box::new(c) }, None).unwrap();
-        assert!(tl.clip(id).unwrap().retime.is_some() && tl.clip(id).unwrap().preset_base.is_some());
+        assert!(tl.clip(id).unwrap().retime.is_some() && tl.clip(id).unwrap().preset_bases.contains_key(&PresetCategory::VelocityGraph));
         assert!(h.undo(&mut tl));
         assert_eq!(tl.clip(id), before.clip(id));
         assert_eq!(tl.extent(), before.extent());
@@ -963,7 +1230,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let written = MontagePreset::export_built_ins_to_dir(&dir).unwrap();
         assert_eq!(written.len(), 16);
-        let p = MontagePreset::find("Hard Kill Impact").unwrap();
+        let p = MontagePreset::find("Hard Kill Impact (S_Shake Decay)").unwrap();
         let saved = p.save_user_preset(&dir.join("user")).unwrap();
         assert!(saved.exists());
         let loaded = MontagePreset::load_user_presets(&dir.join("user"));
