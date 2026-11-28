@@ -138,3 +138,18 @@ fn gpu_blur_over_a_transparent_edge_does_not_darken_it() {
     }
     assert!(partial >= 4, "the blur spreads the edge over several pixels ({partial})");
 }
+
+#[test]
+fn gpu_blend_mode_over_transparent_canvas_preserves_overlay_color() {
+    let Some(gpu) = gpu() else { return };
+    let mut r = Renderer::new(gpu, W, H);
+    let mut top = Layer::new(ClipId(1), 0, LayerSource::Solid([0.8, 0.2, 0.4, 0.5]));
+    top.video.blend = nle_core::BlendMode::Multiply;
+    let comp = Composition::new(Time::ZERO, vec![RenderNode::Layer(top)]);
+    let packed = r.render_packed(&comp, &mut Media(red_edge), RenderOptions::default(), nle_render::PackFormat::Rgba64 { alpha: true, linear: false });
+    let i = ((H / 2 * W + W / 2) * 8) as usize;
+    let ch = |o: usize| u16::from_le_bytes([packed[i + o], packed[i + o + 1]]) as f32 / 65535.0;
+    let (cr, cg, cb, ca) = (ch(0), ch(2), ch(4), ch(6));
+    assert!((ca - 0.5).abs() < 0.02, "alpha must be 0.5, got {ca}");
+    assert!((cr - 0.8).abs() < 0.03 && (cg - 0.2).abs() < 0.03 && (cb - 0.4).abs() < 0.03, "Multiply over transparent canvas must not darken to black: ({cr}, {cg}, {cb}, {ca})");
+}

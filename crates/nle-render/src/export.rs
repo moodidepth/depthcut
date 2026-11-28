@@ -845,6 +845,7 @@ impl MasterReport {
 pub fn master_mix(pcm: &mut [f32], loudness_target: Option<f32>, lossy: bool, limit: bool, bus_limited_db: f32) -> MasterReport {
     use nle_media::analysis::loudness::{master_limit, normalize_program, CEILING_DBFS, LOSSY_CEILING_DBTP, PCM_CEILING_DBTP};
     let mut report = MasterReport { limited_db: bus_limited_db.max(0.0), ..Default::default() };
+    let mut enforced_ceiling: Option<f32> = None;
     if let Some(target) = loudness_target {
         // unlimited: gain only (a ceiling no mix reaches)
         let ceiling = if !limit {
@@ -859,6 +860,9 @@ pub fn master_mix(pcm: &mut [f32], loudness_target: Option<f32>, lossy: bool, li
                 log::info!("export: loudness {:.1} LUFS -> {target:.1} ({:+.1} dB, limiter {:.1} dB)", r.measured_lufs, r.gain_db, r.limited_db);
                 report.loudness_gain_db = Some(r.gain_db);
                 report.limited_db = report.limited_db.max(r.limited_db);
+                if limit {
+                    enforced_ceiling = Some(ceiling);
+                }
             }
             None => log::info!("export: mix is silent; loudness normalization skipped"),
         }
@@ -867,7 +871,7 @@ pub fn master_mix(pcm: &mut [f32], loudness_target: Option<f32>, lossy: bool, li
         let ceiling = if lossy { LOSSY_CEILING_DBTP } else { PCM_CEILING_DBTP };
         let db = master_limit(pcm, 2, 48_000, ceiling);
         report.limited_db = report.limited_db.max(db);
-        report.ceiling_dbtp = Some(ceiling);
+        report.ceiling_dbtp = Some(enforced_ceiling.map_or(ceiling, |c| c.min(ceiling)));
     }
     if report.is_hot() {
         log::warn!("export: mix is hot, limited {:.1} dB; lower the master", report.limited_db);

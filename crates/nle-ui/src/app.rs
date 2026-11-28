@@ -3796,14 +3796,16 @@ pub struct KillScan {
     pub ear_clips: usize,
 }
 
-/// Kill markers for one clip placed at `start`, from its audio.
 /// Kill markers for the part of `clip`'s source audio it shows. The scanner
 /// hears some source around the clip too: it measures the noise floor over
 /// what it is given and looks for the gunfire before each kill sound, so a
-/// short trimmed clip alone would hide kills near its edges.
+/// short trimmed clip alone would hide kills near its edges. Streaks are
+/// numbered over the kills visible inside the clip so pre-roll kills before
+/// the in point do not label a clip's first kill "Double Kill".
 fn kills_by_ear(clip: &Clip, start: Time, buf: &nle_media::AudioBuffer) -> Vec<Marker> {
     const BEFORE_S: f64 = 20.0;
     const AFTER_S: f64 = 2.0; // a kill sound that rings past the out point
+    const STREAK_SECS: f64 = 6.0;
     let (lo, hi) = clip.source_range();
     let ch = buf.channels.max(1) as usize;
     let rate = buf.sample_rate.max(1) as f64;
@@ -3813,11 +3815,23 @@ fn kills_by_ear(clip: &Clip, start: Time, buf: &nle_media::AudioBuffer) -> Vec<M
     let to = frame(hi.as_secs_f64() + AFTER_S).max(from);
     let peaks = analysis::analyze_kills_from_samples(&buf.samples[from * ch..to * ch], ch, rate as u32, 1.0);
     let offset = from as f64 / rate;
+    let mut streak = 0u32;
+    let mut prev_src = f64::MIN;
     peaks
         .into_iter()
         .filter_map(|p| {
-            let local = clip.local_for_source(Time::from_secs_f64(offset + p.time.as_secs_f64()))?;
-            Some(Marker::kill(start + local, p.label))
+            let src_secs = offset + p.time.as_secs_f64();
+            let local = clip.local_for_source(Time::from_secs_f64(src_secs))?;
+            streak = if src_secs - prev_src <= STREAK_SECS { streak + 1 } else { 1 };
+            prev_src = src_secs;
+            let label = match streak {
+                1 => "Kill".to_string(),
+                2 => "Double Kill".to_string(),
+                3 => "Triple Kill".to_string(),
+                4 => "Quadra Kill".to_string(),
+                n => format!("{n} Kills"),
+            };
+            Some(Marker::kill(start + local, label))
         })
         .collect()
 }
@@ -3956,5 +3970,37 @@ mod tests {
         let hits = times(&kills_by_ear(&c, Time::from_secs_f64(2.0), &vod()));
         assert_eq!(hits.len(), 1, "{hits:?}");
         assert!((hits[0] - 3.5).abs() < 0.06, "the kill lands on the beat: {hits:?}");
+    }
+
+    #[test]
+    fn trimmed_clip_numbers_only_visible_kills_not_preroll() {
+        // Two kills 3 s apart: first at ~17.15 s (pre-roll), second at ~20.15 s.
+        let mut buf = vod();
+        let mut x = 0x517c_c1b7u32;
+        let mut rnd = move || {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            x as f32 / u32::MAX as f32 - 0.5
+        };
+        for at in [17.0, 17.15] {
+            let start = (at * RATE as f64) as usize;
+            for i in 0..RATE as usize / 40 {
+                buf.samples[start + i] += rnd() * 1.2 * (-(i as f32) / (RATE as f32 * 0.008)).exp();
+            }
+        }
+        let (start, n, fade) = ((17.35 * RATE as f64) as usize, (0.4 * RATE as f64) as usize, RATE as usize / 200);
+        for i in 0..n {
+            buf.samples[start + i] += (std::f32::consts::TAU * 5_320.0 * i as f32 / RATE as f32).sin() * 0.15 * (i.min(n - i) as f32 / fade as f32).min(1.0);
+        }
+        // Trimmed to show only the second kill: labeled "Kill", not "Double Kill".
+        let trimmed = kills_by_ear(&clip(19.0, 4.0), Time::ZERO, &buf);
+        assert_eq!(trimmed.len(), 1, "{trimmed:?}");
+        assert_eq!(trimmed[0].name, "Kill");
+        // Full clip covering both kills: "Kill" then "Double Kill".
+        let full = kills_by_ear(&clip(15.0, 8.0), Time::ZERO, &buf);
+        assert_eq!(full.len(), 2, "{full:?}");
+        assert_eq!(full[0].name, "Kill");
+        assert_eq!(full[1].name, "Double Kill");
     }
 }

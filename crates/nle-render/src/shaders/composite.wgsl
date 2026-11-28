@@ -153,7 +153,12 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         let suv = c.src_rect.xy + uv * c.src_rect.zw;
         let l = sample_layer(suv);
         let a = clamp(l.a * c.opacity, 0.0, 1.0);
-        out = mix(base.rgb, blend(base.rgb, l.rgb, c.blend), a);
+        // W3C Porter-Duff blend-mode compositing over a premultiplied base:
+        // matches mix(base.rgb, blend(...), a) when base.a == 1 and stays
+        // un-darkened on transparent canvases (ProRes 4444 / PNG alpha).
+        let base_straight = select(vec3<f32>(0.0), base.rgb / base.a, base.a > 1e-6);
+        let blended = blend(base_straight, l.rgb, c.blend);
+        out = base.rgb * (1.0 - a) + l.rgb * (a * (1.0 - base.a)) + blended * (a * base.a);
         alpha = a + base.a * (1.0 - a);
     }
     textureStore(dst, vec2<i32>(id.xy), vec4<f32>(out, alpha));
