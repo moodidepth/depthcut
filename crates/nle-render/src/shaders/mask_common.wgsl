@@ -10,7 +10,7 @@ struct Mask {
     size: vec2<f32>,
     rot_cs: vec2<f32>, // cos, sin of -rotation
     aspect: f32,
-    _pad: f32,
+    expand: f32,    // frame heights the shape grows by before feathering
     points: array<vec4<f32>, 32>, // two vertices per entry (xy, zw), 0..1 frame coords
 };
 
@@ -75,7 +75,7 @@ fn mask_alpha(m: Mask, uv: vec2<f32>) -> f32 {
             d = length(max(dd, vec2<f32>(0.0))) + min(max(dd.x, dd.y), 0.0);
         }
     }
-    var a = feather_alpha(d, m.feather);
+    var a = feather_alpha(d - m.expand, m.feather);
     if (m.invert != 0u) {
         a = 1.0 - a;
     }

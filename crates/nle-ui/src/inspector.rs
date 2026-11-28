@@ -354,6 +354,7 @@ fn video_tab(
         zoom_punch_section(ui, punch, punch_request);
         crop_section(ui, &mut c.video, t, f, layer);
     }
+    masks_section(ui, &mut c.video, t, f, view);
     effects_section(ui, &mut c.effects, t, f, view);
     if matches!(c.kind, ClipKind::Asset { .. } | ClipKind::Compound(_)) {
         speed_section(ui, c, t, retime);
@@ -490,6 +491,187 @@ fn crop_section(ui: &mut egui::Ui, v: &mut nle_core::VideoParams, t: Time, f: Ti
         v.crop_aspect = d.crop_aspect;
         v.crop_lock = d.crop_lock;
     }
+}
+
+fn masks_section(ui: &mut egui::Ui, v: &mut nle_core::VideoParams, t: Time, f: Time, view: &mut ColorView) {
+    use nle_core::color::MaskShape;
+    use nle_core::mask::{MaskMode, MatteChannel, MatteSource, TrackMatte, VideoMask, MAX_CLIP_MASKS};
+    let title = if v.masks.is_empty() && v.track_matte.is_none() {
+        "Masks & Track Matte".to_string()
+    } else if v.track_matte.is_some() {
+        format!("Masks ({}) · Track Matte", v.masks.len())
+    } else {
+        format!("Masks ({}) & Track Matte", v.masks.len())
+    };
+    section(ui, &title, |ui| {
+        let can_add = v.masks.len() < MAX_CLIP_MASKS;
+        ui.horizontal_wrapped(|ui| {
+            for (shape, label) in [(MaskShape::Rectangle, "＋ Rectangle"), (MaskShape::Ellipse, "＋ Ellipse"), (MaskShape::Polygon, "＋ Polygon")] {
+                if ui.add_enabled(can_add, egui::Button::new(label).small()).clicked() {
+                    let idx = v.masks.len();
+                    v.masks.push(VideoMask::new(shape));
+                    view.mask_focus = Some(MaskFocus::Clip(idx));
+                }
+            }
+            if !v.masks.is_empty() && ui.small_button("Clear Masks").clicked() {
+                v.masks.clear();
+                if matches!(view.mask_focus, Some(MaskFocus::Clip(_))) {
+                    view.mask_focus = None;
+                }
+            }
+        });
+
+        let mut swap: Option<(usize, usize)> = None;
+        let mut remove: Option<usize> = None;
+        let n = v.masks.len();
+        let tol = Time(f.0 / 2);
+        for (idx, m) in v.masks.iter_mut().enumerate() {
+            ui.add_space(2.0);
+            egui::Frame::new().fill(theme::BG).stroke(Stroke::new(1.0_f32, theme::BORDER)).corner_radius(4.0).inner_margin(egui::Margin::symmetric(6, 4)).show(ui, |ui| {
+                ui.push_id(("clip-mask", idx), |ui| {
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut m.enabled, "");
+                        ui.label(egui::RichText::new(format!("Mask {}", idx + 1)).strong());
+                        let mode_combo = egui::ComboBox::from_id_salt(("cmask-mode", idx)).width(74.0).selected_text(m.mode.label()).show_ui(ui, |ui| {
+                            for mode in MaskMode::ALL {
+                                ui.selectable_value(&mut m.mode, mode, mode.label());
+                            }
+                        });
+                        crate::widgets::describe(&mode_combo.response, format!("Mask {} Mode", idx + 1), m.mode.label());
+                        let mut editing = view.mask_focus == Some(MaskFocus::Clip(idx));
+                        if ui.toggle_value(&mut editing, "✎ Edit").on_hover_text("Edit mask handles in viewer (Esc to finish)").changed() {
+                            view.mask_focus = editing.then_some(MaskFocus::Clip(idx));
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("✕").on_hover_text("Remove mask").clicked() {
+                                remove = Some(idx);
+                            }
+                            if ui.add_enabled(idx + 1 < n, egui::Button::new("↓").small()).on_hover_text("Move down").clicked() {
+                                swap = Some((idx, idx + 1));
+                            }
+                            if ui.add_enabled(idx > 0, egui::Button::new("↑").small()).on_hover_text("Move up").clicked() {
+                                swap = Some((idx, idx - 1));
+                            }
+                        });
+                    });
+                    if m.enabled {
+                        ui.horizontal(|ui| {
+                            let lbl = ui.add_sized([96.0, 20.0], egui::Label::new(egui::RichText::new("Shape").color(theme::TEXT_DIM)));
+                            let shape_combo = egui::ComboBox::from_id_salt(("cmask-shape", idx)).selected_text(m.shape.shape.label()).show_ui(ui, |ui| {
+                                for s in MaskShape::ALL {
+                                    if ui.selectable_label(m.shape.shape == s, s.label()).clicked() {
+                                        m.shape.shape = s;
+                                        if s == MaskShape::Polygon && m.shape.points.len() < 3 {
+                                            m.shape.points = VideoMask::new(MaskShape::Polygon).shape.points;
+                                        }
+                                    }
+                                }
+                            });
+                            crate::widgets::name_combo(&shape_combo.response, &lbl, m.shape.shape.label());
+                            ui.checkbox(&mut m.shape.invert, "Invert");
+                        });
+                        if m.shape.shape == MaskShape::Polygon {
+                            ui.horizontal(|ui| {
+                                ui.add_sized([96.0, 20.0], egui::Label::new(egui::RichText::new("Path").color(theme::TEXT_DIM)));
+                                ui.label(format!("{} pts", m.shape.points.len()));
+                                let mut bez = m.shape.is_bezier();
+                                if !bez {
+                                    ui.checkbox(&mut m.shape.smooth, "Smooth");
+                                }
+                                if ui.toggle_value(&mut bez, "Bézier").on_hover_text("Per-point tangent handles in the viewer").changed() {
+                                    if bez {
+                                        m.shape.convert_to_bezier();
+                                    } else {
+                                        m.shape.clear_bezier();
+                                    }
+                                }
+                                let near = m.shape.shape_key_near(t, tol);
+                                if ui.small_button(if near.is_some() { "◆ Key" } else { "◇ Key" }).on_hover_text("Keyframe polygon shape at playhead").clicked() {
+                                    if let Some((p, h)) = m.shape.shape_at(t) {
+                                        m.shape.points = p;
+                                        m.shape.handles = h;
+                                    }
+                                    m.shape.set_shape_key(t, tol);
+                                }
+                            });
+                        }
+                        param_row(ui, &ParamSpec::new("Offset X", -1.5, 1.5, 0.0).scaled(100.0, " %").decimals(1), &mut m.offset[0], t, f);
+                        param_row(ui, &ParamSpec::new("Offset Y", -1.5, 1.5, 0.0).scaled(100.0, " %").decimals(1), &mut m.offset[1], t, f);
+                        param_row(ui, &ParamSpec::new("Scale X", 0.01, 10.0, 1.0).scaled(100.0, " %").decimals(1), &mut m.scale[0], t, f);
+                        param_row(ui, &ParamSpec::new("Scale Y", 0.01, 10.0, 1.0).scaled(100.0, " %").decimals(1), &mut m.scale[1], t, f);
+                        param_row(ui, &ParamSpec::new("Rotation", -3600.0, 3600.0, 0.0).scaled(1.0, "°").speed(0.5).decimals(1), &mut m.rotation, t, f);
+                        param_row(ui, &ParamSpec::new("Feather", 0.0, 0.5, 0.02).scaled(100.0, " %").speed(0.002).decimals(1), &mut m.feather, t, f);
+                        param_row(ui, &ParamSpec::new("Expand", -0.5, 0.5, 0.0).scaled(100.0, " %").speed(0.002).decimals(1), &mut m.expand, t, f);
+                        param_row(ui, &ParamSpec::new("Opacity", 0.0, 1.0, 1.0).scaled(100.0, " %").decimals(0), &mut m.opacity, t, f);
+                    }
+                });
+            });
+        }
+        if let Some((a, b)) = swap {
+            v.masks.swap(a, b);
+            if view.mask_focus == Some(MaskFocus::Clip(a)) {
+                view.mask_focus = Some(MaskFocus::Clip(b));
+            } else if view.mask_focus == Some(MaskFocus::Clip(b)) {
+                view.mask_focus = Some(MaskFocus::Clip(a));
+            }
+        } else if let Some(idx) = remove {
+            v.masks.remove(idx);
+            match view.mask_focus {
+                Some(MaskFocus::Clip(i)) if i == idx => view.mask_focus = None,
+                Some(MaskFocus::Clip(i)) if i > idx => view.mask_focus = Some(MaskFocus::Clip(i - 1)),
+                _ => {}
+            }
+        }
+
+        ui.add_space(4.0);
+        ui.separator();
+        ui.horizontal(|ui| {
+            let behind = v.track_matte == Some(TrackMatte::behind_subject());
+            if ui
+                .selectable_label(behind, "👤 Behind Subject")
+                .on_hover_text("Put this title, FX or adjustment layer behind the AI Person Matte of the clip directly below")
+                .clicked()
+            {
+                v.track_matte = if behind { None } else { Some(TrackMatte::behind_subject()) };
+            }
+        });
+        ui.horizontal(|ui| {
+            let lbl = ui.add_sized([96.0, 20.0], egui::Label::new(egui::RichText::new("Track Matte").color(theme::TEXT_DIM)));
+            let cur_txt = v.track_matte.map_or("None", |tm| tm.source.label());
+            let combo = egui::ComboBox::from_id_salt("track-matte-source").selected_text(cur_txt).show_ui(ui, |ui| {
+                if ui.selectable_label(v.track_matte.is_none(), "None").clicked() {
+                    v.track_matte = None;
+                }
+                for src in MatteSource::ALL {
+                    if ui.selectable_label(v.track_matte.is_some_and(|tm| tm.source == src), src.label()).clicked() {
+                        match &mut v.track_matte {
+                            Some(tm) => tm.source = src,
+                            None => v.track_matte = Some(TrackMatte { source: src, ..Default::default() }),
+                        }
+                    }
+                }
+            });
+            crate::widgets::name_combo(&combo.response, &lbl, cur_txt);
+        });
+        if let Some(tm) = &mut v.track_matte {
+            ui.horizontal(|ui| {
+                let lbl = ui.add_sized([96.0, 20.0], egui::Label::new(egui::RichText::new("Matte Channel").color(theme::TEXT_DIM)));
+                let ch_txt = tm.channel.label();
+                let combo = egui::ComboBox::from_id_salt("track-matte-channel").selected_text(ch_txt).show_ui(ui, |ui| {
+                    for ch in MatteChannel::ALL {
+                        ui.selectable_value(&mut tm.channel, ch, ch.label());
+                    }
+                });
+                crate::widgets::name_combo(&combo.response, &lbl, ch_txt);
+                ui.checkbox(&mut tm.invert, "Invert");
+            });
+            let hint = match tm.source {
+                MatteSource::Below => "Reads the layer beneath (which stays visible — ideal for text/glow behind a subject).",
+                MatteSource::Above => "Uses the layer directly above as a cutout matte (hides that layer, After Effects style).",
+            };
+            ui.label(egui::RichText::new(hint).small().color(theme::TEXT_DIM));
+        }
+    });
 }
 
 fn speed_section(ui: &mut egui::Ui, c: &Clip, t: Time, retime: &mut Option<RetimeAction>) {

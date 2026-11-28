@@ -9,6 +9,8 @@ pub const SHADER_COLORSPACE: &str = include_str!("shaders/colorspace.wgsl");
 pub const SHADER_GRADE: &str = concat!(include_str!("shaders/colorspace.wgsl"), include_str!("shaders/grade.wgsl"));
 pub const SHADER_CORRECT: &str = concat!(include_str!("shaders/colorspace.wgsl"), include_str!("shaders/mask_common.wgsl"), include_str!("shaders/correct.wgsl"));
 pub const SHADER_MASK: &str = concat!(include_str!("shaders/mask_common.wgsl"), include_str!("shaders/mask.wgsl"));
+pub const SHADER_CLIP_MASK: &str = concat!(include_str!("shaders/mask_common.wgsl"), include_str!("shaders/clip_mask.wgsl"));
+pub const SHADER_TRACK_MATTE: &str = include_str!("shaders/track_matte.wgsl");
 pub const SHADER_COMPOSITE: &str = include_str!("shaders/composite.wgsl");
 pub const SHADER_TRANSITION: &str = include_str!("shaders/transition.wgsl");
 pub const SHADER_OPTICAL_FLOW: &str = include_str!("shaders/optical_flow.wgsl");
@@ -45,6 +47,8 @@ pub const ALL_SHADERS: &[(&str, &str, &str)] = &[
     ("scopes", SHADER_SCOPES, "accumulate"),
     ("correct", SHADER_CORRECT, "main"),
     ("mask", SHADER_MASK, "mask_mix"),
+    ("clip_mask", SHADER_CLIP_MASK, "main"),
+    ("track_matte", SHADER_TRACK_MATTE, "main"),
     ("warp", SHADER_WARP, "main"),
     ("node_mix", SHADER_NODE_MIX, "main"),
     ("optical_flow_median", SHADER_OPTICAL_FLOW, "vec_median"),
@@ -165,6 +169,10 @@ pub struct Pipelines {
     pub correct: Pipe,
     /// Shape-masked mix of a processed image over the original (and the wipe after nodes).
     pub mask_mix: Pipe,
+    /// Clip-level stacked shape masks on layer alpha.
+    pub clip_mask: Pipe,
+    /// Neighbour-layer track matte projection & alpha modulation.
+    pub track_matte: Pipe,
     pub composite: Pipe,
     pub transition: Pipe,
     /// Optical flow passes: luma pyramid, block matching, upsampling, Lucas-Kanade.
@@ -290,6 +298,8 @@ impl Pipelines {
             grade: pipe(device, cache, "grade", SHADER_GRADE, "main", &[B::Tex, B::Tex3d, B::Samp, B::Uniform, w, B::Tex3d]),
             correct: pipe(device, cache, "correct", SHADER_CORRECT, "main", &[B::Tex, B::Uniform, B::StorageRo, w]),
             mask_mix: pipe(device, cache, "mask_mix", SHADER_MASK, "mask_mix", &[B::Tex, B::Tex, B::Uniform, w]),
+            clip_mask: pipe(device, cache, "clip_mask", SHADER_CLIP_MASK, "main", &[B::Tex, B::Uniform, w]),
+            track_matte: pipe(device, cache, "track_matte", SHADER_TRACK_MATTE, "main", &[B::Tex, B::Tex, B::Uniform, w]),
             composite: pipe(device, cache, "composite", SHADER_COMPOSITE, "main", &[B::Tex, B::Tex, B::Samp, B::Uniform, w]),
             transition: pipe(device, cache, "transition", SHADER_TRANSITION, "main", &[B::Tex, B::Tex, B::Samp, B::Uniform, w]),
             frameblend: pipe(device, cache, "frameblend", SHADER_FRAMEBLEND, "main", &[B::Tex, B::Tex, B::Tex, B::Samp, B::Uniform, w]),

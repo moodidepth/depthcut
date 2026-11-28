@@ -188,6 +188,12 @@ pub struct VideoParams {
     /// Crop edits keep the cropped picture's aspect ratio.
     #[serde(default, skip_serializing_if = "is_false")]
     pub crop_lock: bool,
+    /// Clip-level alpha shape masks (in the clip's source frame, before transform).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub masks: Vec<crate::mask::VideoMask>,
+    /// Neighbour-layer track matte (alpha, luma or AI subject matte).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_matte: Option<crate::mask::TrackMatte>,
 }
 
 impl Default for VideoParams {
@@ -215,6 +221,8 @@ impl Default for VideoParams {
             scale_lock: true,
             crop_aspect: CropAspect::Free,
             crop_lock: false,
+            masks: Vec::new(),
+            track_matte: None,
         }
     }
 }
@@ -1521,6 +1529,11 @@ impl Clip {
                 out.push((std::borrow::Cow::Owned(format!("{}: {}", e.kind.label(), d.name)), p));
             }
         }
+        for (mi, m) in self.video.masks.iter().enumerate() {
+            for (name, p) in crate::mask::MASK_PARAM_NAMES.iter().zip(m.params()) {
+                out.push((std::borrow::Cow::Owned(format!("Mask {}: {name}", mi + 1)), p));
+            }
+        }
         out
     }
 
@@ -1556,6 +1569,11 @@ impl Clip {
                 out.push((std::borrow::Cow::Owned(format!("{label}: {}", d.name)), p));
             }
         }
+        for (mi, m) in v.masks.iter_mut().enumerate() {
+            for (name, p) in crate::mask::MASK_PARAM_NAMES.iter().zip(m.params_mut()) {
+                out.push((std::borrow::Cow::Owned(format!("Mask {}: {name}", mi + 1)), p));
+            }
+        }
         out
     }
 
@@ -1566,11 +1584,17 @@ impl Clip {
         self.color.corrections.iter_mut().for_each(|n| n.shift_keys(dt));
         self.effects.iter_mut().filter_map(|e| e.mask.as_mut()).for_each(|m| m.shift_keys(dt));
         self.effects.iter_mut().for_each(|e| e.trigger += dt);
+        self.video.masks.iter_mut().for_each(|m| m.shift_keys(dt));
     }
 
     pub fn for_each_param_mut(&mut self, mut f: impl FnMut(&mut Param)) {
         for p in self.video.params_mut() {
             f(p);
+        }
+        for m in &mut self.video.masks {
+            for p in m.params_mut() {
+                f(p);
+            }
         }
         for p in self.color.params_mut() {
             f(p);
@@ -1621,6 +1645,8 @@ impl Clip {
         right.color.corrections.iter_mut().for_each(|n| n.keep_right(at));
         left.effects.iter_mut().filter_map(|e| e.mask.as_mut()).for_each(|m| m.keep_left(at));
         right.effects.iter_mut().filter_map(|e| e.mask.as_mut()).for_each(|m| m.keep_right(at));
+        left.video.masks.iter_mut().for_each(|m| m.keep_left(at));
+        right.video.masks.iter_mut().for_each(|m| m.keep_right(at));
         right.effects.iter_mut().for_each(|e| e.trigger -= at);
 
         left.anchor = if self.anchor < at { self.anchor } else { Time::ZERO };

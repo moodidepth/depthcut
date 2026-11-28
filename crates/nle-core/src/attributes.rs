@@ -152,6 +152,18 @@ pub fn apply(src: &Clip, dst: &Clip, sel: &AttributeSet, timing: KeyTiming) -> C
         v.opacity = sv.opacity.clone();
         v.blend_mode = sv.blend_mode;
         stretch_param(&mut v.opacity, k);
+        v.masks = sv.masks.clone();
+        v.track_matte = sv.track_matte;
+        if k != 1.0 {
+            for m in &mut v.masks {
+                for p in m.params_mut() {
+                    stretch_param(p, k);
+                }
+                for sk in &mut m.shape.shape_keys {
+                    sk.time = sk.time.mul_f64(k);
+                }
+            }
+        }
     }
     if sel.color {
         out.color = grade_copy(&src.color, k);

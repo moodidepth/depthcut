@@ -494,36 +494,7 @@ impl ShapeMask {
     /// Mask coverage 0..1 at frame coordinate `uv` for a `aspect` (w / h)
     /// frame. CPU mirror of `mask_alpha` in `mask.wgsl`.
     pub fn alpha(&self, uv: [f32; 2], aspect: f32) -> f32 {
-        // work in height units centred on the frame
-        let to = |q: [f32; 2]| [(q[0] - 0.5) * aspect, q[1] - 0.5];
-        let p = to(uv);
-        let d = match self.shape {
-            MaskShape::Ellipse | MaskShape::Rectangle => {
-                let c = to(self.center);
-                let (s, co) = (-self.rotation.to_radians()).sin_cos();
-                let q = [p[0] - c[0], p[1] - c[1]];
-                let l = [q[0] * co - q[1] * s, q[0] * s + q[1] * co];
-                let hs = [self.size[0].max(1e-4), self.size[1].max(1e-4)];
-                if self.shape == MaskShape::Ellipse {
-                    let k = ((l[0] / hs[0]).powi(2) + (l[1] / hs[1]).powi(2)).sqrt();
-                    (k - 1.0) * hs[0].min(hs[1])
-                } else {
-                    let dx = l[0].abs() - hs[0];
-                    let dy = l[1].abs() - hs[1];
-                    (dx.max(0.0).powi(2) + dy.max(0.0).powi(2)).sqrt() + dx.max(dy).min(0.0)
-                }
-            }
-            MaskShape::Polygon => {
-                let o: Vec<[f32; 2]> = self.outline().into_iter().map(to).collect();
-                polygon_sdf(&o, p)
-            }
-        };
-        let a = feather_alpha(d, self.feather);
-        if self.invert {
-            1.0 - a
-        } else {
-            a
-        }
+        self.resolve().coverage(uv, aspect)
     }
 }
 
@@ -535,6 +506,9 @@ pub struct ResolvedMask {
     pub size: [f32; 2],
     pub rotation: f32,
     pub feather: f32,
+    /// Grows (positive) or shrinks the shape by this distance in frame
+    /// heights before feathering.
+    pub expand: f32,
     pub invert: bool,
     /// Used entries of `points` (polygon outline).
     pub count: u32,
@@ -707,7 +681,49 @@ impl ShapeMask {
                 count += 1;
             }
         }
-        ResolvedMask { shape: self.shape, center: self.center, size: self.size, rotation: self.rotation, feather: self.feather, invert: self.invert, count, points }
+        ResolvedMask { shape: self.shape, center: self.center, size: self.size, rotation: self.rotation, feather: self.feather, expand: 0.0, invert: self.invert, count, points }
+    }
+}
+
+impl ResolvedMask {
+    /// Signed distance (frame heights, negative inside) from `uv` to the
+    /// shape's edge on an `aspect` (w / h) frame, before expansion.
+    pub fn distance(&self, uv: [f32; 2], aspect: f32) -> f32 {
+        // work in height units centred on the frame
+        let to = |q: [f32; 2]| [(q[0] - 0.5) * aspect, q[1] - 0.5];
+        let p = to(uv);
+        match self.shape {
+            MaskShape::Ellipse | MaskShape::Rectangle => {
+                let c = to(self.center);
+                let (s, co) = (-self.rotation.to_radians()).sin_cos();
+                let q = [p[0] - c[0], p[1] - c[1]];
+                let l = [q[0] * co - q[1] * s, q[0] * s + q[1] * co];
+                let hs = [self.size[0].max(1e-4), self.size[1].max(1e-4)];
+                if self.shape == MaskShape::Ellipse {
+                    let k = ((l[0] / hs[0]).powi(2) + (l[1] / hs[1]).powi(2)).sqrt();
+                    (k - 1.0) * hs[0].min(hs[1])
+                } else {
+                    let dx = l[0].abs() - hs[0];
+                    let dy = l[1].abs() - hs[1];
+                    (dx.max(0.0).powi(2) + dy.max(0.0).powi(2)).sqrt() + dx.max(dy).min(0.0)
+                }
+            }
+            MaskShape::Polygon => {
+                let o: Vec<[f32; 2]> = self.points[..(self.count as usize).min(MAX_MASK_POINTS)].iter().map(|&q| to(q)).collect();
+                polygon_sdf(&o, p)
+            }
+        }
+    }
+
+    /// Coverage 0..1 at `uv`: expanded, feathered and inverted. CPU mirror
+    /// of `mask_alpha` in `mask_common.wgsl`.
+    pub fn coverage(&self, uv: [f32; 2], aspect: f32) -> f32 {
+        let a = feather_alpha(self.distance(uv, aspect) - self.expand, self.feather);
+        if self.invert {
+            1.0 - a
+        } else {
+            a
+        }
     }
 }
 

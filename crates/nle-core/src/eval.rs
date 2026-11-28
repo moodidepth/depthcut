@@ -115,6 +115,10 @@ pub struct Layer {
     pub adjustment: bool,
     /// Effect stack (enabled, non-trivial effects, in order).
     pub effects: Vec<ResolvedEffect>,
+    /// Clip-level alpha masks (enabled, up to `MAX_CLIP_MASKS`, in order).
+    pub masks: Vec<crate::mask::ResolvedClipMask>,
+    /// Optional neighbour-layer track matte.
+    pub track_matte: Option<crate::mask::TrackMatte>,
 }
 
 /// Clip id used for caption layers (never collides with real clips).
@@ -123,7 +127,7 @@ pub const CAPTION_CLIP_ID: ClipId = ClipId(u64::MAX - 1);
 impl Layer {
     /// A plain layer with default transform, no grade and no effects.
     pub fn new(clip: ClipId, lane: i32, source: LayerSource) -> Self {
-        Layer { clip, lane, source, video: ResolvedVideo::default(), color: ResolvedColor::default(), adjustment: false, effects: Vec::new() }
+        Layer { clip, lane, source, video: ResolvedVideo::default(), color: ResolvedColor::default(), adjustment: false, effects: Vec::new(), masks: Vec::new(), track_matte: None }
     }
 
     pub fn has_effect(&self, kind: EffectKind) -> bool {
@@ -344,7 +348,34 @@ pub fn clip_layer(c: &Clip, local: Time, lane: i32) -> Option<Layer> {
     if c.color.enabled {
         color.graph = c.color.graph.as_ref().map(|g| g.resolve(&color.nodes, local));
     }
-    Some(Layer { clip: c.id, lane, source, video, color, adjustment: matches!(c.kind, ClipKind::Adjustment), effects: resolve_effects(c, local, src) })
+    let masks = resolve_clip_masks(c, local, src);
+    Some(Layer {
+        clip: c.id,
+        lane,
+        source,
+        video,
+        color,
+        adjustment: matches!(c.kind, ClipKind::Adjustment),
+        effects: resolve_effects(c, local, src),
+        masks,
+        track_matte: c.video.track_matte,
+    })
+}
+
+fn resolve_clip_masks(c: &Clip, local: Time, src: Option<f64>) -> Vec<crate::mask::ResolvedClipMask> {
+    c.video
+        .masks
+        .iter()
+        .filter(|m| m.enabled)
+        .take(crate::mask::MAX_CLIP_MASKS)
+        .map(|m| {
+            let mut shape = m.shape.at(local);
+            if let Some(s) = src.filter(|_| shape.track.is_some()) {
+                shape = tracked_mask(c, &shape, s);
+            }
+            m.resolve_shape(local, &shape)
+        })
+        .collect()
 }
 
 /// `m` moved along its track (unchanged without one).

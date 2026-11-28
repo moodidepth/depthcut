@@ -14,6 +14,7 @@ use nle_core::{ClipKind, ColorParams, Command, LutRef, Time};
 pub enum MaskFocus {
     Node(u64),
     Effect(u64),
+    Clip(usize),
 }
 
 /// Viewer-side colour state the inspector edits.
@@ -631,6 +632,7 @@ fn me_key(m: MaskFocus) -> (u8, u64) {
     match m {
         MaskFocus::Node(i) => (0, i),
         MaskFocus::Effect(i) => (1, i),
+        MaskFocus::Clip(i) => (2, i as u64),
     }
 }
 
@@ -641,7 +643,230 @@ fn mask_of(clip: &mut nle_core::Clip, f: MaskFocus) -> Option<&mut ShapeMask> {
     match f {
         MaskFocus::Node(id) => clip.color.corrections.iter_mut().find(|n| n.id == id)?.mask.as_mut(),
         MaskFocus::Effect(id) => clip.effects.iter_mut().find(|e| e.id == id)?.mask.as_mut(),
+        MaskFocus::Clip(i) => clip.video.masks.get_mut(i).map(|m| &mut m.shape),
     }
+}
+
+/// Interactive viewer gizmo for a clip-level `VideoMask` (handles offset,
+/// scale/size, rotation, feather, and transformed polygon / Bézier points).
+#[allow(clippy::too_many_arguments)]
+fn clip_mask_gizmo(app: &mut App, ui: &mut egui::Ui, img: Rect, frame: (f32, f32), id: nle_core::ClipId, clip: &nle_core::Clip, local: Time, tol: Time, idx: usize) -> bool {
+    use nle_core::mask::{polygon_pivot, transform_point, untransform_point};
+    let mut edited = clip.clone();
+    let Some(vm) = edited.video.masks.get_mut(idx) else {
+        app.color_view.mask_focus = None;
+        return false;
+    };
+    let roto = !vm.shape.shape_keys.is_empty();
+    if let Some((p, h)) = vm.shape.shape_at(local) {
+        vm.shape.points = p;
+        vm.shape.handles = h;
+    }
+    let off = [vm.offset[0].at_f32(local), vm.offset[1].at_f32(local)];
+    let sc = [vm.scale[0].at_f32(local), vm.scale[1].at_f32(local)];
+    let rot = vm.rotation.at_f32(local);
+    let feather = vm.feather.at_f32(local).max(0.0);
+    let expand = vm.expand.at_f32(local);
+    let aspect = frame.0 / frame.1;
+    let hpx = img.height();
+    let to_s = |uv: [f32; 2]| Pos2::new(img.left() + uv[0] * img.width(), img.top() + uv[1] * img.height());
+    let from_s = |p: Pos2| [(p.x - img.left()) / img.width(), (p.y - img.top()) / img.height()];
+    let painter = ui.painter().with_clip_rect(img.expand(40.0));
+    let col = theme::SNAP;
+    let mut changed = false;
+
+    match vm.shape.shape {
+        MaskShape::Ellipse | MaskShape::Rectangle => {
+            let ctr_uv = [vm.shape.center[0] + off[0], vm.shape.center[1] + off[1]];
+            let hs = [(vm.shape.size[0] * sc[0].abs()).max(0.005), (vm.shape.size[1] * sc[1].abs()).max(0.005)];
+            let es = [(hs[0] + expand).max(0.002), (hs[1] + expand).max(0.002)];
+            let tot_rot = vm.shape.rotation + rot;
+            let (s, c) = tot_rot.to_radians().sin_cos();
+            let to_pt = |l: [f32; 2]| {
+                let q = [l[0] * c - l[1] * s, l[0] * s + l[1] * c];
+                let ct = to_s(ctr_uv);
+                Pos2::new(ct.x + q[0] * hpx, ct.y + q[1] * hpx)
+            };
+            let unrot = |p: Pos2| {
+                let ct = to_s(ctr_uv);
+                let d = [(p.x - ct.x) / hpx, (p.y - ct.y) / hpx];
+                [d[0] * c + d[1] * s, -d[0] * s + d[1] * c]
+            };
+            let make_loop = |rx: f32, ry: f32| -> Vec<Pos2> {
+                if vm.shape.shape == MaskShape::Ellipse {
+                    (0..64).map(|i| i as f32 / 64.0 * std::f32::consts::TAU).map(|a| to_pt([rx * a.cos(), ry * a.sin()])).collect()
+                } else {
+                    [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]].iter().map(|k| to_pt([rx * k[0], ry * k[1]])).collect()
+                }
+            };
+            painter.add(egui::Shape::closed_line(make_loop(es[0], es[1]), Stroke::new(1.5_f32, col)));
+            if feather > 0.0 {
+                for d in [-feather * 0.5, feather * 0.5] {
+                    painter.add(egui::Shape::closed_line(make_loop((es[0] + d).max(0.001), (es[1] + d).max(0.001)), Stroke::new(0.8_f32, col.gamma_multiply(0.5))));
+                }
+            }
+            let ctr = to_s(ctr_uv);
+            painter.circle_stroke(ctr, 6.0, Stroke::new(1.5_f32, col));
+            let hw = to_pt([es[0], 0.0]);
+            let hh = to_pt([0.0, es[1]]);
+            let hr = to_pt([0.0, -es[1] - 24.0 / hpx]);
+            let hf_edge = to_pt([-es[0], 0.0]);
+            let hf = to_pt([-es[0] - feather * 0.5 - 10.0 / hpx, 0.0]);
+            painter.line_segment([to_pt([0.0, -es[1]]), hr], Stroke::new(1.0_f32, col));
+            painter.line_segment([hf_edge, hf], Stroke::new(1.0_f32, theme::VIDEO));
+            for h in [hw, hh] {
+                painter.rect_filled(Rect::from_center_size(h, Vec2::splat(10.0)), 2.0, Color32::WHITE);
+            }
+            painter.circle_filled(hr, 5.0, col);
+            painter.circle_filled(hf, 5.0, theme::VIDEO);
+
+            let it = |name: &str, at: Pos2| ui.interact(Rect::from_center_size(at, Vec2::splat(16.0)), ui.id().with(("cmask-gz", idx, name)), Sense::drag());
+            let (rw, rh, rr, rc, rf) = (it("w", hw), it("h", hh), it("r", hr), it("c", ctr), it("f", hf).on_hover_text("Drag to adjust mask feather"));
+            if let Some(p) = rw.interact_pointer_pos().filter(|_| rw.dragged()) {
+                let want = (unrot(p)[0].abs() - expand).max(0.005);
+                if vm.scale[0].is_animated() {
+                    vm.scale[0].set(local, (want / vm.shape.size[0].max(0.005)).clamp(0.01, 20.0) as f64);
+                } else {
+                    vm.shape.size[0] = (want / sc[0].abs().max(1e-3)).clamp(0.005, 2.0);
+                }
+                changed = true;
+            }
+            if let Some(p) = rh.interact_pointer_pos().filter(|_| rh.dragged()) {
+                let want = (unrot(p)[1].abs() - expand).max(0.005);
+                if vm.scale[1].is_animated() {
+                    vm.scale[1].set(local, (want / vm.shape.size[1].max(0.005)).clamp(0.01, 20.0) as f64);
+                } else {
+                    vm.shape.size[1] = (want / sc[1].abs().max(1e-3)).clamp(0.005, 2.0);
+                }
+                changed = true;
+            }
+            if let Some(p) = rr.interact_pointer_pos().filter(|_| rr.dragged()) {
+                let d = p - ctr;
+                let deg = d.x.atan2(-d.y).to_degrees() - vm.shape.rotation;
+                vm.rotation.set(local, deg as f64);
+                changed = true;
+            }
+            if rc.dragged() {
+                let d = rc.drag_delta();
+                vm.offset[0].set(local, (off[0] + d.x / img.width()) as f64);
+                vm.offset[1].set(local, (off[1] + d.y / img.height()) as f64);
+                changed = true;
+            }
+            if let Some(p) = rf.interact_pointer_pos().filter(|_| rf.dragged()) {
+                let dist = (-unrot(p)[0] - es[0] - 10.0 / hpx).max(0.0);
+                vm.feather.set(local, (dist * 2.0).clamp(0.0, 0.5) as f64);
+                changed = true;
+            }
+            for r in [&rw, &rh, &rf] {
+                if r.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+                }
+            }
+        }
+        MaskShape::Polygon => {
+            let pivot = polygon_pivot(&vm.shape.points);
+            let fwd = |q: [f32; 2]| transform_point(q, pivot, off, sc, rot, aspect);
+            let inv = |q: [f32; 2]| untransform_point(q, pivot, off, sc, rot, aspect);
+            let outline: Vec<Pos2> = vm.shape.outline().into_iter().map(|q| to_s(fwd(q))).collect();
+            painter.add(egui::Shape::closed_line(outline, Stroke::new(1.5_f32, col)));
+            let body = ui.interact(img, ui.id().with(("cmask-body", idx)), Sense::click_and_drag());
+            let mut remove = None;
+            if vm.shape.is_bezier() {
+                let alt = ui.input(|i| i.modifiers.alt);
+                for i in 0..vm.shape.points.len() {
+                    let base_p = vm.shape.points[i];
+                    let at = to_s(fwd(base_p));
+                    for side in [0usize, 2] {
+                        let h = vm.shape.handles[i];
+                        let tip_uv = fwd([base_p[0] + h[side], base_p[1] + h[side + 1]]);
+                        let raw = to_s(tip_uv);
+                        let zero = raw.distance(at) < 0.5;
+                        if zero && side == 0 {
+                            continue;
+                        }
+                        let hp = if zero { at + Vec2::new(14.0, 0.0) } else { raw };
+                        painter.line_segment([at, hp], Stroke::new(1.0_f32, col.gamma_multiply(0.7)));
+                        let r = ui.interact(Rect::from_center_size(hp, Vec2::splat(12.0)), ui.id().with(("cmask-tan", idx, i, side)), Sense::drag());
+                        painter.circle_filled(hp, 3.5, if r.hovered() || r.dragged() { col } else { Color32::WHITE });
+                        if let Some(p) = r.interact_pointer_pos().filter(|_| r.dragged()) {
+                            let bp = inv(from_s(p));
+                            let d = [bp[0] - base_p[0], bp[1] - base_p[1]];
+                            vm.shape.handles[i][side] = d[0];
+                            vm.shape.handles[i][side + 1] = d[1];
+                            if !alt {
+                                let o = 2 - side;
+                                vm.shape.handles[i][o] = -d[0];
+                                vm.shape.handles[i][o + 1] = -d[1];
+                            }
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            for i in 0..vm.shape.points.len() {
+                let at = to_s(fwd(vm.shape.points[i]));
+                let r = ui.interact(Rect::from_center_size(at, Vec2::splat(14.0)), ui.id().with(("cmask-pt", idx, i)), Sense::click_and_drag());
+                painter.rect_filled(Rect::from_center_size(at, Vec2::splat(8.0)), 2.0, if r.hovered() { col } else { Color32::WHITE });
+                if let Some(pos) = r.interact_pointer_pos().filter(|_| r.dragged()) {
+                    vm.shape.points[i] = inv(from_s(pos));
+                    changed = true;
+                }
+                if r.secondary_clicked() && vm.shape.points.len() > 3 {
+                    remove = Some(i);
+                }
+            }
+            if let Some(i) = remove {
+                vm.shape.remove_point(i);
+                changed = true;
+            }
+            if body.clicked() {
+                if let Some(pos) = body.interact_pointer_pos() {
+                    let n = vm.shape.points.len();
+                    let best = (0..n)
+                        .map(|i| {
+                            let (a, b) = (to_s(fwd(vm.shape.points[i])), to_s(fwd(vm.shape.points[(i + 1) % n])));
+                            let ab = b - a;
+                            let t = ((pos - a).dot(ab) / ab.length_sq().max(1e-6)).clamp(0.0, 1.0);
+                            (i, (a + ab * t).distance(pos))
+                        })
+                        .min_by(|a, b| a.1.total_cmp(&b.1));
+                    if let Some((i, d)) = best {
+                        if d < 10.0 && n < nle_core::color::MAX_MASK_POINTS {
+                            vm.shape.insert_point(i + 1, inv(from_s(pos)));
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            let resolved = vm.resolve(local).for_aspect(aspect);
+            let prev_pt = body.interact_pointer_pos().unwrap_or_default() - body.drag_delta();
+            if body.dragged() && resolved.distance(from_s(prev_pt), aspect) - resolved.expand <= 0.0 {
+                let d = body.drag_delta();
+                vm.offset[0].set(local, (off[0] + d.x / img.width()) as f64);
+                vm.offset[1].set(local, (off[1] + d.y / img.height()) as f64);
+                changed = true;
+            }
+        }
+    }
+    painter.text(
+        img.left_bottom() + Vec2::new(6.0, -6.0),
+        egui::Align2::LEFT_BOTTOM,
+        format!("Clip Mask {} · drag handles / feather · Esc to finish", idx + 1),
+        egui::FontId::proportional(11.0),
+        col,
+    );
+    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        app.color_view.mask_focus = None;
+    }
+    if changed {
+        if roto {
+            if let Some(vm) = edited.video.masks.get_mut(idx) {
+                vm.shape.set_shape_key(local, tol);
+            }
+        }
+        app.exec_key(Command::UpdateClip { clip: Box::new(edited) }, Some(drag_key(MASK_GIZMO_TAG, id)));
+    }
+    true
 }
 
 /// Draws and edits the focused mask of the selected clip over the viewer
@@ -654,18 +879,22 @@ pub fn mask_gizmo(app: &mut App, ui: &mut egui::Ui, img: Rect, frame: (f32, f32)
     if matches!(clip.kind, ClipKind::Gap) {
         return false;
     }
+    let local = app.local_time(id);
+    let tol = Time(app.project.timeline.frame().0 / 2);
+    if let MaskFocus::Clip(idx) = focus {
+        let clip = clip.clone();
+        return clip_mask_gizmo(app, ui, img, frame, id, &clip, local, tol, idx);
+    }
     let mut edited = clip.clone();
     // a keyframed window: edit it where it is at the playhead, then key it
-    let local = app.local_time(id);
     let keyed = match focus {
         MaskFocus::Node(nid) => edited.color.corrections.iter_mut().find(|n| n.id == nid && !n.keys.is_empty()).map(|n| {
             let base = NodeValues::of(n);
             n.values_at(local).apply(n);
             (nid, base)
         }),
-        MaskFocus::Effect(_) => None,
+        MaskFocus::Effect(_) | MaskFocus::Clip(_) => None,
     };
-    let tol = Time(app.project.timeline.frame().0 / 2);
     let Some(m) = mask_of(&mut edited, focus) else {
         app.color_view.mask_focus = None;
         return false;

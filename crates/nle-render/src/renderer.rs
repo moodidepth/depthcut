@@ -18,6 +18,7 @@ use crate::transform::{layer_to_output, Affine};
 use bytemuck::{Pod, Zeroable};
 use nle_core::color::{ColorCorrection, MaskShape, ResolvedMask, WorkingSpace};
 use nle_core::eval::{Layer, LayerSource, RenderNode, ResolvedColor, ResolvedTransition, ResolvedVideo};
+use nle_core::mask::{MatteChannel, MatteSource, ResolvedClipMask, TrackMatte, MAX_CLIP_MASKS};
 use nle_core::node_graph::{Op as GraphOp, ResolvedGraph};
 use nle_core::ClipId;
 use nle_core::{AssetId, Composition, EffectKind, FrameBlendMode, FrameRate, MatteKind, ResolvedEffect, TitleAnim, TitleParams};
@@ -334,7 +335,7 @@ pub(crate) struct MaskU {
     size: [f32; 2],
     rot_cs: [f32; 2],
     aspect: f32,
-    _pad: f32,
+    expand: f32,
     points: [[f32; 4]; 32],
 }
 
@@ -351,6 +352,7 @@ impl MaskU {
         u.count = m.count;
         u.invert = m.invert as u32;
         u.feather = m.feather;
+        u.expand = m.expand;
         u.center = m.center;
         u.size = m.size;
         let (s, c) = (-m.rotation.to_radians()).sin_cos();
@@ -369,6 +371,36 @@ struct MaskMixU {
     mask: MaskU,
     wipe: f32,
     _pad: [f32; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct ClipMaskEntryU {
+    mask: MaskU,
+    mode: u32,
+    opacity: f32,
+    _pad: [f32; 2],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct ClipMasksU {
+    count: u32,
+    _pad: [u32; 3],
+    entries: [ClipMaskEntryU; MAX_CLIP_MASKS],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct TrackMatteU {
+    inv_row0: [f32; 4],
+    inv_row1: [f32; 4],
+    crop: [f32; 4],
+    src_rect: [f32; 4],
+    opacity: f32,
+    channel: u32,
+    invert: u32,
+    _pad: u32,
 }
 
 /// `Node` in correct.wgsl.
@@ -1416,6 +1448,108 @@ impl Renderer {
         out
     }
 
+    /// Cut `src`'s straight alpha through `masks` (in layer source coordinates).
+    fn apply_clip_masks(&mut self, enc: &mut wgpu::CommandEncoder, src: &wgpu::TextureView, size: (u32, u32), masks: &[ResolvedClipMask]) -> Target {
+        let out = self.pool.get(&self.gpu.device, size.0, size.1);
+        let aspect = size.0 as f32 / size.1.max(1) as f32;
+        let mut data = ClipMasksU::zeroed();
+        let n = masks.len().min(MAX_CLIP_MASKS);
+        data.count = n as u32;
+        for (i, m) in masks.iter().take(n).enumerate() {
+            let resolved = m.for_aspect(aspect);
+            data.entries[i] = ClipMaskEntryU { mask: MaskU::new(Some(&resolved), size), mode: m.mode.index(), opacity: m.opacity, _pad: [0.0; 2] };
+        }
+        let u = self.uniform(&data);
+        self.dispatch(enc, &self.p.clip_mask, &[entry(0, tv(src)), entry(1, u.as_entire_binding()), entry(2, tv(&out.view))], ceil8(size.0), ceil8(size.1));
+        out
+    }
+
+    /// Render a neighbour layer into an output-sized matte target for `TrackMatte`.
+    #[allow(clippy::too_many_arguments)]
+    fn render_matte_source(
+        &mut self,
+        enc: &mut wgpu::CommandEncoder,
+        matte_layer: Option<&Layer>,
+        channel: MatteChannel,
+        out_size: (u32, u32),
+        src: &mut dyn FrameSource,
+        opts: RenderOptions,
+        depth: u32,
+        ctx: Ctx,
+    ) -> Target {
+        let bg = self.blank(enc, out_size);
+        let Some(ml) = matte_layer else { return bg };
+        match channel {
+            MatteChannel::Subject => {
+                let LayerSource::Media { asset, source_time, .. } = &ml.source else { return bg };
+                let idx = source_time.frames_floor(src.frame_rate(*asset));
+                let Some(tex) = self.matte_texture(*asset, idx, MatteKind::Person, src) else { return bg };
+                let warped = ml.video.stabilize.map(|m| self.warp(enc, &tex, &m));
+                let (view, mw, mh) = match &warped {
+                    Some(w) => (&w.view, w.width, w.height),
+                    None => (&tex.view, tex.width, tex.height),
+                };
+                let mut v = ml.video.clone();
+                v.opacity = 1.0;
+                v.blend = nle_core::BlendMode::Normal;
+                let fwd = layer_to_output(&v, [mw as f32, mh as f32], [out_size.0 as f32, out_size.1 as f32]);
+                let out = match fwd.inverse() {
+                    Some(inv) => {
+                        let o = self.composite_with(enc, &bg, view, inv, &v);
+                        self.pool.put(bg);
+                        o
+                    }
+                    None => bg,
+                };
+                if let Some(w) = warped {
+                    self.pool.put(w);
+                }
+                out
+            }
+            MatteChannel::Alpha | MatteChannel::Luma => {
+                let Some(img) = self.layer_image(enc, ml, src, opts, depth, ctx) else { return bg };
+                let (lw, lh) = img.size();
+                let mut v = ml.video.clone();
+                v.blend = nle_core::BlendMode::Normal;
+                let fwd = layer_to_output(&v, [lw as f32, lh as f32], [out_size.0 as f32, out_size.1 as f32]);
+                let out = match fwd.inverse() {
+                    Some(inv) => {
+                        let o = self.composite_with(enc, &bg, img.view(), inv, &v);
+                        self.pool.put(bg);
+                        o
+                    }
+                    None => bg,
+                };
+                let Img::Pooled(t) = img;
+                self.pool.put(t);
+                out
+            }
+        }
+    }
+
+    /// Project `img` into output space and modulate its straight alpha by `matte`.
+    fn apply_track_matte(&mut self, enc: &mut wgpu::CommandEncoder, img: &wgpu::TextureView, matte: &Target, inv: Affine, v: &ResolvedVideo, tm: TrackMatte) -> Target {
+        let out = self.pool.get(&self.gpu.device, matte.width, matte.height);
+        let u = self.uniform(&TrackMatteU {
+            inv_row0: [inv.m[0][0], inv.m[0][1], inv.m[0][2], 0.0],
+            inv_row1: [inv.m[1][0], inv.m[1][1], inv.m[1][2], 0.0],
+            crop: v.crop,
+            src_rect: v.source_rect,
+            opacity: v.opacity,
+            channel: tm.channel.index(),
+            invert: tm.invert as u32,
+            _pad: 0,
+        });
+        self.dispatch(
+            enc,
+            &self.p.track_matte,
+            &[entry(0, tv(img)), entry(1, tv(&matte.view)), entry(2, u.as_entire_binding()), entry(3, tv(&out.view))],
+            ceil8(matte.width),
+            ceil8(matte.height),
+        );
+        out
+    }
+
     fn grade(&mut self, enc: &mut wgpu::CommandEncoder, src: &wgpu::TextureView, size: (u32, u32), c: &ResolvedColor, wipe: Option<f32>, headroom: f32) -> Target {
         let out = self.pool.get(&self.gpu.device, size.0, size.1);
         let (lut, mix) = match &c.lut {
@@ -2207,6 +2341,15 @@ impl Renderer {
         if let Some(f) = flow {
             self.flow_pool.put(f);
         }
+        let out = if layer.masks.is_empty() {
+            out
+        } else {
+            let size = out.size();
+            let masked = self.apply_clip_masks(enc, out.view(), size, &layer.masks);
+            let Img::Pooled(old) = out;
+            self.pool.put(old);
+            Img::Pooled(masked)
+        };
         Some(out)
     }
 
@@ -2295,7 +2438,17 @@ impl Renderer {
 
     /// An adjustment layer: grade + effects applied to everything beneath.
     #[allow(clippy::too_many_arguments)] // one GPU pass: encoder, targets and per-pass state
-    fn draw_adjustment(&mut self, enc: &mut wgpu::CommandEncoder, bg: Target, layer: &Layer, src: &mut dyn FrameSource, opts: RenderOptions, depth: u32, ctx: Ctx) -> Target {
+    fn draw_adjustment(
+        &mut self,
+        enc: &mut wgpu::CommandEncoder,
+        bg: Target,
+        layer: &Layer,
+        matte_layer: Option<&Layer>,
+        src: &mut dyn FrameSource,
+        opts: RenderOptions,
+        depth: u32,
+        ctx: Ctx,
+    ) -> Target {
         let grade = opts.color && (layer.color.enabled || opts.highlight.is_some_and(|h| h.clip == layer.clip));
         if !grade && layer.effects.is_empty() {
             return bg;
@@ -2328,12 +2481,29 @@ impl Renderer {
             (None, Some(g)) => g,
             (None, None) => return bg,
         };
-        // respect the adjustment layer's opacity by compositing the processed copy
-        let id = layer_to_output(&nle_core::eval::ResolvedVideo::default(), [bg.width as f32, bg.height as f32], [bg.width as f32, bg.height as f32]);
+        let result = if layer.masks.is_empty() {
+            result
+        } else {
+            let masked = self.apply_clip_masks(enc, &result.view, size, &layer.masks);
+            self.pool.put(result);
+            masked
+        };
+        // respect the adjustment layer's opacity and optional track matte
+        let id = layer_to_output(&nle_core::eval::ResolvedVideo::default(), [bg.width as f32, bg.height as f32], [bg.width as f32, bg.height as f32]).inverse().expect("identity");
         let mut l2 = layer.clone();
         l2.video.crop = [0.0; 4];
         l2.video.source_rect = [0.0, 0.0, 1.0, 1.0];
-        let out = self.composite(enc, &bg, &result.view, id.inverse().expect("identity"), &l2);
+        let out = if let Some(tm) = layer.track_matte {
+            let matte = self.render_matte_source(enc, matte_layer, tm.channel, size, src, opts, depth, ctx);
+            let matted = self.apply_track_matte(enc, &result.view, &matte, id, &l2.video, tm);
+            self.pool.put(matte);
+            let v = ResolvedVideo { blend: l2.video.blend, opacity: 1.0, ..Default::default() };
+            let o = self.composite_with(enc, &bg, &matted.view, id, &v);
+            self.pool.put(matted);
+            o
+        } else {
+            self.composite(enc, &bg, &result.view, id, &l2)
+        };
         self.pool.put(result);
         self.pool.put(bg);
         out
@@ -2341,10 +2511,20 @@ impl Renderer {
 
     /// Composite `layer` over `bg`, returning the new accumulator.
     #[allow(clippy::too_many_arguments)] // one GPU pass: encoder, targets and per-pass state
-    fn draw_layer(&mut self, enc: &mut wgpu::CommandEncoder, bg: Target, layer: &Layer, src: &mut dyn FrameSource, opts: RenderOptions, depth: u32, ctx: Ctx) -> Target {
+    fn draw_layer(
+        &mut self,
+        enc: &mut wgpu::CommandEncoder,
+        bg: Target,
+        layer: &Layer,
+        matte_layer: Option<&Layer>,
+        src: &mut dyn FrameSource,
+        opts: RenderOptions,
+        depth: u32,
+        ctx: Ctx,
+    ) -> Target {
         self.stats.layers += 1;
         if layer.adjustment {
-            return self.draw_adjustment(enc, bg, layer, src, opts, depth, ctx);
+            return self.draw_adjustment(enc, bg, layer, matte_layer, src, opts, depth, ctx);
         }
         let Some(img) = self.layer_image(enc, layer, src, opts, depth, ctx) else {
             return bg;
@@ -2358,7 +2538,18 @@ impl Renderer {
             }
             return bg;
         };
-        let out = self.composite(enc, &bg, img.view(), inv, layer);
+        let out = if let Some(tm) = layer.track_matte {
+            let matte = self.render_matte_source(enc, matte_layer, tm.channel, (bg.width, bg.height), src, opts, depth, ctx);
+            let matted = self.apply_track_matte(enc, img.view(), &matte, inv, &layer.video, tm);
+            self.pool.put(matte);
+            let id = layer_to_output(&ResolvedVideo::default(), [bg.width as f32, bg.height as f32], [bg.width as f32, bg.height as f32]).inverse().expect("identity");
+            let v = ResolvedVideo { blend: layer.video.blend, opacity: 1.0, ..Default::default() };
+            let o = self.composite_with(enc, &bg, &matted.view, id, &v);
+            self.pool.put(matted);
+            o
+        } else {
+            self.composite(enc, &bg, img.view(), inv, layer)
+        };
         let Img::Pooled(t) = img;
         {
             self.pool.put(t);
@@ -2373,9 +2564,29 @@ impl Renderer {
         let mut acc = self.pool.get(&self.gpu.device, w, h);
         let clear = if opts.transparent && depth == 0 { [0.0; 4] } else { [0.0, 0.0, 0.0, 1.0] };
         self.fill(enc, &acc, clear);
-        for node in &comp.nodes {
-            match node {
-                RenderNode::Layer(l) => acc = self.draw_layer(enc, acc, l, src, opts, depth, ctx),
+        let mut i = 0;
+        let mut prev_layer: Option<&Layer> = None;
+        while i < comp.nodes.len() {
+            match &comp.nodes[i] {
+                RenderNode::Layer(l) => {
+                    let mut consumed_next = false;
+                    let matte_src = match l.track_matte {
+                        Some(tm) if tm.source == MatteSource::Below => prev_layer,
+                        Some(tm) if tm.source == MatteSource::Above => match comp.nodes.get(i + 1) {
+                            Some(RenderNode::Layer(next)) => {
+                                consumed_next = true;
+                                Some(next)
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    acc = self.draw_layer(enc, acc, l, matte_src, src, opts, depth, ctx);
+                    if !l.adjustment {
+                        prev_layer = Some(l);
+                    }
+                    i += if consumed_next { 2 } else { 1 };
+                }
                 RenderNode::Transition { from, to, transition } => {
                     // Each side is the current composite plus that side's layer,
                     // so lower lanes stay visible through the transition.
@@ -2388,7 +2599,7 @@ impl Renderer {
                         let copied = r.composite(enc, &base, &acc.view, id, &copy_layer);
                         r.pool.put(base);
                         match l {
-                            Some(layer) => r.draw_layer(enc, copied, layer, src, opts, depth, ctx),
+                            Some(layer) => r.draw_layer(enc, copied, layer, None, src, opts, depth, ctx),
                             None => {
                                 // dip/fade to black: the side is black
                                 r.fill(enc, &copied, [0.0, 0.0, 0.0, 1.0]);
@@ -2403,6 +2614,8 @@ impl Renderer {
                     self.pool.put(b);
                     self.pool.put(acc);
                     acc = out;
+                    prev_layer = to.as_deref().or(from.as_deref());
+                    i += 1;
                 }
             }
         }
