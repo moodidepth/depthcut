@@ -2593,6 +2593,12 @@ impl App {
         if self.menubar_open || ctx.is_context_menu_open() || ctx.memory(|m| m.any_popup_open()) {
             return;
         }
+        // Esc closes an idle Render dialog (a running export keeps it open)
+        // instead of clearing the timeline selection behind it
+        if self.export.open && !self.export.running() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+            self.export.open = false;
+            return;
+        }
 
         // Alt+Left / Alt+Right nudge a caption block by one frame (unless rebound)
         for (code, key, dir) in [(KeyCode::ArrowLeft, egui::Key::ArrowLeft, -1), (KeyCode::ArrowRight, egui::Key::ArrowRight, 1)] {
