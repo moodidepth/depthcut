@@ -2357,6 +2357,24 @@ fn retime_popup(app: &mut App, ui: &mut egui::Ui, resp: &egui::Response) {
                     close = true;
                 }
             }
+            // any other speed: typed or dragged, applied once on Enter or on release
+            // so a drag is one undo step
+            let cur = app.project.timeline.clip(id).and_then(|c| c.retime.as_ref()?.segments.get(seg).map(|s| s.speed * 100.0)).unwrap_or(100.0);
+            let edit = egui::Id::new("retime-custom-speed");
+            let mut pct = ui.data(|d| d.get_temp::<(ClipId, usize, f64)>(edit)).filter(|e| e.0 == id && e.1 == seg).map_or(cur, |e| e.2);
+            ui.horizontal(|ui| {
+                ui.label("Custom");
+                let r = ui.add(egui::DragValue::new(&mut pct).range(MIN_VELOCITY * 100.0..=MAX_VELOCITY * 100.0).speed(1.0).max_decimals(1).suffix(" %"));
+                if r.changed() {
+                    ui.data_mut(|d| d.insert_temp(edit, (id, seg, pct)));
+                }
+                let typed = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if (typed || r.drag_stopped()) && (pct - cur).abs() > 1e-6 {
+                    set_segment(app, id, seg, |r| r.set_segment_speed(seg, pct / 100.0));
+                    ui.data_mut(|d| d.remove::<(ClipId, usize, f64)>(edit));
+                    close = typed;
+                }
+            });
             ui.separator();
             if ui.button("Ease into segment (ramp)").clicked() {
                 set_segment(app, id, seg, |r| {
