@@ -388,6 +388,7 @@ class Driver:
                     if again[3] == w[3]:
                         break
                     w = again
+                w = self.reveal_widget(target[5:], w)
                 s, rects = self.s, self.s["rects"]
                 target = "_w"
                 rects = dict(rects, _w=w[3])
@@ -428,6 +429,31 @@ class Driver:
             time.sleep(0.08)
             self.fresh()
         raise StepFailed(f"{name} stays outside {panel} after scrolling")
+
+    def reveal_widget(self, spec: str, w: list) -> list:
+        """Wheel-scroll the side panel a widget is clipped by until the widget
+        is inside it (inspector sections run past the panel's bottom); the
+        widget as found again. Left alone while a popup or menu is open: those
+        float over the panels, and scrolling would close them."""
+        ui = self.s.get("ui", {})
+        if ui.get("popup_open") or ui.get("menu_open"):
+            return w
+        ppp = self.s["window"]["pixels_per_point"]
+        ox, oy = client_origin(self.hwnd)
+        for _ in range(30):
+            r = w[3]
+            cx, cy = r[0] + r[2] / 2, r[1] + r[3] / 2
+            p = next((p for n, p in self.s["rects"].items() if n in ("panel:inspector", "panel:browser") and p[0] <= cx <= p[0] + p[2]), None)
+            if p is None or p[1] + 8 <= cy <= p[1] + p[3] - 8:
+                return w
+            move_to(round(ox + (p[0] + p[2] / 2) * ppp), round(oy + (p[1] + p[3] / 2) * ppp))
+            wheel(-2 if cy > p[1] + p[3] - 8 else 2)
+            time.sleep(0.08)
+            self.fresh()
+            before, w = r, self.find_widget(spec)
+            if w[3] == before:
+                return w  # the wheel didn't move it: not in that panel's scroll area (e.g. the menu bar)
+        raise StepFailed(f"{spec!r} stays outside its panel after scrolling")
 
     def find_widget(self, spec: str) -> list:
         """A widget by its label or value: exact (ignoring case) first, then
