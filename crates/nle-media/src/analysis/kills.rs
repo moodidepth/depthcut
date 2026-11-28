@@ -4,7 +4,12 @@
 //! Games confirm a kill with a chime, a narrow tone that holds for a few
 //! hundred milliseconds (Valorant's sits around 2–6 kHz depending on the
 //! weapon skin). So a kill is a sustained tone in 1.5–10 kHz that follows
-//! gunfire. The tone must last at least 0.24 s, which rejects the short
+//! gunfire. The tone must peak 15 dB over its spectral floor and is timed
+//! while it stays above 11 dB, so a chime with a loud attack and a quieter
+//! ring counts at its full length. It must be pure: more than a handful of
+//! other bins standing out at once mean music, voice or an ability (a chime
+//! with a loud second note looks the same and is missed). It must last at
+//! least 0.24 s, which rejects the short
 //! periodic spike/bomb beeps, and must have at least two gunshots in the
 //! 1.5 s before it, which rejects ability and UI sounds. A single shot (a
 //! Sheriff/Vandal one-tap, an Operator flick) is enough when the chime is
@@ -12,11 +17,14 @@
 //! before it is never a kill. The marker lands on the last shot before the
 //! chime, i.e. the killing shot.
 //!
-//! Tuned against the killfeed of four Valorant clips: it found 5 of 8 kills
-//! with one false hit (true chimes held 0.25–0.41 s; the false tones that
-//! followed gunfire held 0.22–0.27 s). Kills whose skin plays only a faint chime (or none,
-//! e.g. some sidearms) are missed. An earlier version marked every loud
-//! transient, about 20 "kills" a minute.
+//! Scored against Medal's kill events on 24 clips of one player (69 kills,
+//! several weapon skins): it finds 38 (55 %), and 38 of its 60 marks are
+//! real kills (63 %); the old single-threshold version found 27 at 50 %.
+//! Misses are mostly chimes fainter than 15 dB, very short ones and kills
+//! with no audible chime; false marks are pure tones after gunfire (other UI
+//! sounds). Other players' skins and other games are untested, so prefer
+//! Medal's own events when a clip has them. An earlier version marked every
+//! loud transient, about 20 "kills" a minute.
 
 use nle_core::Time;
 use rustfft::num_complex::Complex32;
@@ -35,8 +43,10 @@ const TONE_LO_HZ: f32 = 1_500.0;
 const TONE_HI_HZ: f32 = 10_000.0;
 /// Bins either side of a bin that form its local spectral floor (median).
 const FLOOR_HALF: usize = 12;
-/// A tone must stay this many dB above the floor ...
+/// A tone must peak this many dB above the floor ...
 const TONE_DB: f32 = 15.0;
+/// ... and its length is measured while it stays above this many dB ...
+const TONE_TAIL_DB: f32 = 11.0;
 /// ... for this many consecutive 10 ms hops (120 ms) to count at all ...
 const HOLD_HOPS: usize = 12;
 /// ... and the whole tone must last this long to be a kill chime.
@@ -51,6 +61,13 @@ const MIN_SHOTS: usize = 2;
 const ONE_TAP_EXTRA_DB: f32 = 2.5;
 /// ... and outlasts the minimum tone by this much.
 const ONE_TAP_EXTRA_SECS: f64 = 0.02;
+/// A chime is one pure note (plus its neighbour bins): more than this many
+/// other chime-band bins standing out by `BUSY_DB` over the tone's first
+/// `BUSY_HOPS` hops make it a dense sound (music, an ability, voice), not a chime.
+const BUSY_MAX_BINS: usize = 5;
+const BUSY_DB: f32 = 10.0;
+const BUSY_NEAR_BINS: usize = 4;
+const BUSY_HOPS: usize = 20;
 /// The killing shot is the last shot at most this long before the chime.
 const KILL_SHOT_SECS: f64 = 1.0;
 /// Kills closer than this to the previous one form a multi-kill.
@@ -71,6 +88,7 @@ pub fn analyze_kills_from_samples(samples: &[f32], channels: usize, rate: u32, s
     }
     let sens = sensitivity.clamp(0.2, 2.0);
     let tone_db = TONE_DB / sens;
+    let tail_db = TONE_TAIL_DB / sens;
     let min_tone = MIN_TONE_SECS / sens.sqrt() as f64;
     let hop_secs = hop as f64 / rate as f64;
 
@@ -94,6 +112,10 @@ pub fn analyze_kills_from_samples(samples: &[f32], channels: usize, rate: u32, s
     // Ring of the last HOLD_HOPS frames' prominence (widened by ±1 bin).
     let mut ring: Vec<Vec<f32>> = vec![vec![0.0f32; band]; HOLD_HOPS];
     let mut score = vec![0.0f32; frames];
+    let mut score_bin = vec![0u16; frames];
+    // per frame, which chime-band bins hold above BUSY_DB (one bit each)
+    let words = band.div_ceil(64);
+    let mut busy = vec![0u64; frames * words];
     let mut shot = vec![false; frames];
 
     for f in 0..frames {
@@ -143,31 +165,55 @@ pub fn analyze_kills_from_samples(samples: &[f32], channels: usize, rate: u32, s
         // Once HOLD_HOPS frames are in, a tone held across all of them scores
         // at the oldest frame.
         if f + 1 >= HOLD_HOPS {
-            let mut best = f32::MIN;
+            let at = f + 1 - HOLD_HOPS;
+            let (mut best, mut best_bin) = (f32::MIN, 0);
             for i in 0..band {
                 let held = ring.iter().map(|r| r[i]).fold(f32::MAX, f32::min);
-                best = best.max(held);
+                if held > best {
+                    (best, best_bin) = (held, i);
+                }
+                if held > BUSY_DB {
+                    busy[at * words + i / 64] |= 1 << (i % 64);
+                }
             }
-            score[f + 1 - HOLD_HOPS] = best;
+            score[at] = best;
+            score_bin[at] = best_bin as u16;
         }
     }
 
-    // Tones: runs of held prominence; a kill needs a long tone after gunfire.
+    // Tones: runs of held prominence that peak above `tone_db` and are timed
+    // while above `tail_db`; a kill needs a long, pure tone after gunfire.
     let lookback = (SHOT_LOOKBACK_SECS / hop_secs).round() as usize;
     let kill_shot = (KILL_SHOT_SECS / hop_secs).round() as usize;
     let mut kills: Vec<(f64, f32)> = Vec::new();
     let mut last_tone = f64::MIN;
     let mut i = 0;
     while i < frames {
-        if score[i] <= tone_db {
+        if score[i] <= tail_db {
             i += 1;
             continue;
         }
         let start = i;
-        let mut peak = 0.0f32;
-        while i < frames && score[i] > tone_db {
-            peak = peak.max(score[i]);
+        let (mut peak, mut peak_bin) = (0.0f32, 0usize);
+        while i < frames && score[i] > tail_db {
+            if score[i] > peak {
+                (peak, peak_bin) = (score[i], score_bin[i] as usize);
+            }
             i += 1;
+        }
+        if peak < tone_db {
+            continue;
+        }
+        // other bins that stood out while the tone began
+        let mut seen = vec![0u64; words];
+        for f in start..i.min(start + BUSY_HOPS) {
+            for (s, b) in seen.iter_mut().zip(&busy[f * words..(f + 1) * words]) {
+                *s |= b;
+            }
+        }
+        let others = (0..band).filter(|&b| b.abs_diff(peak_bin) > BUSY_NEAR_BINS && seen[b / 64] >> (b % 64) & 1 == 1).count();
+        if others > BUSY_MAX_BINS {
+            continue;
         }
         let secs = (i - start) as f64 * hop_secs + HOLD_HOPS as f64 * hop_secs;
         // count onsets: a shot sliding into the window can jump on two hops in a row
@@ -235,12 +281,16 @@ mod tests {
     }
 
     fn tone(s: &mut [f32], at: f64, hz: f32, secs: f64) {
+        tone_amp(s, at, hz, secs, 0.15);
+    }
+
+    fn tone_amp(s: &mut [f32], at: f64, hz: f32, secs: f64, amp: f32) {
         let start = (at * RATE as f64) as usize;
         let n = (secs * RATE as f64) as usize;
         let fade = RATE as usize / 200; // 5 ms attack/release, as real chimes have
         for i in 0..n {
             let env = (i.min(n - i) as f32 / fade as f32).min(1.0);
-            s[start + i] += (std::f32::consts::TAU * hz * i as f32 / RATE as f32).sin() * 0.15 * env;
+            s[start + i] += (std::f32::consts::TAU * hz * i as f32 / RATE as f32).sin() * amp * env;
         }
     }
 
@@ -311,6 +361,44 @@ mod tests {
         shot(&mut burst, 1.8);
         tone(&mut burst, 2.0, 3_000.0, 0.21);
         assert_eq!(analyze_kills_from_samples(&burst, 1, RATE, 1.0).len(), 1);
+    }
+
+    #[test]
+    fn a_chime_that_fades_but_holds_is_timed_by_its_tail() {
+        // a short loud attack and a faint 0.5 s ring (an older skin's chime)
+        let chime = |head: bool, tail: bool| {
+            let mut s = noise_bed(4.0);
+            shot(&mut s, 1.65);
+            shot(&mut s, 1.8);
+            if head {
+                tone_amp(&mut s, 2.0, 5_320.0, 0.15, 0.15);
+            }
+            if tail {
+                tone_amp(&mut s, 2.0, 5_320.0, 0.5, 0.00038);
+            }
+            analyze_kills_from_samples(&s, 1, RATE, 1.0)
+        };
+        assert_eq!(chime(true, true).len(), 1, "attack + ring is a kill");
+        assert!(chime(true, false).is_empty(), "the attack alone is too short");
+        assert!(chime(false, true).is_empty(), "the ring alone is too faint");
+    }
+
+    #[test]
+    fn a_dense_tonal_sound_after_gunfire_is_not_a_kill() {
+        let chord = |notes: &[f32]| {
+            let mut s = noise_bed(4.0);
+            shot(&mut s, 1.65);
+            shot(&mut s, 1.8);
+            for &hz in notes {
+                tone(&mut s, 2.0, hz, 0.4);
+            }
+            analyze_kills_from_samples(&s, 1, RATE, 1.0)
+        };
+        // music or an ability: many notes at once
+        let dense: Vec<f32> = (0..9).map(|k| 2_200.0 + k as f32 * 650.0).collect();
+        assert!(chord(&dense).is_empty(), "{:?}", chord(&dense));
+        // the same moment with one note is a kill
+        assert_eq!(chord(&[5_320.0]).len(), 1);
     }
 
     /// `KILLS_RAW=clip.f32 cargo test -p nle-media kills_in_raw -- --ignored --nocapture`
