@@ -47,6 +47,8 @@ whisper-rs = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
 zip = { workspace = true, optional = true }
 vst3 = "0.3"
+# Reads the Medal recorder's local clip library (kill bookmarks).
+rusqlite = { version = "0.37", features = ["bundled"] }
 
 # CPU topology (P/E cores, SMT siblings) and process / thread affinity.
 [target.'cfg(windows)'.dependencies]

@@ -3,7 +3,8 @@
 //!     cargo run --release -p nle-media --example kill_scan -- [--track N] FILE...
 //!
 //! `--track N` picks the Nth audio stream (Medal: 0 = all audio, 1 = game).
-//! Prints one line per file: kill times in seconds, `*` marks a multi-kill.
+//! Prints one line per file: kill times in seconds, `*` marks a multi-kill,
+//! then the kills Medal logged for the clip, when it recorded it.
 
 use std::process::Command;
 
@@ -19,10 +20,8 @@ fn main() {
         }
     }
     for f in files {
-        let out = Command::new("ffmpeg")
-            .args(["-v", "error", "-i", &f, "-map", &format!("0:a:{track}"), "-ac", "2", "-ar", "48000", "-f", "f32le", "-"])
-            .output()
-            .expect("run ffmpeg");
+        let out =
+            Command::new("ffmpeg").args(["-v", "error", "-i", &f, "-map", &format!("0:a:{track}"), "-ac", "2", "-ar", "48000", "-f", "f32le", "-"]).output().expect("run ffmpeg");
         if !out.status.success() {
             println!("{f}: ffmpeg failed: {}", String::from_utf8_lossy(&out.stderr).trim());
             continue;
@@ -32,5 +31,10 @@ fn main() {
         let list: Vec<String> = peaks.iter().map(|p| format!("{:.2}{}", p.time.as_secs_f64(), if p.is_multikill { "*" } else { "" })).collect();
         let name = std::path::Path::new(&f).file_name().map_or(f.clone(), |n| n.to_string_lossy().into_owned());
         println!("{name}: {} kills [{}]", peaks.len(), list.join(" "));
+        let medal = nle_media::medal::events_for(std::path::Path::new(&f));
+        if !medal.is_empty() {
+            let m: Vec<String> = medal.iter().map(|e| format!("{:.2} {}", e.time.as_secs_f64(), e.name)).collect();
+            println!("  medal: [{}]", m.join(", "));
+        }
     }
 }
