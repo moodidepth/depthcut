@@ -3626,24 +3626,27 @@ pub struct KillScan {
 }
 
 /// Kill markers for one clip placed at `start`, from its audio.
+/// Kill markers for the part of `clip`'s source audio it shows. The scanner
+/// hears some source around the clip too: it measures the noise floor over
+/// what it is given and looks for the gunfire before each kill sound, so a
+/// short trimmed clip alone would hide kills near its edges.
 fn kills_by_ear(clip: &Clip, start: Time, buf: &nle_media::AudioBuffer) -> Vec<Marker> {
-    let dur = clip.duration;
-    let speed = clip.retime.as_ref().and_then(|r| (r.segments.len() == 1 && r.segments[0].speed > 0.0).then_some(r.segments[0].speed)).unwrap_or(1.0);
-    let src_in = clip.source_in + clip.retime.as_ref().map_or(Time::ZERO, |r| r.start_offset);
+    const BEFORE_S: f64 = 20.0;
+    const AFTER_S: f64 = 2.0; // a kill sound that rings past the out point
+    let (lo, hi) = clip.source_range();
     let ch = buf.channels.max(1) as usize;
-    let rate = buf.sample_rate.max(1);
+    let rate = buf.sample_rate.max(1) as f64;
     let total_frames = buf.samples.len() / ch;
-    let in_frame = (src_in.as_secs_f64().max(0.0) * rate as f64).round() as usize;
-    let span_frames = ((dur.as_secs_f64() * speed).max(0.0) * rate as f64).round() as usize;
-    let from = in_frame.min(total_frames);
-    let to = from.saturating_add(span_frames).min(total_frames);
-    let peaks = analysis::analyze_kills_from_samples(&buf.samples[from * ch..to * ch], ch, rate, 1.0);
-    let end = start + dur;
+    let frame = |secs: f64| ((secs.max(0.0) * rate).round() as usize).min(total_frames);
+    let from = frame(lo.as_secs_f64() - BEFORE_S);
+    let to = frame(hi.as_secs_f64() + AFTER_S).max(from);
+    let peaks = analysis::analyze_kills_from_samples(&buf.samples[from * ch..to * ch], ch, rate as u32, 1.0);
+    let offset = from as f64 / rate;
     peaks
         .into_iter()
         .filter_map(|p| {
-            let t = start + Time::from_secs_f64(p.time.as_secs_f64() / speed);
-            (t >= start && t <= end).then(|| Marker::kill(t, p.label))
+            let local = clip.local_for_source(Time::from_secs_f64(offset + p.time.as_secs_f64()))?;
+            Some(Marker::kill(start + local, p.label))
         })
         .collect()
 }
@@ -3681,4 +3684,80 @@ struct DuckKey {
     voice: Vec<eval::AudioSpan>,
     loaded: Vec<AssetId>,
     end: Time,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const RATE: u32 = 48_000;
+
+    /// 30 s of quiet hiss with one kill: shots at 20.0 and 20.15 s, then the
+    /// kill chime at 20.35 s.
+    fn vod() -> nle_media::AudioBuffer {
+        let mut x = 0x9e37_79b9u32;
+        let mut rnd = move || {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            x as f32 / u32::MAX as f32 - 0.5
+        };
+        let mut s: Vec<f32> = (0..RATE as usize * 30).map(|_| rnd() * 0.004).collect();
+        for at in [20.0, 20.15] {
+            let start = (at * RATE as f64) as usize;
+            for i in 0..RATE as usize / 40 {
+                s[start + i] += rnd() * 1.2 * (-(i as f32) / (RATE as f32 * 0.008)).exp();
+            }
+        }
+        let (start, n, fade) = ((20.35 * RATE as f64) as usize, (0.4 * RATE as f64) as usize, RATE as usize / 200);
+        for i in 0..n {
+            s[start + i] += (std::f32::consts::TAU * 5_320.0 * i as f32 / RATE as f32).sin() * 0.15 * (i.min(n - i) as f32 / fade as f32).min(1.0);
+        }
+        nle_media::AudioBuffer::new(RATE, 1, s)
+    }
+
+    fn clip(source_in: f64, secs: f64) -> Clip {
+        let mut c = Clip::new("vod", ClipKind::Asset { asset: AssetId(1) }, Time::from_secs_f64(secs));
+        c.source_in = Time::from_secs_f64(source_in);
+        c
+    }
+
+    fn times(markers: &[Marker]) -> Vec<f64> {
+        markers.iter().map(|m| (m.time.as_secs_f64() * 100.0).round() / 100.0).collect()
+    }
+
+    #[test]
+    fn a_kill_in_a_trimmed_clip_is_found_with_the_gunfire_before_its_in_point() {
+        // the clip starts between the two shots, 2.4 s long, placed at 5 s
+        let hits = times(&kills_by_ear(&clip(20.1, 2.4), Time::from_secs_f64(5.0), &vod()));
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!((hits[0] - 5.05).abs() < 0.05, "marked on the last shot: {hits:?}");
+    }
+
+    #[test]
+    fn kills_outside_the_clip_are_not_marked() {
+        assert!(kills_by_ear(&clip(2.0, 10.0), Time::ZERO, &vod()).is_empty());
+        assert!(kills_by_ear(&clip(20.5, 3.0), Time::ZERO, &vod()).is_empty(), "the killing shot is before the in point");
+    }
+
+    #[test]
+    fn a_slowed_clip_maps_the_kill_through_its_retime() {
+        let mut c = clip(19.0, 4.0);
+        c.retime = Some(Retime::uniform(Time::from_secs_f64(2.0), 0.5)); // 2 s of source over 4 s
+        let hits = times(&kills_by_ear(&c, Time::from_secs_f64(1.0), &vod()));
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!((hits[0] - (1.0 + 1.15 / 0.5)).abs() < 0.1, "0.05 s of source is 0.1 s at half speed: {hits:?}");
+    }
+
+    #[test]
+    fn a_speed_ramped_clip_maps_the_kill_through_each_segment() {
+        // 1 s at full speed (source 19..20), then 2 s at half speed (source 20..21)
+        let mut c = clip(19.0, 3.0);
+        let segments = vec![RetimeSegment::new(Time::from_secs_f64(1.0), 1.0), RetimeSegment::new(Time::from_secs_f64(2.0), 0.5)];
+        c.retime = Some(Retime { segments, start_offset: Time::ZERO, lead_speed: None, blend: Default::default(), velocity_curve: None });
+        let hits = times(&kills_by_ear(&c, Time::ZERO, &vod()));
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        // the shot near source 20.12 is 0.12 s into the half-speed segment
+        assert!((hits[0] - (1.0 + 0.12 / 0.5)).abs() < 0.06, "{hits:?}");
+    }
 }
