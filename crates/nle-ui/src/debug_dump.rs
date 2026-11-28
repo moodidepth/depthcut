@@ -308,6 +308,8 @@ fn body(app: &App, ctx: &egui::Context) -> Value {
                 "duration_s": secs(a.duration),
                 "video": a.video.as_ref().map(|v| json!({ "width": v.width, "height": v.height, "fps": v.frame_rate.fps(), "vfr": v.is_vfr, "codec": v.codec })),
                 "audio": a.audio.is_some(),
+                "audio_tracks": a.audio_streams.iter().map(|t| t.label()).collect::<Vec<_>>(),
+                "audio_track": a.selected_audio_stream,
                 "loudness_lufs": a.loudness_lufs,
                 "failed": app.library.failed.get(&a.id),
                 "audio_loaded": app.library.audio.contains_key(&a.id),
