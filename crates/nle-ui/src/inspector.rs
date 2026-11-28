@@ -548,14 +548,15 @@ fn speed_section(ui: &mut egui::Ui, c: &Clip, t: Time, retime: &mut Option<Retim
         });
         if let Some(r) = &c.retime {
             ui.horizontal(|ui| {
-                ui.add_sized([96.0, 20.0], egui::Label::new(egui::RichText::new("Video Quality").color(theme::TEXT_DIM)));
-                egui::ComboBox::from_id_salt("blendmode").selected_text(r.blend.label()).show_ui(ui, |ui| {
+                let name = ui.add_sized([96.0, 20.0], egui::Label::new(egui::RichText::new("Video Quality").color(theme::TEXT_DIM)));
+                let combo = egui::ComboBox::from_id_salt("blendmode").selected_text(r.blend.label()).show_ui(ui, |ui| {
                     for m in FrameBlendMode::ALL {
                         if ui.selectable_label(r.blend == m, m.label()).clicked() {
                             *retime = Some(RetimeAction::Blend(m));
                         }
                     }
                 });
+                crate::widgets::name_combo(&combo.response, &name, r.blend.label());
             });
         }
     });

@@ -103,6 +103,13 @@ pub fn slider_f32(ui: &mut egui::Ui, label: &str, v: &mut f32, range: std::ops::
 /// Picker for the audio track a multi-track recording plays (Medal / OBS
 /// clips keep the game, voice chat and the mic apart). Returns the track
 /// clicked, if it differs from `selected`.
+/// Names a combo box after the label beside it and exposes its choice, for
+/// screen readers and the UI driver: a `ComboBox::from_id_salt` has neither.
+pub fn name_combo(combo: &egui::Response, label: &egui::Response, value: &str) {
+    combo.clone().labelled_by(label.id);
+    combo.ctx.accesskit_node_builder(combo.id, |b| b.set_value(value));
+}
+
 pub fn audio_track_combo(ui: &mut egui::Ui, salt: impl std::hash::Hash, tracks: &[AudioTrackInfo], selected: usize) -> Option<usize> {
     let mut pick = selected;
     let current = tracks.get(selected).map(|t| t.label()).unwrap_or_else(|| "Track 0".into());
