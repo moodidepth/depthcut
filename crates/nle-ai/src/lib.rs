@@ -205,7 +205,8 @@ mod tests {
             CopilotToolCall::JumpToTimecode { time_secs: 3.0 },
             CopilotToolCall::ApplyVelocityPreset { clip_id: Some(id.0), preset_name: "Valorant Flow Sync".into() },
             CopilotToolCall::AddEffectPreset { clip_id: Some(id.0), preset_name: "Hard Kill Impact (S_Shake Decay)".into() },
-            CopilotToolCall::DropMarker { time_secs: 4.5, label: "Ace".into(), kind: "kill".into() },
+            // inside the part the beat sync keeps (a kill in cut-out gameplay goes with it)
+            CopilotToolCall::DropMarker { time_secs: 2.5, label: "Ace".into(), kind: "kill".into() },
             CopilotToolCall::AddTransition { clip_id: Some(id.0), transition_kind: "whip_pan".into(), duration_frames: 8 },
             CopilotToolCall::SyncToBeatMarkers { clip_ids: vec![id.0] },
             CopilotToolCall::CutAndRipple { clip_id: Some(id.0), time_secs: 2.0, trim_mode: "blade".into() },
@@ -217,6 +218,8 @@ mod tests {
         }
 
         assert!(tl.markers.iter().any(|m| m.name == "Ace"));
+        // the beat stays put: the speed ramp and the sync trim move gameplay, not the music grid
+        assert!(tl.markers.iter().any(|m| m.kind == nle_core::MarkerKind::Beat && m.time == Time::from_secs(3)));
         assert!(tl.spine.len() >= 2, "blade split created two spine clips");
 
         // Every mutation went through `History`, so undoing restores the original single clip.

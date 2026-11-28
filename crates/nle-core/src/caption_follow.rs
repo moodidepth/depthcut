@@ -74,6 +74,21 @@ fn anchor_at(placed: &[PlacedClip], at: Time, rank: impl Fn(&Clip) -> u8) -> Anc
     }
 }
 
+/// Music the timeline plays: a clip given the Music role, or audio-only media.
+fn is_music(c: &Clip) -> bool {
+    audible(c) && (c.audio.role == AudioRole::Music || !c.has_video())
+}
+
+/// Anchor a beat to the music under it. Without music it stays put: a beat
+/// grid must not slide or vanish when the gameplay under it is ramped or cut.
+fn anchor_beat(placed: &[PlacedClip], at: Time) -> Anchor {
+    let music: Vec<PlacedClip> = placed.iter().filter(|p| is_music(p.clip)).cloned().collect();
+    match anchor_at(&music, at, |c| u8::from(c.audio.role != AudioRole::Music)) {
+        a @ Anchor::Speech { .. } => a,
+        _ => Anchor::Free,
+    }
+}
+
 /// Audible clips of `role` first, then other audible media, then the rest.
 fn role_rank(c: &Clip, role: AudioRole) -> u8 {
     2 * u8::from(!audible(c)) + u8::from(c.audio.role != role)
@@ -122,7 +137,7 @@ pub fn anchor_captions(tl: &Timeline) -> CaptionAnchors {
             .map(|m| {
                 marker_follows_media(m).then(|| match m.kind {
                     // beats belong to the music; kills to the gameplay
-                    MarkerKind::Beat | MarkerKind::SubBass | MarkerKind::Snare => anchor_at(&placed, m.time, |c| role_rank(c, AudioRole::Music)),
+                    MarkerKind::Beat | MarkerKind::SubBass | MarkerKind::Snare => anchor_beat(&placed, m.time),
                     _ => anchor_at(&placed, m.time, |c| u8::from(!audible(c))),
                 })
             })
@@ -224,6 +239,41 @@ mod tests {
         assert_eq!(kills, vec![3500, 7900, 12300], "kills sit on the same frames of gameplay");
         let note = tl.markers.iter().find(|m| m.kind == MarkerKind::Standard).expect("hand marker kept");
         assert_eq!(note.time, secs(20), "hand-placed markers keep their timeline position");
+    }
+
+    #[test]
+    fn beats_stay_on_the_music_not_the_gameplay() {
+        use crate::speed::Retime;
+        let game = MediaAsset::new("game", "/m/game.mp4", secs(10));
+        let mut tl = Timeline::default();
+        let mut c = Clip::from_asset(&game);
+        c.duration = secs(8);
+        (c.av.video, c.av.audio) = (true, true);
+        let id = tl.append(c).unwrap();
+        tl.markers = vec![Marker::beat(secs(3)), Marker::kill(Time::from_millis(4500), "Kill")];
+        // no music: a speed ramp on the gameplay must not drag the beat along
+        let retime = Retime::velocity_preset("Valorant Flow Sync", secs(8)).unwrap();
+        Command::SetRetime { id, retime: Some(retime) }.apply(&mut tl).unwrap();
+        let beat = tl.markers.iter().find(|m| m.kind == MarkerKind::Beat).expect("beat kept");
+        assert_eq!(beat.time, secs(3));
+        // and cutting the gameplay to the beat keeps the beat
+        Command::SyncClipsToBeats { ids: vec![id] }.apply(&mut tl).unwrap();
+        assert_eq!(tl.spine[0].duration, secs(3));
+        assert!(tl.markers.iter().any(|m| m.kind == MarkerKind::Beat && m.time == secs(3)));
+
+        // with a song under it, the beat moves with the song
+        let song = MediaAsset::new("song", "/m/song.wav", secs(30));
+        let mut s = Clip::from_asset(&song);
+        s.av.video = false;
+        s.av.audio = true;
+        s.audio.role = AudioRole::Music;
+        s.duration = secs(3);
+        let sid = tl.connect(s, Time::ZERO, -1).unwrap();
+        tl.markers = vec![Marker::beat(secs(1))];
+        Command::Slip { id: sid, delta: secs(-1) }.apply(&mut tl).ok();
+        Command::Slip { id: sid, delta: secs(1) }.apply(&mut tl).unwrap();
+        assert_eq!(tl.markers.len(), 1);
+        assert_eq!(tl.markers[0].time, Time::ZERO, "slipping the song by 1 s moves its beat by 1 s");
     }
 
     #[test]
