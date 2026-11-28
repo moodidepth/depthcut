@@ -1417,6 +1417,17 @@ impl Clip {
         }
     }
 
+    /// Clip-local offset at which this clip shows source time `source`, or
+    /// `None` when that moment is outside the clip.
+    pub fn local_for_source(&self, source: Time) -> Option<Time> {
+        let local = match &self.retime {
+            Some(r) => r.inverse(source - self.source_in)?,
+            None => source - self.source_in,
+        };
+        // the end itself is outside the clip; allow one tick of rounding slack
+        (local >= Time::ZERO - Time(1) && local < self.duration).then_some(local.max(Time::ZERO))
+    }
+
     /// Current playback speed at clip-local `local` (1.0 when not retimed).
     pub fn speed_at(&self, local: Time) -> f64 {
         self.retime.as_ref().map(|r| r.speed_at(local)).unwrap_or(1.0)

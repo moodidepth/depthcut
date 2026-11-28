@@ -4,7 +4,8 @@
 //! over a channel and are turned into egui textures on the UI thread.
 
 use eframe::egui;
-use nle_core::{AssetId, AudioTrackInfo, MediaAsset, Time};
+use nle_core::{AssetId, AssetKind, AudioTrackInfo, MediaAsset, Time};
+use nle_media::medal::GameEvent;
 use nle_media::proxy::{ProxyManager, ProxyStatus};
 use nle_media::thumbnails::{self, Filmstrip};
 use nle_media::{peaks, probe, AudioBuffer, PeakBuffer, Waveform};
@@ -36,6 +37,11 @@ enum JobResult {
     Filmstrip {
         asset: AssetId,
         strip: Filmstrip,
+    },
+    /// Kills and other game events the Medal recorder logged for the file.
+    GameEvents {
+        asset: AssetId,
+        events: Vec<GameEvent>,
     },
     Audio {
         asset: AssetId,
@@ -103,6 +109,9 @@ pub struct MediaLibrary {
     /// Loud-onset source times per asset (audio-peak snapping), sorted.
     pub transients: HashMap<AssetId, Arc<Vec<Time>>>,
     pub audio: HashMap<AssetId, Arc<AudioBuffer>>,
+    /// Game events (kills) Medal logged for an asset's file, in source time;
+    /// absent when it logged none.
+    pub game_events: HashMap<AssetId, Arc<Vec<GameEvent>>>,
     pub failed: HashMap<AssetId, String>,
     requested: HashSet<(AssetId, u8)>,
     /// Audio stream each asset's audio jobs decode; results for another are stale.
@@ -129,6 +138,7 @@ impl MediaLibrary {
             peaks: HashMap::new(),
             transients: HashMap::new(),
             audio: HashMap::new(),
+            game_events: HashMap::new(),
             failed: HashMap::new(),
             requested: HashSet::new(),
             streams: HashMap::new(),
@@ -174,6 +184,7 @@ impl MediaLibrary {
         self.peaks.remove(&id);
         self.transients.remove(&id);
         self.audio.remove(&id);
+        self.game_events.remove(&id);
         self.failed.remove(&id);
         self.requested.retain(|(a, _)| *a != id);
         self.streams.remove(&id);
@@ -202,6 +213,17 @@ impl MediaLibrary {
                     Err(e) => JobResult::Failed { asset: a.id, what: "thumbnails", error: e.to_string() },
                 };
                 let _ = tx.send(msg);
+            });
+        }
+        if asset.kind == AssetKind::Video && !probe::is_synthetic(asset) && self.requested.insert((asset.id, 3)) {
+            // a Medal recording: its logged kills (cheap; the library is cached)
+            let tx = self.tx.clone();
+            let (id, path) = (asset.id, asset.path.clone());
+            rayon::spawn(move || {
+                let events = nle_media::medal::events_for(&path);
+                if !events.is_empty() {
+                    let _ = tx.send(JobResult::GameEvents { asset: id, events });
+                }
             });
         }
         if !asset.has_audio() {
@@ -319,6 +341,10 @@ impl MediaLibrary {
                     ctx.request_repaint();
                 }
                 JobResult::Tracks { asset, tracks } => events.push(MediaEvent::AudioTracks(asset, tracks)),
+                JobResult::GameEvents { asset, events: ev } => {
+                    self.game_events.insert(asset, Arc::new(ev));
+                    ctx.request_repaint();
+                }
                 JobResult::Failed { asset, what, error } => {
                     log::warn!("{what} for asset {}: {error}", asset.0);
                     self.failed.insert(asset, format!("{what}: {error}"));

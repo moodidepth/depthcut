@@ -50,16 +50,6 @@ fn is_media(c: &Clip) -> bool {
     c.enabled && matches!(c.kind, ClipKind::Asset { .. } | ClipKind::Compound(_))
 }
 
-/// Clip-local timeline offset at which `c` shows source time `source`.
-fn local_for_source(c: &Clip, source: Time) -> Option<Time> {
-    let local = match &c.retime {
-        Some(r) => r.inverse(source - c.source_in)?,
-        None => source - c.source_in,
-    };
-    // the end itself is outside the clip; allow one tick of rounding slack
-    (local >= Time::ZERO - Time(1) && local < c.duration).then_some(local.max(Time::ZERO))
-}
-
 /// Anchor the moment `at` to the media under it. Among the media clips there,
 /// the lowest `rank` wins, then the storyline before connected lanes.
 fn anchor_at(placed: &[PlacedClip], at: Time, rank: impl Fn(&Clip) -> u8) -> Anchor {
@@ -101,7 +91,8 @@ fn shift_for(placed: &[PlacedClip], anchor: &Anchor) -> Option<Time> {
             // the same clip first, then any other piece of the same media
             // (blades and duplicates), nearest to where it was
             let candidates = placed.iter().filter(|p| p.clip.id == *clip || (asset.is_some() && p.clip.asset_id() == *asset));
-            let found = candidates.filter_map(|p| local_for_source(p.clip, *source).map(|l| (p.clip.id != *clip, p.start + l))).min_by_key(|(other, t)| (*other, (t.0 - at.0).abs()));
+            let found =
+                candidates.filter_map(|p| p.clip.local_for_source(*source).map(|l| (p.clip.id != *clip, p.start + l))).min_by_key(|(other, t)| (*other, (t.0 - at.0).abs()));
             match found {
                 Some((_, t)) => Some(t - *at),
                 None => {
@@ -125,12 +116,7 @@ pub fn anchor_captions(tl: &Timeline) -> CaptionAnchors {
     }
     let placed = tl.placed_clips();
     // captions: audible dialogue first, then other audible media, then any media
-    let captions = tl
-        .captions
-        .segments
-        .iter()
-        .map(|seg| anchor_at(&placed, Time((seg.start.0 + seg.end.0) / 2), |c| role_rank(c, AudioRole::Dialogue)))
-        .collect();
+    let captions = tl.captions.segments.iter().map(|seg| anchor_at(&placed, Time((seg.start.0 + seg.end.0) / 2), |c| role_rank(c, AudioRole::Dialogue))).collect();
     let markers = if follow_markers {
         tl.markers
             .iter()

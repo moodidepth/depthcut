@@ -1607,6 +1607,7 @@ fn draw_clip(app: &App, p: &egui::Painter, rect: Rect, c: &Clip, selected: bool)
                 if matches!(c.kind, ClipKind::Compound(_)) {
                     p.rect_filled(vrect, radius, Color32::from_rgba_unmultiplied(10, 132, 255, 40));
                 }
+                draw_game_events(app, &p, rect, vrect, c);
             }
             if has_a || (!has_v && c.has_audio()) {
                 p.rect_filled(arect, radius, theme::clip_fill(theme::AUDIO));
@@ -1681,6 +1682,32 @@ fn draw_clip(app: &App, p: &egui::Painter, rect: Rect, c: &Clip, selected: bool)
     }
     let border = if selected { Stroke::new(2.0_f32, theme::SELECTION) } else { Stroke::new(1.0_f32, Color32::from_black_alpha(160)) };
     p.rect_stroke(rect, radius, border, StrokeKind::Inside);
+}
+
+/// Kills the Medal recorder logged for the clip's file: a red tick at each
+/// one and its tag (`Kill`, `2K`, `Clutch`) along the bottom of the picture.
+fn draw_game_events(app: &App, p: &egui::Painter, rect: Rect, vrect: Rect, c: &Clip) {
+    let Some(events) = c.asset_id().and_then(|a| app.library.game_events.get(&a)) else { return };
+    let pps = pps_of(rect, c);
+    let red = Color32::from_rgb(255, 69, 58);
+    let font = egui::FontId::proportional(9.5);
+    let mut last_right = f32::NEG_INFINITY;
+    for e in events.iter() {
+        let Some(local) = c.local_for_source(e.time) else { continue };
+        let x = rect.left() + local.as_secs_f64() as f32 * pps;
+        p.line_segment([Pos2::new(x, vrect.top() + 1.0), Pos2::new(x, vrect.bottom() - 1.0)], Stroke::new(1.5_f32, red.gamma_multiply(0.85)));
+        if vrect.height() < 14.0 {
+            continue;
+        }
+        let g = p.layout_no_wrap(e.label().to_string(), font.clone(), Color32::WHITE);
+        let tag = Rect::from_min_size(Pos2::new(x - 1.0, vrect.bottom() - g.size().y - 4.0), g.size() + Vec2::new(6.0, 2.0));
+        if tag.left() < last_right + 2.0 {
+            continue; // crowded: the tick alone
+        }
+        last_right = tag.right();
+        p.rect_filled(tag, CornerRadius::same(3), red);
+        p.galley(tag.min + Vec2::new(3.0, 1.0), g, Color32::WHITE);
+    }
 }
 
 /// Duck overlay on a ducked (Music) clip's waveform: cyan shading for the
