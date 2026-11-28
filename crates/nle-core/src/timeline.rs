@@ -589,6 +589,7 @@ impl Timeline {
                     // keep the existing frames on the same source times
                     curve.shift(extra);
                 }
+                r.pins.iter_mut().for_each(|p| p.timeline += extra);
                 r.segments[0].duration += extra;
                 r.segments[0].ramp = Time::ZERO;
                 r.segments[0].ramp_offset = Time::ZERO;
@@ -790,7 +791,17 @@ impl Timeline {
 
     /// A bare timeline around a nested spine (compound / storyline editing).
     pub fn nested(format: VideoFormat, spine: Vec<Clip>) -> Timeline {
-        Timeline { name: String::new(), format, spine, snapping: false, markers: Vec::new(), captions: CaptionTrack::default(), mixer: Default::default(), tracks: Vec::new(), format_chosen: true }
+        Timeline {
+            name: String::new(),
+            format,
+            spine,
+            snapping: false,
+            markers: Vec::new(),
+            captions: CaptionTrack::default(),
+            mixer: Default::default(),
+            tracks: Vec::new(),
+            format_chosen: true,
+        }
     }
 
     /// Group connected clips into a secondary storyline (FCP "Create

@@ -902,7 +902,7 @@ fn apply_adjustments(el: &Element, c: &mut Clip, origin: Time, fmt: &VideoFormat
                     }
                     let start_offset = pts[0].1 - c.source_in;
                     let blend = c.retime.as_ref().map(|r| r.blend).unwrap_or_default();
-                    c.retime = Some(Retime { segments: segs, start_offset, lead_speed: None, blend, velocity_curve: None });
+                    c.retime = Some(Retime { segments: segs, start_offset, lead_speed: None, blend, velocity_curve: None, pins: Vec::new() });
                 }
             }
             "conform-rate" => {
@@ -915,7 +915,7 @@ fn apply_adjustments(el: &Element, c: &mut Clip, origin: Time, fmt: &VideoFormat
                 if let Some(r) = c.retime.as_mut() {
                     r.blend = b;
                 } else {
-                    c.retime = Some(Retime { segments: Vec::new(), start_offset: Time::ZERO, lead_speed: None, blend: b, velocity_curve: None });
+                    c.retime = Some(Retime { segments: Vec::new(), start_offset: Time::ZERO, lead_speed: None, blend: b, velocity_curve: None, pins: Vec::new() });
                 }
             }
             _ => {}

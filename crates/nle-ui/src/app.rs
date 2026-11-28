@@ -14,8 +14,8 @@ use nle_core::eval::{self, Composition, Layer, LayerSource, RenderNode};
 use nle_core::focus::Focus;
 use nle_core::keymap::{Action, ActionMap, KeyBinding, KeyCode};
 use nle_core::{
-    AssetId, Clip, ClipId, ClipKind, Command, Effect, EffectKind, FrameBlendMode, History, Marker, MarkerKind, Project, Retime, RetimeSegment, Time, TitleParams, Transition,
-    TransitionKind,
+    AssetId, Clip, ClipId, ClipKind, Command, Effect, EffectKind, FrameBlendMode, History, Marker, MarkerKind, PinShape, Project, Retime, RetimeSegment, Time, TitleParams,
+    Transition, TransitionKind, VelocityPin,
 };
 use nle_media::analysis::{self, BeatBand};
 use nle_media::audio::output::AudioEngine;
@@ -1352,6 +1352,147 @@ impl App {
         }
     }
 
+    /// Beat, kick and snare marker times, sorted.
+    fn beat_times(&self) -> Vec<Time> {
+        let mut beats: Vec<Time> =
+            self.project.timeline.markers.iter().filter(|m| matches!(m.kind, MarkerKind::Beat | MarkerKind::SubBass | MarkerKind::Snare)).map(|m| m.time).collect();
+        beats.sort();
+        beats.dedup();
+        beats
+    }
+
+    /// Shift+Alt+P: pin the source frame under the playhead to the nearest
+    /// beat inside the clip (to the playhead when there is none) and
+    /// re-solve the clip's velocity so every pin lands; one undo step.
+    pub fn pin_frame_to_beat(&mut self) {
+        // the selected clip, else the topmost footage under the playhead (an
+        // adjustment layer or title above it can't hold a source frame)
+        let footage = |c: &Clip| matches!(c.kind, ClipKind::Asset { .. } | ClipKind::Compound(_)) && c.has_video();
+        let selected = self.selection.first().copied().filter(|id| self.project.timeline.clip(*id).is_some_and(footage));
+        let under = || {
+            let placed = self.project.timeline.placed_clips();
+            placed.iter().filter(|p| self.playhead >= p.start && self.playhead < p.end() && footage(p.clip)).max_by_key(|p| (p.lane.max(0), p.lane == 0)).map(|p| p.clip.id)
+        };
+        let Some(id) = selected.or_else(under) else {
+            return self.status("Put the playhead over a footage clip to pin its frame");
+        };
+        let Some(c) = self.project.timeline.clip(id).cloned() else { return };
+        let start = self.project.timeline.clip_start(id).unwrap_or(Time::ZERO);
+        let base = c.retime.clone().unwrap_or_else(|| Retime::uniform(c.duration, 1.0));
+        let local = self.local_time(id);
+        let frame = self.project.timeline.format.rate.frame_duration();
+        let source = base.map(local);
+        let inside = |t: Time| t > start + frame && t < start + c.duration - frame;
+        let beat = self.beat_times().into_iter().filter(|b| inside(*b)).min_by_key(|b| (*b - self.playhead).abs());
+        let target = beat.map_or(local, |b| b - start);
+        let pin = VelocityPin { timeline: target, source, shape: PinShape::Linear };
+        let mut pins: Vec<VelocityPin> = base.pins.iter().copied().filter(|p| (p.timeline - target).abs() > Time::from_millis(1) && (p.source - source).abs() >= frame).collect();
+        pins.push(pin);
+        let solve = base.pinned(c.duration, &pins);
+        let mut r = solve.retime;
+        if r.blend == FrameBlendMode::FloorFrame {
+            r.blend = FrameBlendMode::OpticalFlow;
+        }
+        if self.exec(Command::Batch { label: "Pin Frame to Beat", commands: vec![Command::SetRetime { id, retime: Some(r) }] }) {
+            self.history.seal();
+            self.tl.show_retime = true;
+            let to = if beat.is_some() { "the nearest beat" } else { "the playhead" };
+            let mut msg = format!("Pinned source {:.2} s to {to} ({} pin{})", source.as_secs_f64(), pins.len(), if pins.len() == 1 { "" } else { "s" });
+            if let Some(w) = solve.warnings.first() {
+                msg.push_str(&format!(" — {w}"));
+            }
+            self.status(msg);
+        }
+    }
+
+    /// Shift+Alt+S: pin every kill marker's frame to the nearest beat after
+    /// the previous kill's (inside the same clip), re-solve each clip's
+    /// velocity and move the kill markers onto their beats — one undo step.
+    pub fn auto_sync_kills_to_beats(&mut self) {
+        let beats = self.beat_times();
+        if beats.is_empty() {
+            return self.status("Add Beat / Kick / Snare markers first (Analyze Beats)");
+        }
+        let mut kills: Vec<(usize, Time)> = self.project.timeline.markers.iter().enumerate().filter(|(_, m)| m.kind == MarkerKind::Kill).map(|(i, m)| (i, m.time)).collect();
+        if kills.is_empty() {
+            return self.status("No kill markers — Scan VOD for Kills first");
+        }
+        kills.sort_by_key(|k| k.1);
+        let frame = self.project.timeline.format.rate.frame_duration();
+        let tl = &self.project.timeline;
+        let placed = tl.placed_clips();
+        let footage = |c: &Clip| matches!(c.kind, ClipKind::Asset { .. } | ClipKind::Compound(_)) && c.has_video();
+        let mut plans: Vec<KillSyncPlan> = Vec::new();
+        let mut last_beat: Option<Time> = None;
+        let mut skipped = 0usize;
+        for (mi, t) in kills {
+            let Some(p) = placed.iter().filter(|p| t >= p.start && t < p.end() && footage(p.clip)).max_by_key(|p| (p.lane.max(0), p.lane == 0)) else {
+                skipped += 1;
+                continue;
+            };
+            let (start, dur) = (p.start, p.clip.duration);
+            let inside = |b: Time| b > start + frame && b < start + dur - frame && last_beat.is_none_or(|l| b > l);
+            let Some(beat) = beats.iter().copied().filter(|b| inside(*b)).min_by_key(|b| (*b - t).abs()) else {
+                skipped += 1;
+                continue;
+            };
+            last_beat = Some(beat);
+            let idx = match plans.iter().position(|pl| pl.id == p.clip.id) {
+                Some(i) => i,
+                None => {
+                    let base = p.clip.retime.clone().unwrap_or_else(|| Retime::uniform(dur, 1.0));
+                    plans.push(KillSyncPlan { id: p.clip.id, start, duration: dur, pins: base.pins.clone(), base, moves: Vec::new() });
+                    plans.len() - 1
+                }
+            };
+            let pl = &mut plans[idx];
+            let source = pl.base.map(t - start);
+            let target = beat - start;
+            pl.pins.retain(|q| (q.timeline - target).abs() > Time::from_millis(1) && (q.source - source).abs() >= frame);
+            pl.pins.push(VelocityPin { timeline: target, source, shape: PinShape::FastInSlowKill });
+            pl.moves.push((mi, beat));
+        }
+        if plans.is_empty() {
+            return self.status("No kill marker has a beat inside its clip");
+        }
+        let mut commands = Vec::new();
+        let mut markers = tl.markers.clone();
+        let mut warnings: Vec<String> = Vec::new();
+        let (mut synced, clips) = (0usize, plans.len());
+        for pl in plans {
+            let solve = pl.base.pinned(pl.duration, &pl.pins);
+            let mut r = solve.retime;
+            if r.blend == FrameBlendMode::FloorFrame {
+                r.blend = FrameBlendMode::OpticalFlow;
+            }
+            for (mi, beat) in pl.moves {
+                let pin = r.pins.iter().find(|q| q.timeline == beat - pl.start);
+                if pin.is_some_and(|q| r.pin_holds(q, frame)) {
+                    markers[mi].time = beat;
+                    synced += 1;
+                }
+            }
+            warnings.extend(solve.warnings);
+            commands.push(Command::SetRetime { id: pl.id, retime: Some(r) });
+        }
+        commands.push(Command::SetMarkers { markers });
+        if self.exec(Command::Batch { label: "Auto-Sync Kills to Beats", commands }) {
+            self.history.seal();
+            self.tl.show_retime = true;
+            let mut msg = format!("Synced {synced} kill{} to beats across {clips} clip{}", if synced == 1 { "" } else { "s" }, if clips == 1 { "" } else { "s" });
+            if skipped > 0 {
+                msg.push_str(&format!(" · {skipped} without a beat in their clip"));
+            }
+            if let Some(w) = warnings.first() {
+                msg.push_str(&format!(" — {w}"));
+                if warnings.len() > 1 {
+                    msg.push_str(&format!(" (+{} more)", warnings.len() - 1));
+                }
+            }
+            self.status(msg);
+        }
+    }
+
     /// Zoom punch (`hard` = Shift+Z hold punch) on the target clip at the playhead.
     pub fn zoom_punch(&mut self, hard: bool) {
         use nle_core::zoom_punch::{apply_punch, PunchAnchor};
@@ -1911,7 +2052,7 @@ impl App {
             for s in segs.iter_mut().skip(1) {
                 s.ramp = s.duration.div_i64(2);
             }
-            Some(Retime { segments: segs, start_offset: Time::ZERO, lead_speed: None, blend: FrameBlendMode::FrameBlend, velocity_curve: None })
+            Some(Retime { segments: segs, start_offset: Time::ZERO, lead_speed: None, blend: FrameBlendMode::FrameBlend, velocity_curve: None, pins: Vec::new() })
         });
     }
 
@@ -2546,6 +2687,8 @@ impl App {
             Action::AnalyzeBeats => self.analyze_selected_beats(),
             Action::ScanKills => self.scan_selected_kills(),
             Action::SyncToBeats => self.sync_clips_to_beats(),
+            Action::PinFrameToBeat => self.pin_frame_to_beat(),
+            Action::AutoSyncKillsToBeats => self.auto_sync_kills_to_beats(),
             Action::GamingReframe916 => self.toggle_gaming_reframe_916(),
             Action::ZoomPunch => self.zoom_punch(false),
             Action::HardZoomPunch => self.zoom_punch(true),
@@ -3055,6 +3198,15 @@ impl App {
                 }
                 if ui.button(self.menu_label("Sync Selected Clips to Beats", Action::SyncToBeats)).clicked() {
                     self.sync_clips_to_beats();
+                    ui.close_menu();
+                }
+                if ui.button(self.menu_label("Pin Frame to Playhead / Nearest Beat", Action::PinFrameToBeat)).clicked() {
+                    self.pin_frame_to_beat();
+                    ui.close_menu();
+                }
+                let has_kills = self.project.timeline.markers.iter().any(|m| m.kind == MarkerKind::Kill);
+                if ui.add_enabled(has_kills, egui::Button::new(self.menu_label("Auto-Sync Kill Markers to Beat Markers", Action::AutoSyncKillsToBeats))).clicked() {
+                    self.auto_sync_kills_to_beats();
                     ui.close_menu();
                 }
                 ui.separator();
@@ -3705,6 +3857,17 @@ struct DuckKey {
     end: Time,
 }
 
+/// One clip's share of an Auto-Sync Kills to Beats run.
+struct KillSyncPlan {
+    id: ClipId,
+    start: Time,
+    duration: Time,
+    base: Retime,
+    pins: Vec<VelocityPin>,
+    /// (kill marker index, beat it moves to)
+    moves: Vec<(usize, Time)>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3773,10 +3936,25 @@ mod tests {
         // 1 s at full speed (source 19..20), then 2 s at half speed (source 20..21)
         let mut c = clip(19.0, 3.0);
         let segments = vec![RetimeSegment::new(Time::from_secs_f64(1.0), 1.0), RetimeSegment::new(Time::from_secs_f64(2.0), 0.5)];
-        c.retime = Some(Retime { segments, start_offset: Time::ZERO, lead_speed: None, blend: Default::default(), velocity_curve: None });
+        c.retime = Some(Retime { segments, start_offset: Time::ZERO, lead_speed: None, blend: Default::default(), velocity_curve: None, pins: Vec::new() });
         let hits = times(&kills_by_ear(&c, Time::ZERO, &vod()));
         assert_eq!(hits.len(), 1, "{hits:?}");
         // the shot near source 20.12 is 0.12 s into the half-speed segment
         assert!((hits[0] - (1.0 + 0.12 / 0.5)).abs() < 0.06, "{hits:?}");
+    }
+
+    #[test]
+    fn a_velocity_curve_clip_maps_the_kill_onto_its_pinned_beat() {
+        // the killing shot (source ~20.13) pinned to a beat 1.5 s into a 3 s clip of source 19..21.5
+        let mut c = clip(19.0, 3.0);
+        let pin = VelocityPin { timeline: Time::from_secs_f64(1.5), source: Time::from_secs_f64(1.13), shape: PinShape::Linear };
+        let solve = Retime::uniform(Time::from_secs_f64(2.5), 1.0).pinned(Time::from_secs_f64(3.0), &[pin]);
+        assert!(solve.warnings.is_empty(), "{:?}", solve.warnings);
+        let r = solve.retime;
+        assert!(r.velocity_curve.is_some());
+        c.retime = Some(r);
+        let hits = times(&kills_by_ear(&c, Time::from_secs_f64(2.0), &vod()));
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!((hits[0] - 3.5).abs() < 0.06, "the kill lands on the beat: {hits:?}");
     }
 }

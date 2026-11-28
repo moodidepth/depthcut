@@ -87,6 +87,100 @@ pub struct Retime {
     /// evaluated across clip-local timeline time (`Ctrl+R` velocity curve lane).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub velocity_curve: Option<Curve>,
+    /// Source frames pinned to timeline times (velocity-lane pins). The
+    /// curve was solved through them with [`Retime::pinned`]; a hand edit of
+    /// the curve can leave them stale.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pins: Vec<VelocityPin>,
+}
+
+/// How the speed moves through a [`VelocityPin`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PinShape {
+    /// Even speed on both sides; the change between spans takes a frame.
+    #[default]
+    Linear,
+    /// Rush into the pinned frame, slow right down through it, then pick up.
+    FastInSlowKill,
+    /// Glide in fast and snap to a near-hold just before the pinned frame.
+    FlowSnap,
+}
+
+impl PinShape {
+    pub const ALL: [PinShape; 3] = [PinShape::Linear, PinShape::FastInSlowKill, PinShape::FlowSnap];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PinShape::Linear => "Linear",
+            PinShape::FastInSlowKill => "Fast-In / Slow Kill",
+            PinShape::FlowSnap => "Flow Snap",
+        }
+    }
+}
+
+/// A source frame pinned to a clip-local timeline time.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct VelocityPin {
+    /// Clip-local timeline offset the frame lands on.
+    pub timeline: Time,
+    /// Source offset in the retime's source space (what [`Retime::map`] returns).
+    pub source: Time,
+    #[serde(default)]
+    pub shape: PinShape,
+}
+
+/// What [`Retime::solve_velocity_for_anchors`] produced.
+#[derive(Clone, Debug)]
+pub struct VelocitySolve {
+    pub retime: Retime,
+    /// One line per pin that was dropped or span the speed range could not
+    /// reach (its speed was clamped, so the pins after it may be off).
+    pub warnings: Vec<String>,
+    /// Largest `|map(pin.timeline) - pin.source|` over the kept pins, seconds.
+    pub max_error: f64,
+}
+
+/// A velocity knot inside one solved span: scaled by the span's speed or
+/// fixed (carrying the speed the previous span arrived with).
+#[derive(Clone, Copy)]
+enum Knot {
+    Scaled(f64),
+    Fixed(f64),
+}
+
+impl Knot {
+    fn value(self, k: f64) -> f64 {
+        match self {
+            Knot::Scaled(g) => (k * g).clamp(MIN_VELOCITY, MAX_VELOCITY),
+            Knot::Fixed(v) => v,
+        }
+    }
+}
+
+/// Knots (fraction of the span, knot) of the span leaving a `from` pin and
+/// arriving at a `to` pin. `first` spans have no speed to carry in; `dt` is
+/// the span length in seconds and `prev` the speed it starts with.
+fn span_knots(from: PinShape, to: PinShape, first: bool, dt: f64, prev: f64) -> Vec<(f64, Knot)> {
+    use Knot::{Fixed, Scaled};
+    let mut k = match (from, first) {
+        (PinShape::Linear, true) => vec![(0.0, Scaled(1.0))],
+        (PinShape::Linear, false) => vec![(0.0, Fixed(prev)), ((1.0 / 120.0f64).min(0.05 * dt) / dt, Scaled(1.0))],
+        (PinShape::FastInSlowKill, true) => vec![(0.0, Scaled(0.3)), (0.12, Scaled(0.3)), (0.3, Scaled(1.0))],
+        (PinShape::FastInSlowKill, false) => vec![(0.0, Fixed(prev)), (0.12, Fixed(prev)), (0.3, Scaled(1.0))],
+        (PinShape::FlowSnap, true) => vec![(0.0, Scaled(0.25)), (0.15, Scaled(0.25)), (0.22, Scaled(1.0))],
+        (PinShape::FlowSnap, false) => vec![(0.0, Fixed(prev)), (0.15, Fixed(prev)), (0.22, Scaled(1.0))],
+    };
+    match to {
+        PinShape::Linear => k.push((1.0, Scaled(1.0))),
+        PinShape::FastInSlowKill => k.extend([(0.55, Scaled(1.0)), (1.0, Scaled(0.3))]),
+        PinShape::FlowSnap => k.extend([(0.6, Scaled(1.0)), (0.78, Scaled(0.25)), (1.0, Scaled(0.25))]),
+    }
+    k
+}
+
+/// Exact integral of a piecewise-linear knot run (times in seconds).
+fn knots_integral(knots: &[(f64, Knot)], k: f64) -> f64 {
+    knots.windows(2).map(|w| 0.5 * (w[1].0 - w[0].0) * (w[0].1.value(k) + w[1].1.value(k))).sum()
 }
 
 /// Integral over `[0, u]` of the speed inside one segment, where the speed
@@ -153,11 +247,143 @@ impl Retime {
             lead_speed: None,
             blend: FrameBlendMode::FloorFrame,
             velocity_curve: None,
+            pins: Vec::new(),
         }
     }
 
     pub fn from_velocity_curve(duration: Time, curve: Curve, blend: FrameBlendMode) -> Self {
-        Retime { segments: vec![RetimeSegment::new(duration.max(Time(1)), 1.0)], start_offset: Time::ZERO, lead_speed: None, blend, velocity_curve: Some(curve) }
+        Retime { segments: vec![RetimeSegment::new(duration.max(Time(1)), 1.0)], start_offset: Time::ZERO, lead_speed: None, blend, velocity_curve: Some(curve), pins: Vec::new() }
+    }
+
+    /// Solve a velocity curve over `duration` whose mapping puts every
+    /// anchor's source frame on its timeline time, speed kept in
+    /// `MIN_VELOCITY..=MAX_VELOCITY`.
+    ///
+    /// Each span between two anchors is a short run of linear knots shaped by
+    /// the two anchors' [`PinShape`]s and scaled by one factor, found by
+    /// bisection on the span's exact integral; the knots sit on `Time` ticks,
+    /// so the solved mapping matches [`Retime::map_secs`] to rounding. A span
+    /// the speed range cannot reach (too much or too little source, or the
+    /// source going backwards) is clamped, named in `warnings`, and the next
+    /// span starts from where the clamped one really ended. The anchors are
+    /// stored as the retime's `pins`.
+    pub fn solve_velocity_for_anchors(duration: Time, anchors: &[VelocityPin], blend: FrameBlendMode) -> VelocitySolve {
+        let dur = duration.max(Time(1));
+        let mut warnings = Vec::new();
+        let mut sorted: Vec<VelocityPin> = Vec::with_capacity(anchors.len());
+        let mut by_time = anchors.to_vec();
+        by_time.sort_by_key(|p| p.timeline);
+        for p in by_time {
+            if p.timeline < Time::ZERO || p.timeline > dur {
+                warnings.push(format!("pin at {:.3} s is outside the clip (0–{:.3} s); ignored", p.timeline.as_secs_f64(), dur.as_secs_f64()));
+            } else if sorted.last().is_some_and(|q| (p.timeline - q.timeline).as_secs_f64() < 1e-3) {
+                warnings.push(format!("pin at {:.3} s is within 1 ms of the pin before it; ignored", p.timeline.as_secs_f64()));
+            } else {
+                sorted.push(p);
+            }
+        }
+        let mut curve = Curve::new();
+        let start_offset = match sorted.as_slice() {
+            [] => {
+                curve.insert(Keyframe::new(Time::ZERO, 1.0));
+                Time::ZERO
+            }
+            [p] => {
+                curve.insert(Keyframe::new(Time::ZERO, 1.0));
+                p.source - p.timeline
+            }
+            pins => {
+                let mut reached = pins[0].source.as_secs_f64();
+                let mut prev = 1.0;
+                for (i, w) in pins.windows(2).enumerate() {
+                    let (a, b) = (w[0], w[1]);
+                    let span = (b.timeline - a.timeline).0;
+                    let dt = (b.timeline - a.timeline).as_secs_f64();
+                    // knots on Time ticks, strictly increasing
+                    let mut knots: Vec<(Time, Knot)> = Vec::new();
+                    for (frac, knot) in span_knots(a.shape, b.shape, i == 0, dt, prev) {
+                        let t = if frac >= 1.0 { b.timeline } else { Time(a.timeline.0 + (span as f64 * frac).round() as i64) };
+                        match knots.last_mut() {
+                            Some(last) if t <= last.0 => {
+                                if frac >= 1.0 {
+                                    *last = (t, knot);
+                                }
+                            }
+                            _ => knots.push((t, knot)),
+                        }
+                    }
+                    let secs: Vec<(f64, Knot)> = knots.iter().map(|&(t, k)| (t.as_secs_f64(), k)).collect();
+                    let min_g = secs.iter().filter_map(|(_, k)| if let Knot::Scaled(g) = k { Some(*g) } else { None }).fold(f64::INFINITY, f64::min);
+                    let (mut lo, mut hi) = (0.0, MAX_VELOCITY / min_g.max(1e-3) * 1.001);
+                    let want = b.source.as_secs_f64() - reached;
+                    let (least, most) = (knots_integral(&secs, lo), knots_integral(&secs, hi));
+                    let k = if want < least - 1e-6 || want > most + 1e-6 {
+                        let what = if want < 0.0 { "goes backwards in the source".to_string() } else { format!("needs {:.2}×", want / dt) };
+                        warnings.push(format!(
+                            "span {:.2} s→{:.2} s (pin {}→{}) {what} (range {MIN_VELOCITY:.2}–{MAX_VELOCITY:.2}×); clamped",
+                            a.timeline.as_secs_f64(),
+                            b.timeline.as_secs_f64(),
+                            i + 1,
+                            i + 2
+                        ));
+                        if want < least {
+                            lo
+                        } else {
+                            hi
+                        }
+                    } else {
+                        for _ in 0..100 {
+                            let mid = 0.5 * (lo + hi);
+                            if knots_integral(&secs, mid) < want {
+                                lo = mid;
+                            } else {
+                                hi = mid;
+                            }
+                        }
+                        0.5 * (lo + hi)
+                    };
+                    reached += knots_integral(&secs, k);
+                    for (j, &(t, knot)) in knots.iter().enumerate() {
+                        // a span's first knot is the previous span's last key
+                        if j > 0 || i == 0 {
+                            curve.insert(Keyframe::new(t, knot.value(k)));
+                        }
+                    }
+                    prev = knots.last().map_or(1.0, |&(_, knot)| knot.value(k));
+                }
+                // the curve holds its first value before its first key
+                let v0 = curve.keys.first().map_or(1.0, |k| k.value);
+                Time::from_secs_f64(pins[0].source.as_secs_f64() - v0 * pins[0].timeline.as_secs_f64())
+            }
+        };
+        let mut retime = Retime::from_velocity_curve(dur, curve, blend);
+        retime.start_offset = start_offset;
+        let max_error = sorted.iter().map(|p| (retime.map_secs(p.timeline.as_secs_f64()) - p.source.as_secs_f64()).abs()).fold(0.0, f64::max);
+        retime.pins = sorted;
+        VelocitySolve { retime, warnings, max_error }
+    }
+
+    /// Re-solve this retime over `duration` so each pin's source frame lands
+    /// on its timeline time, keeping the clip's first and last frames where
+    /// they are now (unless a pin sits on an edge). Keeps the blend mode;
+    /// stores `pins` (not the edges) as the new retime's pins.
+    pub fn pinned(&self, duration: Time, pins: &[VelocityPin]) -> VelocitySolve {
+        let edge = Time::from_secs_f64(1.0 / 240.0);
+        let near = |t: Time| pins.iter().any(|p| (p.timeline - t).abs() <= edge);
+        let mut anchors = pins.to_vec();
+        for t in [Time::ZERO, duration] {
+            if !near(t) {
+                anchors.push(VelocityPin { timeline: t, source: self.map(t), shape: PinShape::Linear });
+            }
+        }
+        let mut solve = Retime::solve_velocity_for_anchors(duration, &anchors, self.blend);
+        solve.retime.pins.retain(|p| pins.contains(p));
+        solve
+    }
+
+    /// Whether the mapping still puts `pin`'s frame on its time, within `tol`.
+    pub fn pin_holds(&self, pin: &VelocityPin, tol: Time) -> bool {
+        (self.map(pin.timeline) - pin.source).abs() <= tol
     }
 
     pub fn is_identity(&self) -> bool {
@@ -508,8 +734,10 @@ impl Retime {
             }
             _ => (None, None),
         };
-        let left = Retime { segments: left_segments, velocity_curve: left_curve, ..self.clone() };
-        let right = Retime { segments: right_segments, start_offset: self.map(at), lead_speed: right_lead, blend: self.blend, velocity_curve: right_curve };
+        let left_pins = self.pins.iter().filter(|p| p.timeline <= at).copied().collect();
+        let right_pins = self.pins.iter().filter(|p| p.timeline >= at).map(|p| VelocityPin { timeline: p.timeline - at, ..*p }).collect();
+        let left = Retime { segments: left_segments, velocity_curve: left_curve, pins: left_pins, ..self.clone() };
+        let right = Retime { segments: right_segments, start_offset: self.map(at), lead_speed: right_lead, blend: self.blend, velocity_curve: right_curve, pins: right_pins };
         (left, right)
     }
 
@@ -548,7 +776,7 @@ impl Retime {
             let j = self.segments.len() - i;
             segs[j].ramp = s.ramp;
         }
-        Retime { segments: segs, start_offset: end, lead_speed: None, blend: self.blend, velocity_curve: None }
+        Retime { segments: segs, start_offset: end, lead_speed: None, blend: self.blend, velocity_curve: None, pins: Vec::new() }
     }
 
     /// Set the ease duration into segment `index`.
@@ -631,5 +859,121 @@ mod tests {
         assert!(vf.speed_at_secs(0.05) > 2.0);
         assert!(vf.speed_at_secs(0.75) < 0.5);
         assert!(vf.speed_at_secs(1.9) > 2.5);
+    }
+
+    fn pin(t: f64, s: f64, shape: PinShape) -> VelocityPin {
+        VelocityPin { timeline: Time::from_secs_f64(t), source: Time::from_secs_f64(s), shape }
+    }
+
+    fn assert_in_range(r: &Retime, dur: f64) {
+        for i in 0..=2000 {
+            let s = r.speed_at_secs(dur * i as f64 / 2000.0);
+            assert!((MIN_VELOCITY - 1e-9..=MAX_VELOCITY + 1e-9).contains(&s), "speed {s} out of range");
+        }
+    }
+
+    /// Several beats: every pinned frame lands on its beat within 1 ms, for
+    /// every shape, and the speed stays in range.
+    #[test]
+    fn pinned_frames_land_on_their_beats_for_every_shape() {
+        for shape in PinShape::ALL {
+            // kills at source 0.9 / 2.1 / 3.4 / 4.0 onto beats 1.2 / 2.0 / 2.9 / 3.6 in a 4.5 s clip of 5 s media
+            let pins = [pin(1.2, 0.9, shape), pin(2.0, 2.1, shape), pin(2.9, 3.4, shape), pin(3.6, 4.0, shape)];
+            let base = Retime::from_velocity_curve(Time::from_secs_f64(4.5), Curve { keys: vec![Keyframe::new(Time::ZERO, 5.0 / 4.5)] }, FrameBlendMode::OpticalFlow);
+            let solve = base.pinned(Time::from_secs_f64(4.5), &pins);
+            assert!(solve.warnings.is_empty(), "{shape:?}: {:?}", solve.warnings);
+            assert!(solve.max_error < 1e-3, "{shape:?}: max error {}", solve.max_error);
+            let r = &solve.retime;
+            for p in &pins {
+                assert!((r.map_secs(p.timeline.as_secs_f64()) - p.source.as_secs_f64()).abs() < 1e-3, "{shape:?}: {p:?}");
+                assert!(r.pin_holds(p, Time::from_millis(1)));
+            }
+            // the clip's first and last frames stay
+            assert!((r.map_secs(0.0) - 0.0).abs() < 1e-6);
+            assert!((r.map_secs(4.5) - 5.0).abs() < 1e-3, "{shape:?}: end {}", r.map_secs(4.5));
+            assert_eq!(r.pins, pins.to_vec());
+            assert_eq!(r.blend, FrameBlendMode::OpticalFlow);
+            assert!(r.is_monotonic());
+            assert_in_range(r, 4.5);
+        }
+        // the kill shape is slow on the kill and fast going in
+        let s = Retime::solve_velocity_for_anchors(
+            Time::from_secs(2),
+            &[pin(0.0, 0.0, PinShape::Linear), pin(1.0, 1.0, PinShape::FastInSlowKill), pin(2.0, 2.0, PinShape::Linear)],
+            FrameBlendMode::FloorFrame,
+        );
+        assert!(s.retime.speed_at_secs(1.0) < 0.6 && s.retime.speed_at_secs(0.5) > 1.0, "{} {}", s.retime.speed_at_secs(1.0), s.retime.speed_at_secs(0.5));
+        assert!(s.max_error < 1e-3);
+    }
+
+    /// A pin the speed range cannot reach is clamped and the span named; the
+    /// later pins still land when they can.
+    #[test]
+    fn impossible_pins_clamp_and_name_the_span() {
+        // 10 s of source in 0.5 s needs 20x
+        let pins = [pin(0.0, 0.0, PinShape::Linear), pin(0.5, 10.0, PinShape::Linear), pin(3.0, 12.0, PinShape::Linear)];
+        let s = Retime::solve_velocity_for_anchors(Time::from_secs(3), &pins, FrameBlendMode::FloorFrame);
+        assert_eq!(s.warnings.len(), 1, "{:?}", s.warnings);
+        assert!(s.warnings[0].contains("0.50 s") && s.warnings[0].contains("pin 1→2") && s.warnings[0].contains("clamped"), "{}", s.warnings[0]);
+        assert!(s.max_error > 1.0);
+        assert_in_range(&s.retime, 3.0);
+        assert!((s.retime.map_secs(0.5) - 4.0).abs() < 0.05, "8x for 0.5 s: {}", s.retime.map_secs(0.5));
+        // the last span starts from where the clamped one ended and still lands
+        assert!((s.retime.map_secs(3.0) - 12.0).abs() < 1e-3);
+        // backwards
+        let back = [pin(0.0, 2.0, PinShape::Linear), pin(1.0, 1.0, PinShape::Linear)];
+        let s = Retime::solve_velocity_for_anchors(Time::from_secs(1), &back, FrameBlendMode::FloorFrame);
+        assert!(s.warnings.iter().any(|w| w.contains("backwards")), "{:?}", s.warnings);
+        assert!(s.retime.is_monotonic() && s.retime.map_secs(1.0) > 2.0);
+        // out of range / duplicate pins are dropped with a note
+        let s = Retime::solve_velocity_for_anchors(
+            Time::from_secs(1),
+            &[pin(0.2, 0.2, PinShape::Linear), pin(0.2, 0.3, PinShape::Linear), pin(4.0, 1.0, PinShape::Linear)],
+            FrameBlendMode::FloorFrame,
+        );
+        assert_eq!(s.warnings.len(), 2, "{:?}", s.warnings);
+        assert_eq!(s.retime.pins.len(), 1);
+        assert!((s.retime.map_secs(0.2) - 0.2).abs() < 1e-6);
+    }
+
+    /// `inverse` finds each pinned frame at its beat, and a split keeps the
+    /// mapping continuous with each pin on its own half.
+    #[test]
+    fn pinned_retime_inverts_and_splits() {
+        let pins = [pin(0.8, 0.5, PinShape::FlowSnap), pin(1.6, 1.9, PinShape::FastInSlowKill), pin(2.5, 2.6, PinShape::Linear)];
+        let r = Retime::uniform(Time::from_secs(3), 1.0).pinned(Time::from_secs(3), &pins).retime;
+        for p in &pins {
+            let t = r.inverse(p.source).expect("inverse").as_secs_f64();
+            assert!((t - p.timeline.as_secs_f64()).abs() < 1e-3, "{p:?} -> {t}");
+        }
+        for i in 1..30 {
+            let t = Time::from_secs_f64(i as f64 * 0.1);
+            assert_eq!(r.map(r.inverse(r.map(t)).unwrap()), r.map(t));
+        }
+        let at = Time::from_secs_f64(1.2);
+        let (l, rr) = r.split_at(at);
+        assert_eq!(l.pins, vec![pins[0]]);
+        assert_eq!(rr.pins.len(), 2);
+        assert_eq!(rr.pins[0].timeline, pins[1].timeline - at);
+        assert_eq!(rr.pins[0].source, pins[1].source);
+        assert!((l.map_secs(1.2) - rr.map_secs(0.0)).abs() < 1e-6);
+        for p in &rr.pins {
+            assert!(rr.pin_holds(p, Time::from_millis(1)), "{p:?}: {}", rr.map_secs(p.timeline.as_secs_f64()));
+        }
+        assert!(l.pin_holds(&l.pins[0], Time::from_millis(1)));
+        assert!(r.reversed().pins.is_empty());
+    }
+
+    #[test]
+    fn retimes_without_pins_load_and_pins_round_trip() {
+        let old = r#"{"segments":[{"duration":705600000,"speed":1.0}],"start_offset":0,"lead_speed":null,"blend":"FloorFrame"}"#;
+        let r: Retime = serde_json::from_str(old).expect("old retime");
+        assert!(r.pins.is_empty() && r.velocity_curve.is_none());
+        assert!(!serde_json::to_string(&r).unwrap().contains("pins"), "empty pins are not written");
+        let solved = r.pinned(Time::from_secs(1), &[pin(0.5, 0.4, PinShape::FlowSnap)]).retime;
+        let back: Retime = serde_json::from_str(&serde_json::to_string(&solved).unwrap()).unwrap();
+        assert_eq!(back, solved);
+        let shapeless: VelocityPin = serde_json::from_str(r#"{"timeline":0,"source":0}"#).unwrap();
+        assert_eq!(shapeless.shape, PinShape::Linear);
     }
 }

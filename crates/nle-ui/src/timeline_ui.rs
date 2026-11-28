@@ -85,6 +85,14 @@ pub enum Drag {
         grab_y: f32,
         grab_speed: f64,
     },
+    /// A velocity pin (a source frame held to a timeline instant): dragging
+    /// moves its instant and re-solves `base`, the retime at drag start.
+    VelocityPin {
+        id: ClipId,
+        index: usize,
+        lane_top: f32,
+        base: Box<Retime>,
+    },
     /// Trim a caption block edge in the captions row; `base` is the track
     /// at drag start (the drag is re-applied to it every frame).
     CaptionTrim {
@@ -634,6 +642,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     // retime bars & interactive 10%–800% velocity curve lane (Ctrl+R)
     let mut retime_click: Option<(ClipId, usize, Rect)> = None;
     let mut vel_handles: Vec<(ClipId, usize, Pos2, Rect)> = Vec::new();
+    let mut pin_handles: Vec<(ClipId, usize, Pos2, Rect)> = Vec::new();
     if app.tl.show_retime {
         for h in &hits {
             let Some(c) = app.project.timeline.clip(h.id) else { continue };
@@ -648,8 +657,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             let lane_r = Rect::from_min_max(Pos2::new(h.rect.left(), h.rect.top() - RETIME_H - 1.0), Pos2::new(h.rect.right(), h.rect.top() - 1.0));
             if r.has_velocity_curve() || (r.segments.len() == 1 && r.segments[0].speed >= 0.0) {
                 draw_velocity_lane(&painter, lane_r, c, &r, &geo, h.start, &mut vel_handles);
+                draw_velocity_pins(&painter, lane_r, c, &r, &geo, h.start, app.project.timeline.format.rate.frame_duration(), &mut pin_handles);
                 if resp.clicked() && pointer.is_some_and(|p| lane_r.contains(p)) {
-                    let near_handle = vel_handles.iter().any(|(hid, _, pos, _)| *hid == h.id && pointer.is_some_and(|p| p.distance(*pos) < 8.0));
+                    let near_handle = vel_handles.iter().chain(&pin_handles).any(|(hid, _, pos, _)| *hid == h.id && pointer.is_some_and(|p| p.distance(*pos) < 8.0));
                     if !near_handle {
                         retime_click = Some((h.id, 0, lane_r));
                     }
@@ -691,6 +701,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 Some(start_edge) => Drag::CaptionTrim { index, start_edge, origin: t, base },
                 None => Drag::CaptionSlide { index, origin: t, base },
             })
+        } else if let Some((id, idx, _, lr)) = pin_handles.iter().rev().find(|(_, _, pos, _)| origin.distance(*pos) <= 8.0) {
+            let base = app.project.timeline.clip(*id).map_or_else(|| Retime::uniform(Time::ZERO, 1.0), |c| c.retime.clone().unwrap_or_else(|| Retime::uniform(c.duration, 1.0)));
+            Some(Drag::VelocityPin { id: *id, index: *idx, lane_top: lr.top(), base: Box::new(base) })
         } else if let Some((id, idx, _, lr)) = vel_handles.iter().rev().find(|(_, _, pos, _)| origin.distance(*pos) <= 9.0) {
             let grab_speed = app.project.timeline.clip(*id).map_or(1.0, |c| {
                 let r = c.retime.clone().unwrap_or_else(|| Retime::uniform(c.duration, 1.0));
@@ -936,6 +949,35 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         Color32::from_rgb(0x40, 0xD2, 0xFF),
                     );
                 }
+            }
+            Drag::VelocityPin { id, index, lane_top, base } => {
+                let clip_start = tl.clip_start(id).unwrap_or(Time::ZERO);
+                let duration = base.timeline_duration();
+                let frame = rate.frame_duration();
+                // pins snap to beats, markers, edits and the playhead
+                let (t, snapped) = tl.snap(raw_t, snap_threshold, &app.tl.snap_targets(app.playhead), Some(id));
+                if snapped {
+                    snap_line = Some(t);
+                }
+                let local = (t - clip_start).clamp(frame, (duration - frame).max(frame));
+                let mut pins = base.pins.clone();
+                if let Some(pin) = pins.get_mut(index) {
+                    pin.timeline = local;
+                    let solve = base.pinned(duration, &pins);
+                    let mut r = solve.retime;
+                    if r.blend == FrameBlendMode::FloorFrame {
+                        r.blend = FrameBlendMode::OpticalFlow;
+                    }
+                    let label = match solve.warnings.first() {
+                        Some(w) => w.clone(),
+                        None => format!("{:.2} s → source {:.2} s", local.as_secs_f64(), pins[index].source.as_secs_f64()),
+                    };
+                    painter.text(Pos2::new(p.x, lane_top - 4.0), egui::Align2::CENTER_BOTTOM, label, egui::FontId::proportional(11.0), theme::SNAP);
+                    if app.project.timeline.clip(id).and_then(|c| c.retime.as_ref()) != Some(&r) {
+                        app.exec_key(Command::SetRetime { id, retime: Some(r) }, Some(drag_key(0x50, id)));
+                    }
+                }
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
             }
         }
     }
@@ -1992,7 +2034,7 @@ fn finish_drag(app: &mut App, d: Drag, p: Pos2, geo: &Geo, hits: &[Hit], lane_at
     let raw_t = geo.t(p.x);
     let tl = &app.project.timeline;
     match d {
-        Drag::Scrub | Drag::Range { .. } | Drag::VelocityKey { .. } => {}
+        Drag::Scrub | Drag::Range { .. } | Drag::VelocityKey { .. } | Drag::VelocityPin { .. } => {}
         Drag::CaptionTrim { .. } | Drag::CaptionSlide { .. } => {
             // final pointer position (the live preview already applied it under the same key)
             if let Some((tr, _)) = caption_drag_result(app, &d, raw_t, snap) {
@@ -2519,6 +2561,30 @@ fn draw_velocity_lane(p: &egui::Painter, r: Rect, c: &Clip, retime: &Retime, geo
         let cur_pct = retime.speed_at(Time::ZERO) * 100.0;
         let label = if retime.has_velocity_curve() { "Velocity 10–800%".to_string() } else { format!("Speed {:.0}%", cur_pct) };
         cp.text(r.left_top() + Vec2::new(4.0, 2.0), egui::Align2::LEFT_TOP, label, egui::FontId::proportional(9.5), Color32::from_rgb(0x8E, 0xE8, 0xFF));
+    }
+}
+
+/// Velocity pins along the bottom of the lane: a diamond on a tick at each
+/// pinned instant, bright while the curve lands its frame (within one frame),
+/// dim when a later edit broke it.
+#[allow(clippy::too_many_arguments)]
+fn draw_velocity_pins(p: &egui::Painter, r: Rect, c: &Clip, retime: &Retime, geo: &Geo, start: Time, frame: Time, handles: &mut Vec<(ClipId, usize, Pos2, Rect)>) {
+    if r.width() < 8.0 || retime.pins.is_empty() {
+        return;
+    }
+    let cp = p.with_clip_rect(r.intersect(p.clip_rect()));
+    for (idx, pin) in retime.pins.iter().enumerate() {
+        let x = geo.x(start + pin.timeline);
+        let col = if retime.pin_holds(pin, frame) { Color32::from_rgb(0xFF, 0x4F, 0xA3) } else { Color32::from_rgba_unmultiplied(0xFF, 0x4F, 0xA3, 90) };
+        cp.line_segment([Pos2::new(x, r.top() + 2.0), Pos2::new(x, r.bottom() - 2.0)], Stroke::new(1.0_f32, col.gamma_multiply(0.6)));
+        let pos = Pos2::new(x, r.bottom() - 6.0);
+        let d = 4.5;
+        cp.add(egui::Shape::convex_polygon(
+            vec![Pos2::new(x, pos.y - d), Pos2::new(x + d, pos.y), Pos2::new(x, pos.y + d), Pos2::new(x - d, pos.y)],
+            col,
+            Stroke::new(1.0_f32, Color32::BLACK),
+        ));
+        handles.push((c.id, idx, pos, r));
     }
 }
 

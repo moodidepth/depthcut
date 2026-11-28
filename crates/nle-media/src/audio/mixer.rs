@@ -1335,6 +1335,33 @@ mod tests {
         assert!((plain - 220.0).abs() < 15.0, "resample path: {plain} Hz");
     }
 
+    /// A velocity pin (source 1.30 s held to timeline 0.80 s) moves the
+    /// audio with the picture: a burst at source 1.30 s sounds at 0.80 s.
+    #[test]
+    fn pinned_velocity_moves_the_audio_onto_the_pin() {
+        use nle_core::{PinShape, Retime, VelocityPin};
+        let a = asset(3);
+        let start = 62_400; // source 1.30 s
+        let mut samples = vec![0.0f32; 48_000 * 3 * 2];
+        for i in 0..240 {
+            let v = (std::f32::consts::TAU * 1_000.0 * i as f32 / 48_000.0).sin() * 0.8;
+            samples[2 * (start + i)] = v;
+            samples[2 * (start + i) + 1] = v;
+        }
+        let src = Arc::new(AudioBuffer::new(48_000, 2, samples));
+        let pin = VelocityPin { timeline: Time::from_millis(800), source: Time::from_millis(1_300), shape: PinShape::FastInSlowKill };
+        let solve = Retime::uniform(Time::from_secs(2), 1.0).pinned(Time::from_secs(2), &[pin]);
+        assert!(solve.warnings.is_empty(), "{:?}", solve.warnings);
+        let mut c = Clip::from_asset(&a);
+        c.retime = Some(solve.retime);
+        c.duration = Time::from_secs(2);
+        c.audio.preserve_pitch = false;
+        let out = render_clip_limited(c, &a, src, 1.0, 1.5, false);
+        let onset = (0..out.len() / 2).find(|&i| out[2 * i].abs() > 0.2).expect("burst plays");
+        let at = onset as f64 / 48_000.0;
+        assert!((at - 0.8).abs() < 0.001, "burst at {at:.4} s, pinned to 0.800 s");
+    }
+
     /// Look-ahead ducking from the cached envelope: the music dips −14 dB
     /// under the voice, starts *before* the first word, and the preview
     /// (small chunks) and export (4800-sample chunks) renders are identical.

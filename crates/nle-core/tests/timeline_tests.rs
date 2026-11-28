@@ -431,7 +431,14 @@ fn speed_ramp_is_smooth_continuous_and_monotonic() {
     // 100% for 2s, then ramp over 1s down to 25% for 4s
     let mut seg2 = RetimeSegment::new(secs(4), 0.25);
     seg2.ramp = secs(1);
-    let r = Retime { segments: vec![RetimeSegment::new(secs(2), 1.0), seg2], start_offset: Time::ZERO, lead_speed: None, blend: FrameBlendMode::OpticalFlow, velocity_curve: None };
+    let r = Retime {
+        segments: vec![RetimeSegment::new(secs(2), 1.0), seg2],
+        start_offset: Time::ZERO,
+        lead_speed: None,
+        blend: FrameBlendMode::OpticalFlow,
+        velocity_curve: None,
+        pins: Vec::new(),
+    };
     // smoothstep ramp integral: 1s * (1 + 0.25)/2 = 0.625, then 3s * 0.25
     let end = r.map_secs(6.0);
     assert!((end - (2.0 + 0.625 + 0.75)).abs() < 1e-9, "{end}");
@@ -877,6 +884,7 @@ fn slow_or_fast_clip(asset: &MediaAsset, dur: i64, speed: f64) -> Clip {
         lead_speed: None,
         blend: FrameBlendMode::FrameBlend,
         velocity_curve: None,
+        pins: Vec::new(),
     });
     c
 }

@@ -176,7 +176,8 @@ pub fn plan_clip(asset: &MediaAsset, p: &EditPlan) -> Clip {
     if (p.speed - 1.0).abs() > 1e-9 {
         // one segment of exactly the timeline length, so the edit fills its range
         let blend = c.frame_quality();
-        c.retime = Some(Retime { segments: vec![RetimeSegment::new(p.duration, p.speed)], start_offset: Time::ZERO, lead_speed: None, blend, velocity_curve: None });
+        c.retime =
+            Some(Retime { segments: vec![RetimeSegment::new(p.duration, p.speed)], start_offset: Time::ZERO, lead_speed: None, blend, velocity_curve: None, pins: Vec::new() });
     }
     c
 }

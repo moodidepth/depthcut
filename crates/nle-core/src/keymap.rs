@@ -100,6 +100,8 @@ actions! {
     AnalyzeBeats => "Analyze Beats", "Markers";
     ScanKills => "Scan VOD for Kills", "Montage";
     SyncToBeats => "Sync Clips & Velocity to Beats", "Montage";
+    PinFrameToBeat => "Pin Frame to Playhead / Nearest Beat", "Montage";
+    AutoSyncKillsToBeats => "Auto-Sync Kill Markers to Beat Markers", "Montage";
     GamingReframe916 => "Gaming 9:16 Split-Crop", "Montage";
     ZoomPunch => "Zoom Punch at Playhead", "Montage";
     HardZoomPunch => "Hard Zoom Punch (hold)", "Montage";
@@ -455,6 +457,8 @@ impl ActionMap {
                 (AnalyzeBeats, &[B::alt(K::B)]),
                 (ScanKills, &[B::shift_alt(K::K)]),
                 (SyncToBeats, &[B::alt(K::S)]),
+                (PinFrameToBeat, &[B::shift_alt(K::P)]),
+                (AutoSyncKillsToBeats, &[B::shift_alt(K::S)]),
                 (GamingReframe916, &[B::alt(K::Num9)]),
                 (ZoomPunch, &[B::key(K::Z)]),
                 (HardZoomPunch, &[B::shift(K::Z)]),
@@ -584,6 +588,8 @@ impl ActionMap {
                 (AnalyzeBeats, &[B::alt(K::B)]),
                 (ScanKills, &[B::shift_alt(K::K)]),
                 (SyncToBeats, &[B::alt(K::S)]),
+                (PinFrameToBeat, &[B::shift_alt(K::P)]),
+                (AutoSyncKillsToBeats, &[B::shift_alt(K::S)]),
                 (GamingReframe916, &[B::alt(K::Num9)]),
                 (ZoomPunch, &[B::key(K::Z)]),
                 (HardZoomPunch, &[B::shift(K::Z)]),
@@ -713,6 +719,8 @@ impl ActionMap {
                 (AnalyzeBeats, &[B::alt(K::B)]),
                 (ScanKills, &[B::shift_alt(K::K)]),
                 (SyncToBeats, &[B::alt(K::S)]),
+                (PinFrameToBeat, &[B::shift_alt(K::P)]),
+                (AutoSyncKillsToBeats, &[B::shift_alt(K::S)]),
                 (GamingReframe916, &[B::alt(K::Num9)]),
                 (ZoomPunch, &[B::key(K::Z)]),
                 (HardZoomPunch, &[B::shift(K::Z)]),
