@@ -45,7 +45,32 @@ pub struct GradeUi {
 
 impl Default for GradeUi {
     fn default() -> Self {
-        GradeUi { copied: None, paste: None, last_sel: AttributeSet::default(), last_timing: KeyTiming::Maintain, compare: None, split: 0.5, images: HashMap::new() }
+        let (last_sel, last_timing) = load_paste_choice().unwrap_or((AttributeSet::NONE, KeyTiming::Maintain));
+        GradeUi { copied: None, paste: None, last_sel, last_timing, compare: None, split: 0.5, images: HashMap::new() }
+    }
+}
+
+/// The Paste Attributes ticks, remembered between sessions so the dialog
+/// never starts with everything (video included) ticked.
+fn paste_choice_file() -> PathBuf {
+    crate::media::data_dir().join("paste_attributes.json")
+}
+
+fn load_paste_choice() -> Option<(AttributeSet, KeyTiming)> {
+    let text = std::fs::read_to_string(paste_choice_file()).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+fn save_paste_choice(sel: AttributeSet, timing: KeyTiming) {
+    let file = paste_choice_file();
+    let _ = std::fs::create_dir_all(file.parent().unwrap_or(std::path::Path::new(".")));
+    match serde_json::to_string(&(sel, timing)) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&file, json) {
+                log::warn!("could not remember the Paste Attributes choice: {e}");
+            }
+        }
+        Err(e) => log::warn!("could not remember the Paste Attributes choice: {e}"),
     }
 }
 
@@ -184,6 +209,17 @@ impl App {
             ui.label(egui::RichText::new(format!("From \u{201c}{}\u{201d}", src.name)).color(theme::TEXT_DIM));
             ui.add_space(4.0);
             let s = &mut d.sel;
+            ui.horizontal(|ui| {
+                if ui.small_button("All video").on_hover_text("Tick transform, crop, compositing, color and video effects").clicked() {
+                    (s.transform, s.crop, s.compositing, s.color, s.effects) = (true, true, true, true, true);
+                }
+                if ui.small_button("All audio").on_hover_text("Tick volume and audio effects").clicked() {
+                    (s.volume, s.audio_effects) = (true, true);
+                }
+                if ui.small_button("Clear").on_hover_text("Untick everything").clicked() {
+                    *s = AttributeSet::NONE;
+                }
+            });
             ui.label(egui::RichText::new("Video").strong());
             ui.checkbox(&mut s.transform, "Transform (position, scale, rotation, anchor)");
             ui.checkbox(&mut s.crop, "Crop");
@@ -203,7 +239,7 @@ impl App {
             });
             ui.separator();
             ui.horizontal(|ui| {
-                if ui.add_enabled(d.sel.any(), egui::Button::new("Paste")).clicked() {
+                if ui.add_enabled(d.sel.any(), egui::Button::new("Paste")).on_disabled_hover_text("Tick what to paste first").clicked() {
                     go = true;
                 }
                 if ui.button("Cancel").clicked() {
@@ -214,6 +250,7 @@ impl App {
         if go {
             self.grade.last_sel = d.sel;
             self.grade.last_timing = d.timing;
+            save_paste_choice(d.sel, d.timing);
             let ids = self.action_targets();
             let cmd = {
                 let targets: Vec<&Clip> = ids.iter().filter_map(|id| self.project.timeline.clip(*id)).collect();

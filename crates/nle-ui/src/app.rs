@@ -2614,6 +2614,11 @@ impl App {
             self.export.open = false;
             return;
         }
+        // and the Paste Attributes dialog, without pasting
+        if self.grade.paste.is_some() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+            self.grade.paste = None;
+            return;
+        }
 
         // Alt+Left / Alt+Right nudge a caption block by one frame (unless rebound)
         for (code, key, dir) in [(KeyCode::ArrowLeft, egui::Key::ArrowLeft, -1), (KeyCode::ArrowRight, egui::Key::ArrowRight, 1)] {
