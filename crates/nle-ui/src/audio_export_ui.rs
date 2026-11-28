@@ -65,6 +65,12 @@ impl AudioExportDialog {
     pub fn show(&mut self, ctx: &egui::Context, project: &Project, audio: &HashMap<AssetId, Arc<AudioBuffer>>) {
         let finished = self.job.as_ref().and_then(|j| j.result.lock().take().map(|r| (r, j.started)));
         if let Some((r, started)) = finished {
+            // the next export gets a fresh name instead of replacing this one
+            if r.is_ok() {
+                if let Some(p) = self.path.as_ref().filter(|p| p.exists()) {
+                    self.path = Some(crate::export_ui::next_free_path(p, &[]));
+                }
+            }
             self.last = Some(match r {
                 Ok(files) => (format!("Wrote {} file{} in {:.1}s", files.len(), if files.len() == 1 { "" } else { "s" }, started.elapsed().as_secs_f32()), files.first().cloned()),
                 Err(e) if e == nle_render::export::ExportError::Cancelled.to_string() => ("Audio export cancelled".into(), None),

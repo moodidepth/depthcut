@@ -31,7 +31,7 @@ struct Job {
 
 /// A render-queue entry: the project and settings as they were when queued.
 #[derive(Clone)]
-struct Queued {
+pub(crate) struct Queued {
     project: Arc<Project>,
     settings: ExportSettings,
 }
@@ -74,6 +74,11 @@ pub struct ExportDialog {
     /// Program loudness: 0 = off, 1 = -14 LUFS (YouTube), 2 = -16 LUFS (Shorts/TikTok).
     loudness: usize,
     path: Option<PathBuf>,
+    /// An existing file the user agreed to replace (in the OS save dialog,
+    /// which asks, or with "Overwrite" here).
+    overwrite_ok: Option<PathBuf>,
+    /// Render was clicked on an existing file: ask before replacing it.
+    confirm_overwrite: bool,
     job: Option<Job>,
     last_result: Option<String>,
     /// 10-bit HEVC / AV1.
@@ -174,6 +179,8 @@ impl Default for ExportDialog {
             done_path: None,
             loudness: 0,
             path: None,
+            overwrite_ok: None,
+            confirm_overwrite: false,
             job: None,
             last_result: None,
             ten_bit: false,
@@ -219,6 +226,13 @@ impl ExportDialog {
         let finished = self.job.as_ref().and_then(|j| j.result.lock().take().map(|r| (r, j.path.clone(), j.started, j.project.clone())));
         if let Some((r, path, started, project)) = finished {
             self.done_path = r.is_ok().then(|| path.clone());
+            if r.is_ok() {
+                remember_output_dir(&path);
+            }
+            // the next render gets a fresh name instead of replacing this one
+            if self.path.as_ref() == Some(&path) && path.exists() {
+                self.path = Some(next_free_path(&path, &self.queue));
+            }
             let msg = match r {
                 Ok(()) => {
                     let mut msg = format!("Exported {} in {:.1}s", path.display(), started.elapsed().as_secs_f32());
@@ -557,6 +571,9 @@ impl ExportDialog {
                         if p.extension().is_none() {
                             p.set_extension(ext);
                         }
+                        // the OS dialog already asked before picking an existing file
+                        self.overwrite_ok = Some(p.clone());
+                        self.confirm_overwrite = false;
                         self.path = Some(p);
                     }
                 }
@@ -577,9 +594,38 @@ impl ExportDialog {
                     ui.label(egui::RichText::new(format!("Frames: {}  ·  audio: {}", pattern.display(), p.with_extension("wav").display())).small().color(theme::TEXT_DIM));
                 }
             }
+            let exists = self.path.as_ref().is_some_and(|p| p.exists() && self.overwrite_ok.as_ref() != Some(p));
+            let mut render_now = false;
+            if self.confirm_overwrite && exists {
+                let p = self.path.clone().unwrap_or_default();
+                let fresh = next_free_path(&p, &self.queue);
+                let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                ui.colored_label(theme::PLAYHEAD, format!("⚠ {} already exists.", name(&p)));
+                ui.horizontal(|ui| {
+                    if ui.button("Overwrite").on_hover_text("Replace the existing file").clicked() {
+                        self.overwrite_ok = Some(p.clone());
+                        render_now = true;
+                    }
+                    if ui.button(format!("Save as “{}”", name(&fresh))).clicked() {
+                        self.path = Some(fresh.clone());
+                        render_now = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.confirm_overwrite = false;
+                    }
+                });
+            } else {
+                self.confirm_overwrite = false;
+            }
             ui.horizontal(|ui| {
                 let ready = self.preset.is_some() && self.path.is_some() && gpu.is_some();
-                if ui.add_enabled(ready, egui::Button::new(egui::RichText::new("⤴ Render").strong())).clicked() {
+                let render = ui
+                    .add_enabled(ready, egui::Button::new(egui::RichText::new("⤴ Render").strong()))
+                    .on_hover_text("Render the timeline to the output file (asks before replacing an existing file)");
+                if render.clicked() && exists {
+                    self.confirm_overwrite = true;
+                } else if render.clicked() || render_now {
+                    self.confirm_overwrite = false;
                     if let (Some(preset), Some(path), Some(gpu)) = (self.preset, self.path.clone(), gpu) {
                         let (snapshot, settings) = self.build(project, preset, path, marks);
                         self.queue_log.clear();
@@ -789,7 +835,7 @@ fn apply_queue_op(queue: &mut Vec<Queued>, op: QueueOp) {
 
 /// `name.ext` -> `name (2).ext`, … : the first name neither on disk nor
 /// already used by a queued job.
-fn next_free_path(path: &Path, queue: &[Queued]) -> PathBuf {
+pub(crate) fn next_free_path(path: &Path, queue: &[Queued]) -> PathBuf {
     let taken = |p: &Path| p.exists() || queue.iter().any(|q| q.settings.path == p);
     if !taken(path) {
         return path.to_path_buf();
@@ -850,20 +896,47 @@ impl QualityTier {
     }
 }
 
-/// `<Videos or Desktop>/<project>.mp4`, numbered so it never overwrites.
-pub fn default_output_path(project_name: &str) -> PathBuf {
+/// Remembers the folder of the last render, for the next default output.
+fn last_dir_file() -> PathBuf {
+    crate::media::data_dir().join("last_render_dir.txt")
+}
+
+fn remember_output_dir(path: &Path) {
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        let file = last_dir_file();
+        let _ = std::fs::create_dir_all(file.parent().unwrap_or(Path::new(".")));
+        if let Err(e) = std::fs::write(&file, dir.to_string_lossy().as_bytes()) {
+            log::warn!("could not remember the render folder: {e}");
+        }
+    }
+}
+
+/// The last render's folder when it still exists, else Videos (or Desktop).
+fn default_output_dir() -> PathBuf {
+    let last = std::fs::read_to_string(last_dir_file()).ok().map(|s| PathBuf::from(s.trim())).filter(|d| !d.as_os_str().is_empty() && d.is_dir());
+    if let Some(d) = last {
+        return d;
+    }
     let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(PathBuf::from);
-    let dir = home
-        .map(|h| {
-            let videos = h.join("Videos");
-            if videos.is_dir() {
-                videos
-            } else {
-                h.join("Desktop")
-            }
-        })
-        .filter(|d| d.is_dir())
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    home.map(|h| {
+        let videos = h.join("Videos");
+        if videos.is_dir() {
+            videos
+        } else {
+            h.join("Desktop")
+        }
+    })
+    .filter(|d| d.is_dir())
+    .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+}
+
+/// `<last render folder, or Videos / Desktop>/<project>.mp4`, numbered so it
+/// never overwrites.
+pub fn default_output_path(project_name: &str) -> PathBuf {
+    default_output_path_in(&default_output_dir(), project_name)
+}
+
+fn default_output_path_in(dir: &Path, project_name: &str) -> PathBuf {
     let stem = sanitize_file_name(project_name);
     let mut p = dir.join(format!("{stem}.mp4"));
     let mut n = 2;
@@ -1044,5 +1117,17 @@ mod tests {
         let name = p.file_name().unwrap().to_string_lossy().to_string();
         assert!(!name.contains(['/', ':', '?']), "{name}");
         assert_eq!(sanitize_file_name("  ..."), "Untitled");
+    }
+
+    #[test]
+    fn a_finished_render_moves_the_output_to_a_fresh_name() {
+        let dir = std::env::temp_dir().join(format!("rcp-fresh-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = default_output_path_in(&dir, "Montage");
+        assert_eq!(first.file_name().unwrap(), "Montage.mp4");
+        std::fs::write(&first, b"x").unwrap();
+        assert_eq!(default_output_path_in(&dir, "Montage").file_name().unwrap(), "Montage (2).mp4");
+        assert_eq!(next_free_path(&first, &[]).file_name().unwrap(), "Montage (2).mp4");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
