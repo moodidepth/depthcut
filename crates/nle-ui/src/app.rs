@@ -229,7 +229,7 @@ pub struct App {
     /// Voiceover takes being imported, placed at their record start once probed.
     pending_voiceover: Vec<(PathBuf, Time)>,
     pub beat_job: Option<Job<(Vec<Marker>, f64)>>,
-    pub kill_job: Option<Job<Vec<Marker>>>,
+    pub kill_job: Option<Job<KillScan>>,
     pub multiband_job: Option<Job<Vec<Marker>>>,
     pub presets_ui: presets_ui::PresetsUiState,
     pub copilot: copilot_ui::CopilotState,
@@ -1281,48 +1281,63 @@ impl App {
         self.status("Scanning Sub-Bass (20–120 Hz) & Snare (1.5–6 kHz) beats…");
     }
 
+    /// Mark kills on the selected gameplay clips (or the clip under the
+    /// playhead). Clips the Medal recorder logged kills for use those (exact,
+    /// labelled `Kill` / `2K` / `3K` ...); others are scanned by ear.
     pub fn scan_selected_kills(&mut self) {
         if self.kill_job.is_some() {
             return;
         }
-        let Some(id) = self.target_clip() else {
+        let ids: Vec<ClipId> = if self.selection.is_empty() { self.target_clip().into_iter().collect() } else { self.selection.clone() };
+        if ids.is_empty() {
             return self.status("Select a gameplay VOD clip first");
-        };
-        let Some(clip) = self.project.timeline.clip(id).cloned() else { return };
-        let ClipKind::Asset { asset } = clip.kind else {
-            return self.status("Kill scanner requires a media clip");
-        };
-        let Some(buf) = self.library.audio.get(&asset).cloned() else {
-            return self.status("Audio is still decoding — try again shortly");
-        };
-        let start = self.project.timeline.clip_start(id).unwrap_or(Time::ZERO);
-        let dur = clip.duration;
-        let speed = clip.retime.as_ref().and_then(|r| (r.segments.len() == 1 && r.segments[0].speed > 0.0).then_some(r.segments[0].speed)).unwrap_or(1.0);
-        let src_in = clip.source_in + clip.retime.as_ref().map_or(Time::ZERO, |r| r.start_offset);
-        self.kill_job = Some(Job::spawn("kill-scan", move |ctx| {
-            if ctx.cancelled() {
-                return Err("Cancelled".into());
+        }
+        let several = ids.len() > 1;
+        let placed = self.project.timeline.placed_clips();
+        let mut scan = KillScan::default();
+        let mut by_ear = Vec::new();
+        let mut decoding = 0;
+        for id in ids {
+            let Some(pc) = placed.iter().find(|p| p.clip.id == id) else { continue };
+            let (clip, start) = (pc.clip, pc.start);
+            let ClipKind::Asset { asset } = clip.kind else { continue };
+            let is_video = self.project.asset(asset).is_some_and(|a| a.kind == nle_core::AssetKind::Video);
+            if several && !is_video {
+                continue; // music and sound effects in a multi-selection
             }
-            let ch = buf.channels.max(1) as usize;
-            let rate = buf.sample_rate.max(1);
-            let total_frames = buf.samples.len() / ch;
-            let in_frame = (src_in.as_secs_f64().max(0.0) * rate as f64).round() as usize;
-            let span_frames = ((dur.as_secs_f64() * speed).max(0.0) * rate as f64).round() as usize;
-            let from = in_frame.min(total_frames);
-            let to = from.saturating_add(span_frames).min(total_frames);
-            let slice = &buf.samples[from * ch..to * ch];
-            let peaks = analysis::analyze_kills_from_samples(slice, ch, rate, 1.0);
-            let end = start + dur;
-            let markers = peaks
-                .into_iter()
-                .filter_map(|p| {
-                    let t = start + Time::from_secs_f64(p.time.as_secs_f64() / speed);
-                    (t >= start && t <= end).then(|| Marker::kill(t, p.label))
-                })
-                .collect();
-            Ok(markers)
+            let range = (start, start + clip.duration);
+            if let Some(events) = self.library.game_events.get(&asset) {
+                scan.medal_clips += 1;
+                scan.ranges.push(range);
+                scan.markers.extend(events.iter().filter(|e| e.is_kill()).filter_map(|e| Some(Marker::kill(start + clip.local_for_source(e.time)?, e.label()))));
+                continue;
+            }
+            let Some(buf) = self.library.audio.get(&asset).cloned() else {
+                decoding += 1;
+                continue;
+            };
+            scan.ranges.push(range);
+            by_ear.push((clip.clone(), start, buf));
+        }
+        if scan.ranges.is_empty() {
+            return self.status(if decoding > 0 { "Audio is still decoding — try again shortly" } else { "Kill scanner requires a gameplay media clip" });
+        }
+        scan.ear_clips = by_ear.len();
+        let msg = match (scan.medal_clips, by_ear.len()) {
+            (_, 0) => "Reading kills from Medal…",
+            (0, _) => "Scanning gameplay audio for kills…",
+            _ => "Reading kills from Medal and scanning the other clips' audio…",
+        };
+        self.kill_job = Some(Job::spawn("kill-scan", move |ctx| {
+            for (clip, start, buf) in by_ear {
+                if ctx.cancelled() {
+                    return Err("Cancelled".into());
+                }
+                scan.markers.extend(kills_by_ear(&clip, start, &buf));
+            }
+            Ok(scan)
         }));
-        self.status("Scanning gameplay audio for kills…");
+        self.status(msg);
     }
 
     pub fn sync_clips_to_beats(&mut self) {
@@ -3378,20 +3393,29 @@ impl App {
             if let Some(res) = job.take() {
                 self.kill_job = None;
                 match res {
-                    Ok(new_kills) => {
-                        let count = new_kills.len();
-                        let had = self.project.timeline.markers.iter().any(|m| m.kind == MarkerKind::Kill);
+                    Ok(scan) => {
+                        let count = scan.markers.len();
+                        let inside = |t: Time| scan.ranges.iter().any(|(a, b)| t >= *a && t <= *b);
+                        let had = self.project.timeline.markers.iter().any(|m| m.kind == MarkerKind::Kill && inside(m.time));
                         if count == 0 && !had {
-                            self.status("No kills found. The scanner listens for the kill sound that follows gunfire; faint ones (some skins, sidearms) can be missed, so add those with M");
+                            self.status(if scan.ear_clips == 0 {
+                                "Medal logged no kills in the selected part of the clip".to_string()
+                            } else {
+                                "No kills found. The scanner listens for the kill sound that follows gunfire; faint ones (some skins, sidearms) can be missed, so add those with M"
+                                    .to_string()
+                            });
                         } else {
-                            let mut markers: Vec<Marker> = self.project.timeline.markers.iter().filter(|m| m.kind != MarkerKind::Kill).cloned().collect();
-                            markers.extend(new_kills);
+                            // replace only the kill markers over the scanned clips
+                            let mut markers: Vec<Marker> = self.project.timeline.markers.iter().filter(|m| m.kind != MarkerKind::Kill || !inside(m.time)).cloned().collect();
+                            markers.extend(scan.markers);
                             markers.sort_by_key(|m| m.time);
                             self.exec(Command::SetMarkers { markers });
-                            self.status(match count {
-                                0 => "No kills found; removed the old kill markers".to_string(),
-                                1 => "Marked 1 kill (on the killing shot)".to_string(),
-                                n => format!("Marked {n} kills (on the killing shots). Faint kill sounds can be missed; add those with M"),
+                            let kills = if count == 1 { "1 kill".to_string() } else { format!("{count} kills") };
+                            self.status(match (count, scan.medal_clips, scan.ear_clips) {
+                                (0, _, _) => "No kills found; removed the old kill markers there".to_string(),
+                                (_, _, 0) => format!("Marked {kills} from Medal's game events"),
+                                (_, 0, _) => format!("Marked {kills} (on the killing shots). Faint kill sounds can be missed; add those with M"),
+                                (_, m, e) => format!("Marked {kills}: {m} clip(s) from Medal's game events, {e} by ear (faint kill sounds can be missed)"),
                             });
                         }
                     }
@@ -3582,6 +3606,41 @@ impl eframe::App for App {
 /// Preview resolution: the timeline format capped at 1080 lines (or half).
 /// Fastest J / L shuttle rate.
 pub const MAX_SHUTTLE: f64 = 4.0;
+
+/// What a kill scan found, and the timeline spans it covered (old kill
+/// markers there are replaced; ones elsewhere stay).
+#[derive(Default)]
+pub struct KillScan {
+    pub markers: Vec<Marker>,
+    pub ranges: Vec<(Time, Time)>,
+    /// Clips whose kills came from Medal's game events.
+    pub medal_clips: usize,
+    /// Clips scanned by ear.
+    pub ear_clips: usize,
+}
+
+/// Kill markers for one clip placed at `start`, from its audio.
+fn kills_by_ear(clip: &Clip, start: Time, buf: &nle_media::AudioBuffer) -> Vec<Marker> {
+    let dur = clip.duration;
+    let speed = clip.retime.as_ref().and_then(|r| (r.segments.len() == 1 && r.segments[0].speed > 0.0).then_some(r.segments[0].speed)).unwrap_or(1.0);
+    let src_in = clip.source_in + clip.retime.as_ref().map_or(Time::ZERO, |r| r.start_offset);
+    let ch = buf.channels.max(1) as usize;
+    let rate = buf.sample_rate.max(1);
+    let total_frames = buf.samples.len() / ch;
+    let in_frame = (src_in.as_secs_f64().max(0.0) * rate as f64).round() as usize;
+    let span_frames = ((dur.as_secs_f64() * speed).max(0.0) * rate as f64).round() as usize;
+    let from = in_frame.min(total_frames);
+    let to = from.saturating_add(span_frames).min(total_frames);
+    let peaks = analysis::analyze_kills_from_samples(&buf.samples[from * ch..to * ch], ch, rate, 1.0);
+    let end = start + dur;
+    peaks
+        .into_iter()
+        .filter_map(|p| {
+            let t = start + Time::from_secs_f64(p.time.as_secs_f64() / speed);
+            (t >= start && t <= end).then(|| Marker::kill(t, p.label))
+        })
+        .collect()
+}
 
 pub fn preview_size(p: &Project, half: bool) -> (u32, u32) {
     let f = p.timeline.format;

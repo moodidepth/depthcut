@@ -961,7 +961,7 @@ fn audio_tab(
             }
             if ui
                 .add_enabled(!kill_busy, egui::Button::new(if kill_busy { "Scanning kills..." } else { "🎯 Scan VOD for Kills" }))
-                .on_hover_text("Listens for the kill sound that follows gunfire and marks the killing shot. Faint kill sounds (some skins, sidearms) can be missed.")
+                .on_hover_text("Marks kills on the selected clips. Clips recorded with Medal use the kills Medal logged from the game (exact, labelled Kill / 2K / 3K). Others are scanned by ear for the kill sound after gunfire; faint ones (some skins, sidearms) can be missed.")
                 .clicked()
             {
                 *scan_kills = true;
