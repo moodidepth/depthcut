@@ -136,6 +136,15 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 PresetCategory::Transitions => Color32::from_rgb(0xFF, 0xD6, 0x0A),
             };
 
+            // The card's drag-to-timeline area must be registered *before* its contents: egui gives a
+            // drag-only widget on top every click under it, which made the ⚡ Apply button dead. Its rect
+            // is last frame's card rect (the card doesn't move between frames unless the list scrolls).
+            let drag_id = ui.make_persistent_id(&preset.name);
+            let rect_key = drag_id.with("card-rect");
+            let prev_rect = ui.ctx().data(|d| d.get_temp::<egui::Rect>(rect_key)).unwrap_or(egui::Rect::NOTHING);
+            let drag_resp = ui.interact(prev_rect, drag_id, Sense::drag());
+            drag_resp.dnd_set_drag_payload(preset.name.clone());
+
             let card_resp = egui::Frame::new()
                 .fill(Color32::from_rgb(0x19, 0x1A, 0x1F))
                 .stroke(Stroke::new(1.0_f32, theme::BORDER))
@@ -158,9 +167,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 })
                 .response;
 
-            let drag_resp = ui.interact(card_resp.rect, ui.make_persistent_id(&preset.name), Sense::drag());
-            drag_resp.dnd_set_drag_payload(preset.name.clone());
-            if drag_resp.hovered() {
+            if prev_rect != card_resp.rect {
+                ui.ctx().data_mut(|d| d.insert_temp(rect_key, card_resp.rect));
+                ui.ctx().request_repaint();
+            }
+            if ui.rect_contains_pointer(card_resp.rect) {
                 ui.painter().rect_stroke(card_resp.rect, CornerRadius::same(6), Stroke::new(1.0_f32, badge_col), StrokeKind::Inside);
             }
             ui.add_space(4.0);
