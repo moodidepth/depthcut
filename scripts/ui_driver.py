@@ -21,7 +21,7 @@ Steps (arguments separated by spaces; quote a step that holds spaces):
                                button / menu item / field by its label or value;
                                text=LABEL#2 for the second, text=LABEL@RECT only
                                inside that rect), clip#N (the Nth
-                               storyline clip), asset=NAME, tl=SECONDS (timeline
+                               storyline clip, from 0), asset=NAME, tl=SECONDS (timeline
                                storyline row at that time), or X,Y in points;
                                NAME@FX,FY is a point inside a rect (0..1 each)
     drag FROM TO               press on FROM, move, release on TO (same targets)
@@ -154,6 +154,13 @@ def move_to(x: int, y: int) -> None:
 def mouse(button: str, up: bool) -> None:
     i = INPUT(type=0)
     i.u.mi = MOUSEINPUT(0, 0, 0, MOUSE[button][1 if up else 0], 0, 0)
+    _send(i)
+
+
+def wheel(notches: int) -> None:
+    """Scroll the wheel under the cursor; positive scrolls content up (wheel away)."""
+    i = INPUT(type=0)
+    i.u.mi = MOUSEINPUT(0, 0, ctypes.c_ulong(notches * 120).value, 0x0800, 0, 0)
     _send(i)
 
 
@@ -367,6 +374,8 @@ class Driver:
         else:
             if m := re.fullmatch(r"clip#(\d+)", target):
                 spine = [c for c in s["timeline"]["clips"] if c["lane"] == 0]
+                if int(m[1]) >= len(spine):
+                    raise StepFailed(f"{target}: the storyline has {len(spine)} clips (clip#N counts from 0)")
                 target = f"clip:{spine[int(m[1])]['id']}"
             elif target.startswith("text="):
                 # a menu that just opened is laid out off-screen for a frame:
@@ -388,6 +397,10 @@ class Driver:
                 if not hits:
                     raise StepFailed(f"no asset matching {name!r}")
                 target = f"asset:{hits[0]['id']}"
+            if target.startswith("asset:"):
+                # browser thumbnails keep their rect when scrolled out of the
+                # panel; a click there would land on whatever is drawn instead
+                rects = self.reveal_in("browser:grid" if "browser:grid" in rects else "panel:browser", target)
             r = rects.get(target) or self.rect(target)
             if r is None:
                 raise StepFailed(f"{target!r} is not on screen (rects: {', '.join(sorted(rects)[:30])})")
@@ -397,6 +410,24 @@ class Driver:
             else:
                 x, y = center(r)
         return round(ox + x * ppp), round(oy + y * ppp)
+
+    def reveal_in(self, panel: str, name: str) -> dict:
+        """Wheel-scroll `panel` until the centre of rect `name` is inside it; the fresh rects."""
+        ppp = self.s["window"]["pixels_per_point"]
+        ox, oy = client_origin(self.hwnd)
+        for _ in range(30):
+            rects = self.s["rects"]
+            p, r = rects.get(panel), rects.get(name)
+            if p is None or r is None:
+                return rects
+            cy = r[1] + r[3] / 2
+            if p[1] + 8 <= cy <= p[1] + p[3] - 8:
+                return rects
+            move_to(round(ox + (p[0] + p[2] / 2) * ppp), round(oy + (p[1] + p[3] / 2) * ppp))
+            wheel(-1 if cy > p[1] + p[3] - 8 else 1)
+            time.sleep(0.08)
+            self.fresh()
+        raise StepFailed(f"{name} stays outside {panel} after scrolling")
 
     def find_widget(self, spec: str) -> list:
         """A widget by its label or value: exact (ignoring case) first, then

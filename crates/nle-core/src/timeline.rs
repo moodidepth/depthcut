@@ -530,7 +530,8 @@ impl Timeline {
         self.trim_end(id, delta)
     }
 
-    /// Align clip cuts and velocity minima to timeline beat markers (`Beat`, `SubBass`, `Snare`).
+    /// Trim each clip's end to the nearest timeline beat marker (`Beat`, `SubBass`, `Snare`),
+    /// rippling later clips. Velocity curves are not moved.
     pub fn sync_clips_to_beats(&mut self, ids: &[ClipId]) -> usize {
         let beats: Vec<Time> = self.markers.iter().filter(|m| matches!(m.kind, MarkerKind::Beat | MarkerKind::SubBass | MarkerKind::Snare)).map(|m| m.time).collect();
         if beats.is_empty() {

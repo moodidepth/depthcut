@@ -281,7 +281,8 @@ fn body(app: &App, ctx: &egui::Context) -> Value {
                 "end_s": secs(p.end()),
                 "duration_s": secs(c.duration),
                 "source_in_s": secs(c.source_in),
-                "source_out_s": secs(c.source_in + c.duration),
+                // retime-aware: a 50% clip consumes half its duration of source
+                "source_out_s": secs(c.source_range().1),
                 "enabled": c.enabled,
                 "video": c.av.video,
                 "audio": c.av.audio,

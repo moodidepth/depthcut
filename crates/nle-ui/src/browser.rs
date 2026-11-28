@@ -465,7 +465,7 @@ fn media_area(app: &mut App, ui: &mut egui::Ui) {
     let meta_h = if app.browser.selected.is_some() { 250.0 } else { 0.0 };
     let grid_h = (ui.available_height() - meta_h).max(120.0);
     let mut skim = None;
-    egui::ScrollArea::both().id_salt("browser-grid").max_height(grid_h).auto_shrink([false, false]).show(ui, |ui| {
+    let grid = egui::ScrollArea::both().id_salt("browser-grid").max_height(grid_h).auto_shrink([false, false]).show(ui, |ui| {
         if hovering_files {
             let r = ui.available_rect_before_wrap();
             ui.painter().rect_stroke(r.shrink(4.0), CornerRadius::same(8), Stroke::new(2.0_f32, theme::VIDEO), StrokeKind::Inside);
@@ -495,6 +495,8 @@ fn media_area(app: &mut App, ui: &mut egui::Ui) {
             });
         }
     });
+    // the visible part of the grid: a card's rect outside it is scrolled away
+    app.dbg.rect("browser:grid", grid.inner_rect);
     app.browser.skim = skim;
 
     if let Some(id) = app.browser.selected {
