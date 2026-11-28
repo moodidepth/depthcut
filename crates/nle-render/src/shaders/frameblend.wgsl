@@ -17,6 +17,12 @@ struct Blend {
 @group(0) @binding(4) var<uniform> u: Blend;
 @group(0) @binding(5) var dst: texture_storage_2d<rgba16float, write>;
 
+// Blending runs on premultiplied colour so RGBA media keeps its coverage and a
+// transparent texel never darkens the in-between frame.
+fn pm(s: vec4<f32>) -> vec4<f32> {
+    return vec4<f32>(s.rgb * s.a, s.a);
+}
+
 @compute @workgroup_size(8, 8, 1)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let dims = textureDimensions(a_tex);
@@ -26,12 +32,12 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let size = vec2<f32>(dims);
     let px = vec2<f32>(id.xy) + vec2<f32>(0.5);
     let uv = px / size;
-    var out: vec3<f32>;
+    var out: vec4<f32>;
     if (u.mode == 3u) {
         // HLAE-style multi-tap weighted frame accumulation using dense flow vectors
         let fd = vec2<f32>(textureDimensions(mv_tex));
         let d = textureSampleLevel(mv_tex, samp, uv, 0.0).xy / fd * size;
-        var acc = vec3<f32>(0.0);
+        var acc = vec4<f32>(0.0);
         var wsum = 0.0;
         for (var i = 0; i < 8; i = i + 1) {
             let sub = clamp(u.t + (f32(i) / 7.0 - 0.5) * 0.35, 0.0, 1.0);
@@ -39,8 +45,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             let w = exp(-dist * dist * 1.8);
             let ua = (px - d * sub) / size;
             let ub = (px + d * (1.0 - sub)) / size;
-            let ca = textureSampleLevel(a_tex, samp, ua, 0.0).rgb;
-            let cb = textureSampleLevel(b_tex, samp, ub, 0.0).rgb;
+            let ca = pm(textureSampleLevel(a_tex, samp, ua, 0.0));
+            let cb = pm(textureSampleLevel(b_tex, samp, ub, 0.0));
             acc = acc + mix(ca, cb, sub) * w;
             wsum = wsum + w;
         }
@@ -51,11 +57,11 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         let d = textureSampleLevel(mv_tex, samp, mv_uv, 0.0).xy;
         let ua = (px - d * u.t) / size;
         let ub = (px + d * (1.0 - u.t)) / size;
-        let ca = textureSampleLevel(a_tex, samp, ua, 0.0).rgb;
-        let cb = textureSampleLevel(b_tex, samp, ub, 0.0).rgb;
+        let ca = pm(textureSampleLevel(a_tex, samp, ua, 0.0));
+        let cb = pm(textureSampleLevel(b_tex, samp, ub, 0.0));
         out = mix(ca, cb, u.t);
     } else {
-        out = mix(textureSampleLevel(a_tex, samp, uv, 0.0).rgb, textureSampleLevel(b_tex, samp, uv, 0.0).rgb, u.t);
+        out = mix(pm(textureSampleLevel(a_tex, samp, uv, 0.0)), pm(textureSampleLevel(b_tex, samp, uv, 0.0)), u.t);
     }
-    textureStore(dst, vec2<i32>(id.xy), vec4<f32>(out, 1.0));
+    textureStore(dst, vec2<i32>(id.xy), vec4<f32>(out.rgb / max(out.a, 1e-6), out.a));
 }

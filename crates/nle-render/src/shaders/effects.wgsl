@@ -32,6 +32,40 @@ fn inside(id: vec3<u32>) -> bool {
     return id.x < d.x && id.y < d.y;
 }
 
+// Multi-tap averages run on premultiplied colour, so transparent texels (RGBA
+// media, keyed footage) add coverage but no colour: no dark fringe at edges.
+fn pm(s: vec4<f32>) -> vec4<f32> {
+    return vec4<f32>(s.rgb * s.a, s.a);
+}
+
+// Premultiplied bilinear tap (clamp to edge, like `samp`). The hardware filter
+// would blend straight colour, mixing a transparent texel's RGB (usually black)
+// into the edge before `pm` ever sees it.
+fn tap_pm(uv: vec2<f32>) -> vec4<f32> {
+    let dims = vec2<i32>(textureDimensions(src));
+    let hi = dims - vec2<i32>(1);
+    let t = uv * vec2<f32>(dims) - vec2<f32>(0.5);
+    let t0 = floor(t);
+    let f = t - t0;
+    let i0 = clamp(vec2<i32>(t0), vec2<i32>(0), hi);
+    let i1 = clamp(vec2<i32>(t0) + vec2<i32>(1), vec2<i32>(0), hi);
+    let a = mix(pm(textureLoad(src, i0, 0)), pm(textureLoad(src, vec2<i32>(i1.x, i0.y), 0)), f.x);
+    let b = mix(pm(textureLoad(src, vec2<i32>(i0.x, i1.y), 0)), pm(textureLoad(src, i1, 0)), f.x);
+    return mix(a, b, f.y);
+}
+
+// Channel split (chromatic aberration) of three premultiplied taps: each
+// channel keeps its own tap's coverage, so a split edge of an RGBA layer
+// fringes in colour, not black. Opaque input gives exactly (r, g, b, 1).
+fn split_pm(r: vec4<f32>, g: vec4<f32>, b: vec4<f32>) -> vec4<f32> {
+    return vec4<f32>(r.r, g.g, b.b, max(g.a, max(r.a, b.a)));
+}
+
+// Average of `n` premultiplied taps back to straight colour + coverage.
+fn unpm(acc: vec4<f32>, n: f32) -> vec4<f32> {
+    return vec4<f32>(acc.rgb / max(acc.a, 1e-6), acc.a / n);
+}
+
 fn hash3(p: vec3<f32>) -> f32 {
     let q = fract(p * vec3<f32>(0.1031, 0.1030, 0.0973));
     let r = q + dot(q, q.yzx + 33.33);
@@ -163,15 +197,15 @@ fn shake(@builtin(global_invocation_id) id: vec3<u32>) {
         let cuv = base_uv - blur_dir * f;
         if (split > 0.0002) {
             let radial = normalize((px_uv(id) - vec2<f32>(0.5)) + vec2<f32>(1e-5, 0.0));
-            let r = textureSampleLevel(src, samp, wrap_uv(cuv + radial * split, tile), 0.0).r;
-            let g = textureSampleLevel(src, samp, wrap_uv(cuv, tile), 0.0).g;
-            let ba = textureSampleLevel(src, samp, wrap_uv(cuv - radial * split, tile), 0.0);
-            acc = acc + vec4<f32>(r, g, ba.b, ba.a);
+            let rs = tap_pm(wrap_uv(cuv + radial * split, tile));
+            let gs = tap_pm(wrap_uv(cuv, tile));
+            let bs = tap_pm(wrap_uv(cuv - radial * split, tile));
+            acc = acc + split_pm(rs, gs, bs);
         } else {
-            acc = acc + textureSampleLevel(src, samp, wrap_uv(cuv, tile), 0.0);
+            acc = acc + tap_pm(wrap_uv(cuv, tile));
         }
     }
-    textureStore(dst, vec2<i32>(id.xy), acc / f32(taps));
+    textureStore(dst, vec2<i32>(id.xy), unpm(acc, f32(taps)));
 }
 
 // ----- Cineon film grain ----------------------------------------------------
@@ -232,9 +266,9 @@ fn directional_blur(@builtin(global_invocation_id) id: vec3<u32>) {
     var acc = vec4<f32>(0.0);
     for (var i = 0u; i < n; i = i + 1u) {
         let s = (f32(i) + 0.5) / f32(n) - 0.5;
-        acc = acc + textureSampleLevel(src, samp, uv + d * s, 0.0);
+        acc = acc + tap_pm(uv + d * s);
     }
-    textureStore(dst, vec2<i32>(id.xy), acc / f32(n));
+    textureStore(dst, vec2<i32>(id.xy), unpm(acc, f32(n)));
 }
 
 // a = (centre x, centre y (-0.5..0.5), amount, samples)
@@ -249,9 +283,9 @@ fn zoom_blur(@builtin(global_invocation_id) id: vec3<u32>) {
     var acc = vec4<f32>(0.0);
     for (var i = 0u; i < n; i = i + 1u) {
         let s = 1.0 - u.a.z * 0.5 * f32(i) / f32(n - 1u);
-        acc = acc + textureSampleLevel(src, samp, c + (uv - c) * s, 0.0);
+        acc = acc + tap_pm(c + (uv - c) * s);
     }
-    textureStore(dst, vec2<i32>(id.xy), acc / f32(n));
+    textureStore(dst, vec2<i32>(id.xy), unpm(acc, f32(n)));
 }
 
 // ----- chroma key -------------------------------------------------------------
@@ -316,10 +350,10 @@ fn rgb_split_glitch(@builtin(global_invocation_id) id: vec3<u32>) {
     let radial_scale = mix(1.0, length(d_from_c) * 2.0, clamp(u.a.z, 0.0, 1.0));
     let dir = mix(dvec, normalize(d_from_c + vec2<f32>(1e-5, 0.0)), clamp(u.a.z, 0.0, 1.0));
     let off = dir * (u.a.x * u.k * radial_scale) / max(u.dims, vec2<f32>(1.0));
-    let r = textureSampleLevel(src, samp, mirror(uv + off), 0.0).r;
-    let ga = textureSampleLevel(src, samp, mirror(uv), 0.0);
-    let b = textureSampleLevel(src, samp, mirror(uv - off), 0.0).b;
-    textureStore(dst, vec2<i32>(id.xy), vec4<f32>(r, ga.g, b, ga.a));
+    let rs = tap_pm(mirror(uv + off));
+    let gs = tap_pm(mirror(uv));
+    let bs = tap_pm(mirror(uv - off));
+    textureStore(dst, vec2<i32>(id.xy), unpm(split_pm(rs, gs, bs), 1.0));
 }
 
 // ----- Impact flash & sniper scope vignette ----------------------------------
@@ -531,8 +565,8 @@ fn gauss_rgba(id: vec3<u32>, dir: vec2<f32>) {
     for (var i = -12; i <= 12; i = i + 1) {
         let o = f32(i) * step;
         let w = exp(-o * o / (2.0 * sigma * sigma));
-        let s = textureSampleLevel(src, samp, uv + texel * o, 0.0);
-        rgb = rgb + s.rgb * (s.a * w);
+        let s = tap_pm(uv + texel * o);
+        rgb = rgb + s.rgb * w;
         a = a + s.a * w;
         wsum = wsum + w;
     }
@@ -577,9 +611,9 @@ fn radial_blur(@builtin(global_invocation_id) id: vec3<u32>) {
         let sn = sin(t);
         var q = vec2<f32>(cs * p.x - sn * p.y, sn * p.x + cs * p.y);
         q.x = q.x / aspect;
-        acc = acc + textureSampleLevel(src, samp, c + q, 0.0);
+        acc = acc + tap_pm(c + q);
     }
-    textureStore(dst, vec2<i32>(id.xy), acc / f32(n));
+    textureStore(dst, vec2<i32>(id.xy), unpm(acc, f32(n)));
 }
 
 // ----- vignette -----------------------------------------------------------------

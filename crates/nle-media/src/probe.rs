@@ -94,6 +94,9 @@ pub fn parse_ffprobe_json(path: &Path, json: &str) -> Result<MediaAsset, MediaEr
         let is_cover = s["disposition"]["attached_pic"].as_i64() == Some(1);
         if kind == "video" && asset.video.is_none() && !is_cover {
             let pix_fmt = s["pix_fmt"].as_str().unwrap_or("yuv420p").to_string();
+            // WebM VP8/VP9 keep alpha in a side stream the stream tag announces
+            let alpha_tag = ["alpha_mode", "ALPHA_MODE"].iter().any(|k| s["tags"][*k].as_str().is_some_and(|m| m.trim() == "1"));
+            let has_alpha = nle_core::pix_fmt_has_alpha(&pix_fmt) || alpha_tag;
             let bit_depth = s["bits_per_raw_sample"].as_str().and_then(|b| b.parse::<u8>().ok()).unwrap_or(if pix_fmt.contains("10") || pix_fmt.contains("p010") {
                 10
             } else if pix_fmt.contains("12") {
@@ -124,6 +127,7 @@ pub fn parse_ffprobe_json(path: &Path, json: &str) -> Result<MediaAsset, MediaEr
                 color_primaries: s["color_primaries"].as_str().unwrap_or("").to_string(),
                 is_vfr,
                 pts_table,
+                has_alpha,
             });
         } else if kind == "audio" {
             asset.audio_streams.push(audio_track(asset.audio_streams.len(), s));
@@ -230,6 +234,7 @@ pub fn synthetic_asset(name: &str, seconds: i64, hue: f32) -> MediaAsset {
         color_primaries: "bt709".into(),
         is_vfr: false,
         pts_table: Vec::new(),
+        has_alpha: false,
     });
     a.audio = Some(AudioStreamInfo { sample_rate: 48_000, channels: 2, codec: "pcm_f32le".into() });
     a.tags = vec!["demo".into()];
@@ -298,6 +303,24 @@ mod tests {
         // a single audio track is not listed as a choice
         assert!(a.audio_streams.is_empty());
         assert_eq!(a.audio_map(), "0:a:0");
+    }
+
+    #[test]
+    fn flags_alpha_from_pixel_format_or_webm_alpha_mode() {
+        let probe = |name: &str, stream: &str| {
+            let json = format!(r#"{{"format":{{"duration":"2.0"}},"streams":[{{"codec_type":"video","width":640,"height":360,"avg_frame_rate":"30/1",{stream}}}]}}"#);
+            parse_ffprobe_json(Path::new(name), &json).unwrap().video.unwrap()
+        };
+        let prores = probe("a.mov", r#""codec_name":"prores","pix_fmt":"yuva444p10le""#);
+        assert!(prores.has_alpha && prores.alpha());
+        assert_eq!(prores.bit_depth, 10);
+        assert!(probe("b.mov", r#""codec_name":"qtrle","pix_fmt":"argb""#).has_alpha);
+        assert!(probe("c.png", r#""codec_name":"png","pix_fmt":"rgba""#).has_alpha);
+        // libvpx alpha: the stream decodes as yuv420p, the tag says alpha
+        let webm = probe("d.webm", r#""codec_name":"vp9","pix_fmt":"yuv420p","tags":{"alpha_mode":"1","ENCODER":"Lavc libvpx-vp9"}"#);
+        assert!(webm.has_alpha);
+        assert!(!probe("e.webm", r#""codec_name":"vp9","pix_fmt":"yuv420p","tags":{"alpha_mode":"0"}"#).has_alpha);
+        assert!(!probe("f.mp4", r#""codec_name":"h264","pix_fmt":"yuv420p""#).has_alpha);
     }
 
     #[test]

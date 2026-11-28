@@ -89,7 +89,25 @@ pub fn proxy_size(w: u32, h: u32) -> (u32, u32) {
 
 pub fn proxy_path_for(asset: &MediaAsset, dir: &Path) -> PathBuf {
     let stem = asset.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| asset.name.clone());
-    dir.join(format!("{stem}_proxy.mp4"))
+    let ext = if asset.video.as_ref().is_some_and(|v| v.alpha()) { "mov" } else { "mp4" };
+    dir.join(format!("{stem}_proxy.{ext}"))
+}
+
+/// A proxy at `path` carries alpha: alpha media get ProRes 4444 `.mov`
+/// proxies, everything else (and every proxy made before alpha support) is
+/// 4:2:0 H.264 `.mp4`.
+pub fn proxy_keeps_alpha(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e.eq_ignore_ascii_case("mov"))
+}
+
+/// The one encoder for the proxy of an alpha source: ProRes 4444 with alpha
+/// (no H.264 encoder keeps it), decoded on the CPU — through libvpx for WebM
+/// VP8 / VP9, whose native decoders drop the alpha.
+pub fn alpha_proxy_args(asset: &MediaAsset) -> Option<(String, Vec<String>, Vec<String>)> {
+    let v = asset.video.as_ref().filter(|v| v.alpha())?;
+    let pre = crate::decode::alpha_decoder(&v.codec).map(|d| vec!["-c:v".to_string(), d.to_string()]).unwrap_or_default();
+    let args = ["-c:v", "prores_ks", "-profile:v", "4", "-pix_fmt", "yuva444p10le", "-vendor", "apl0"].map(String::from).to_vec();
+    Some(("prores_ks".to_string(), pre, args))
 }
 
 #[derive(Clone, Default)]
@@ -146,7 +164,11 @@ pub fn transcode(asset: &MediaAsset, out_dir: &Path, mut progress: impl FnMut(f3
     let total = asset.duration.as_secs_f64().max(0.001);
     let platform = Platform::current();
     let mut last_err = String::new();
-    for (enc, pre, args) in proxy_encoder_args(platform, hwaccel::probe_caps(), hwaccel::render_vendor()).into_iter().filter(|(e, ..)| !probe_rejects(e)) {
+    let encoders = match alpha_proxy_args(asset) {
+        Some(alpha) => vec![alpha],
+        None => proxy_encoder_args(platform, hwaccel::probe_caps(), hwaccel::render_vendor()).into_iter().filter(|(e, ..)| !probe_rejects(e)).collect(),
+    };
+    for (enc, pre, args) in encoders {
         // proxies are progressive: interlaced sources are deinterlaced first
         let di = asset.deinterlace_fields().map(|f| format!("{},", crate::decode::deinterlace_filter(f))).unwrap_or_default();
         let vf = match enc.as_str() {
@@ -216,5 +238,31 @@ mod tests {
         let args = proxy_encoder_args(Platform::Windows, &windows, GpuVendor::Nvidia);
         assert_eq!(args[0].1, ["-hwaccel", "d3d11va"]);
         assert!(args.iter().find(|a| a.0 == "h264_qsv").is_some_and(|a| a.1.join(" ").ends_with("-hwaccel d3d11va -hwaccel_device dx")));
+    }
+
+    #[test]
+    fn alpha_sources_get_prores_4444_mov_proxies() {
+        let mut a = crate::probe::synthetic_asset("logo", 2, 0.0);
+        a.path = PathBuf::from("C:/media/logo.webm");
+        let dir = Path::new("C:/proxies");
+        assert_eq!(proxy_path_for(&a, dir), dir.join("logo_proxy.mp4"));
+        assert!(alpha_proxy_args(&a).is_none());
+        assert!(!proxy_keeps_alpha(&proxy_path_for(&a, dir)));
+        let v = a.video.as_mut().unwrap();
+        v.codec = "vp9".into();
+        v.has_alpha = true;
+        let p = proxy_path_for(&a, dir);
+        assert_eq!(p, dir.join("logo_proxy.mov"));
+        assert!(proxy_keeps_alpha(&p));
+        let (enc, pre, args) = alpha_proxy_args(&a).unwrap();
+        assert_eq!(enc, "prores_ks");
+        assert_eq!(pre, ["-c:v", "libvpx-vp9"], "WebM alpha needs libvpx to decode");
+        assert!(args.join(" ").contains("-profile:v 4 -pix_fmt yuva444p10le"), "{args:?}");
+        // ProRes 4444 sources decode natively
+        let v = a.video.as_mut().unwrap();
+        v.codec = "prores".into();
+        v.has_alpha = false;
+        v.pix_fmt = "yuva444p12le".into();
+        assert!(alpha_proxy_args(&a).unwrap().1.is_empty());
     }
 }

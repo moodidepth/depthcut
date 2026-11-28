@@ -1236,6 +1236,7 @@ pub fn import(src: &str) -> Result<Project, FcpxmlError> {
                     color_primaries: String::new(),
                     is_vfr: false,
                     pts_table: Vec::new(),
+                    has_alpha: false,
                 });
             }
             if r.attr("hasAudio") == Some("1") {

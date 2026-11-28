@@ -31,8 +31,26 @@ pub fn deinterlace_filter(fields: FieldOrder) -> String {
 /// The deinterlace filter for decoding `asset` (not its proxy, which is
 /// already progressive), if any.
 pub fn deinterlace_for(asset: &MediaAsset, opts: DecodeOptions) -> Option<String> {
-    let proxy = opts.use_proxy && asset.proxy_path.as_ref().is_some_and(|p| p.exists());
-    asset.deinterlace_fields().filter(|_| !proxy).map(deinterlace_filter)
+    asset.deinterlace_fields().filter(|_| !proxy_usable(asset, opts)).map(deinterlace_filter)
+}
+
+/// Decoding `asset` reads its proxy: one is wanted and exists, and — for
+/// media with an alpha channel — it is one that keeps the alpha (a ProRes
+/// 4444 `.mov`; proxies made before alpha support are 4:2:0 `.mp4` and
+/// would turn the transparent parts black).
+pub fn proxy_usable(asset: &MediaAsset, opts: DecodeOptions) -> bool {
+    let Some(p) = asset.proxy_path.as_ref().filter(|p| opts.use_proxy && p.exists()) else { return false };
+    !asset.video.as_ref().is_some_and(|v| v.alpha()) || crate::proxy::proxy_keeps_alpha(p)
+}
+
+/// The decoder FFmpeg must be told to use for the alpha of `codec`: its
+/// native VP8 / VP9 decoders drop the WebM alpha side channel, libvpx keeps it.
+pub fn alpha_decoder(codec: &str) -> Option<&'static str> {
+    match codec {
+        "vp9" => Some("libvpx-vp9"),
+        "vp8" => Some("libvpx"),
+        _ => None,
+    }
 }
 
 pub trait VideoDecoder: Send {
@@ -67,9 +85,11 @@ pub fn open(asset: &MediaAsset, opts: DecodeOptions) -> Result<Box<dyn VideoDeco
     if !asset.has_video() {
         return Err(MediaError::Unsupported(format!("{} has no video", asset.name)));
     }
-    // in-process decoding has no filter graph: interlaced sources go through the CLI
+    // in-process decoding has no filter graph: interlaced sources go through
+    // the CLI; it has no alpha path either, so alpha goes through the CLI's
+    // software RGBA decode
     #[cfg(feature = "ffmpeg")]
-    if deinterlace_for(asset, opts).is_none() {
+    if deinterlace_for(asset, opts).is_none() && !asset.video.as_ref().is_some_and(|v| v.alpha()) {
         match libav::LibavDecoder::open(asset, opts) {
             Ok(d) => return Ok(Box::new(d)),
             Err(e) => log::warn!("libav decoder failed for {}: {e} — falling back to CLI", asset.name),

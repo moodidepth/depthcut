@@ -64,14 +64,17 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     var rgb: vec3<f32>;
+    // NV12 / P010 are opaque; RGBA8 carries straight (unpremultiplied) alpha
+    var alpha = 1.0;
     if (p.format == 2u) {
         let i = (id.y * p.width + id.x) * 4u;
         rgb = vec3<f32>(f32(byte_at(i)), f32(byte_at(i + 1u)), f32(byte_at(i + 2u))) / 255.0;
+        alpha = f32(byte_at(i + 3u)) / 255.0;
     } else {
         let bps = select(1u, 2u, p.format == 1u);
         let y = sample(id.y * p.width + id.x);
         let uv = p.uv_offset / bps + (id.y / 2u) * p.width + (id.x & 0xfffffffeu);
         rgb = ycbcr_to_rgb(y, sample(uv), sample(uv + 1u));
     }
-    textureStore(dst, vec2<i32>(id.xy), vec4<f32>(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0));
+    textureStore(dst, vec2<i32>(id.xy), vec4<f32>(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)), alpha));
 }

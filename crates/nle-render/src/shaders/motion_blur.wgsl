@@ -71,11 +71,12 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             let moving = smoothstep(min_thr * 0.5, max(min_thr, 0.5), ls);
             w = mix(0.10, 1.0, similar * moving);
         }
-        acc = acc + c * w;
+        // premultiplied, so transparent texels (RGBA media) add no colour
+        acc = acc + vec4<f32>(c.rgb * c.a, c.a) * w;
         wsum = wsum + w;
     }
     // always keep some of the pixel itself (stable centre)
-    acc = acc + center * 0.5;
+    acc = acc + vec4<f32>(center.rgb * center.a, center.a) * 0.5;
     wsum = wsum + 0.5;
-    textureStore(dst, vec2<i32>(id.xy), acc / wsum);
+    textureStore(dst, vec2<i32>(id.xy), vec4<f32>(acc.rgb / max(acc.a, 1e-6), acc.a / wsum));
 }

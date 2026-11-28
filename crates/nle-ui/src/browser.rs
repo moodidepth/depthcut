@@ -852,7 +852,8 @@ fn metadata(app: &mut App, ui: &mut egui::Ui, a: &MediaAsset) {
             if let Some(v) = &a.video {
                 let vfr = if v.is_vfr { " · variable rate" } else { "" };
                 row("Video", format!("{}×{} · {}{vfr} · {}", v.width, v.height, v.frame_rate.label(), v.codec));
-                row("Format", format!("{} · {}-bit", v.pix_fmt, v.bit_depth));
+                let alpha = if v.alpha() { " · alpha (transparent)" } else { "" };
+                row("Format", format!("{} · {}-bit{alpha}", v.pix_fmt, v.bit_depth));
                 // Show the tags the file carries; untagged files say what they are read as.
                 let tags: Vec<&str> = [&v.color_space, &v.color_primaries, &v.color_transfer]
                     .into_iter()

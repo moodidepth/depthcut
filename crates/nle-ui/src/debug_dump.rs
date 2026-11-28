@@ -307,7 +307,7 @@ fn body(app: &App, ctx: &egui::Context) -> Value {
                 "path": a.path,
                 "kind": format!("{:?}", a.kind),
                 "duration_s": secs(a.duration),
-                "video": a.video.as_ref().map(|v| json!({ "width": v.width, "height": v.height, "fps": v.frame_rate.fps(), "vfr": v.is_vfr, "codec": v.codec })),
+                "video": a.video.as_ref().map(|v| json!({ "width": v.width, "height": v.height, "fps": v.frame_rate.fps(), "vfr": v.is_vfr, "codec": v.codec, "alpha": v.alpha() })),
                 "audio": a.audio.is_some(),
                 "audio_tracks": a.audio_streams.iter().map(|t| t.label()).collect::<Vec<_>>(),
                 "audio_track": a.selected_audio_stream,

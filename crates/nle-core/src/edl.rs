@@ -400,6 +400,7 @@ mod tests {
             color_primaries: String::new(),
             is_vfr: false,
             pts_table: Vec::new(),
+            has_alpha: false,
         });
         a.audio = Some(AudioStreamInfo { sample_rate: 48000, channels: 2, codec: "aac".into() });
         a

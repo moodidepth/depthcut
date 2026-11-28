@@ -173,6 +173,7 @@ mod tests {
             color_primaries: String::new(),
             is_vfr: false,
             pts_table: Vec::new(),
+            has_alpha: false,
         });
         a.audio = Some(sound());
         a

@@ -108,6 +108,33 @@ fn blend(b: vec3<f32>, l: vec3<f32>, mode: u32) -> vec3<f32> {
     }
 }
 
+// Bilinear filtering on premultiplied values. Layers hold straight alpha, so
+// the hardware filter would pull the colour of fully transparent texels (often
+// black) into a layer's edges and leave a dark fringe on keyed or RGBA media.
+// Weighting each tap by its alpha avoids that; opaque layers filter exactly as
+// before. Returns straight colour and coverage. Same edge clamping as the
+// ClampToEdge sampler.
+fn sample_layer(uv: vec2<f32>) -> vec4<f32> {
+    let dims = vec2<i32>(textureDimensions(layer));
+    let hi = dims - vec2<i32>(1);
+    let t = uv * vec2<f32>(dims) - vec2<f32>(0.5);
+    let t0 = floor(t);
+    let f = t - t0;
+    let i0 = clamp(vec2<i32>(t0), vec2<i32>(0), hi);
+    let i1 = clamp(vec2<i32>(t0) + vec2<i32>(1), vec2<i32>(0), hi);
+    let s00 = textureLoad(layer, i0, 0);
+    let s10 = textureLoad(layer, vec2<i32>(i1.x, i0.y), 0);
+    let s01 = textureLoad(layer, vec2<i32>(i0.x, i1.y), 0);
+    let s11 = textureLoad(layer, i1, 0);
+    let w00 = (1.0 - f.x) * (1.0 - f.y) * s00.a;
+    let w10 = f.x * (1.0 - f.y) * s10.a;
+    let w01 = (1.0 - f.x) * f.y * s01.a;
+    let w11 = f.x * f.y * s11.a;
+    let a = w00 + w10 + w01 + w11;
+    let rgb = s00.rgb * w00 + s10.rgb * w10 + s01.rgb * w01 + s11.rgb * w11;
+    return vec4<f32>(rgb / max(a, 1e-6), a);
+}
+
 @compute @workgroup_size(8, 8, 1)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let dims = textureDimensions(bg);
@@ -124,7 +151,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let inside = uv.x >= c.crop.x && uv.x <= 1.0 - c.crop.y && uv.y >= c.crop.z && uv.y <= 1.0 - c.crop.w;
     if (inside) {
         let suv = c.src_rect.xy + uv * c.src_rect.zw;
-        let l = textureSampleLevel(layer, samp, suv, 0.0);
+        let l = sample_layer(suv);
         let a = clamp(l.a * c.opacity, 0.0, 1.0);
         out = mix(base.rgb, blend(base.rgb, l.rgb, c.blend), a);
         alpha = a + base.a * (1.0 - a);

@@ -26,6 +26,7 @@ fn asset(name: &str, dur: i64) -> MediaAsset {
         color_primaries: String::new(),
         is_vfr: false,
         pts_table: Vec::new(),
+        has_alpha: false,
     });
     a
 }

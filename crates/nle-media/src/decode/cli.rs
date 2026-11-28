@@ -7,12 +7,12 @@
 //! Past the end of the picture the last frame is held; a file that cannot be
 //! read is an error, never a held frame.
 
-use super::{deinterlace_for, preroll_frames, scaled_dims, DecodeOptions, VideoDecoder};
+use super::{alpha_decoder, deinterlace_for, preroll_frames, proxy_usable, scaled_dims, DecodeOptions, VideoDecoder};
 use crate::ffmpeg_cli;
 use crate::frame::{PixelFormat, VideoFrame};
 use crate::hwaccel::{self, Chroma, DecoderPlan, HwBackend, Platform, VideoCodec};
 use crate::MediaError;
-use nle_core::{AssetKind, FrameRate, MediaAsset, Time};
+use nle_core::{AssetKind, FrameRate, MediaAsset, Time, YuvMatrix};
 use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Stdio};
@@ -64,17 +64,37 @@ pub struct CliDecoder {
     end: Option<(i64, VideoFrame)>,
     /// `bwdif` filter for interlaced sources.
     deinterlace: Option<String>,
+    /// The source has an alpha channel: decoded on the CPU to straight RGBA
+    /// (hardware decoders and the 4:2:0 formats have no alpha).
+    alpha: bool,
+    /// YCbCr matrix for the RGBA conversion of an alpha source.
+    matrix: YuvMatrix,
+    /// Decoding the proxy: its size differs from the source's, so the
+    /// picture is always scaled to `width` x `height`.
+    from_proxy: bool,
 }
 
 impl CliDecoder {
     pub fn open(asset: &MediaAsset, opts: DecodeOptions) -> Result<Self, MediaError> {
         let v = asset.video.as_ref().ok_or_else(|| MediaError::Unsupported("no video stream".into()))?;
-        let use_proxy = opts.use_proxy && asset.proxy_path.as_ref().is_some_and(|p| p.exists());
+        let use_proxy = proxy_usable(asset, opts);
         let path = if use_proxy { asset.proxy_path.clone().unwrap_or_else(|| asset.path.clone()) } else { asset.path.clone() };
         let codec = if use_proxy { VideoCodec::H264 } else { VideoCodec::from_ffmpeg_name(&v.codec) };
         let depth = if use_proxy { 8 } else { v.bit_depth };
         let chroma = if use_proxy { Chroma::Yuv420 } else { Chroma::from_pix_fmt(&v.pix_fmt) };
-        let plans = hwaccel::plan_decode(codec, depth, chroma, Platform::current(), hwaccel::probe_caps(), hwaccel::active_gpu());
+        let alpha = v.alpha();
+        let mut plans = hwaccel::plan_decode(codec, depth, chroma, Platform::current(), hwaccel::probe_caps(), hwaccel::active_gpu());
+        if alpha {
+            plans.retain(|p| p.backend == HwBackend::Software);
+            // the alpha proxy is ProRes 4444, which FFmpeg's own decoder reads with alpha
+            if let Some(dec) = alpha_decoder(&v.codec).filter(|_| !use_proxy) {
+                for p in &mut plans {
+                    p.decoder = Some(dec.into());
+                    p.input_args.extend(["-c:v".to_string(), dec.to_string()]);
+                }
+            }
+            log::info!("{}: alpha channel ({}) — software RGBA decode{}", asset.name, v.pix_fmt, if use_proxy { " of the ProRes 4444 proxy" } else { "" });
+        }
         let (width, height) = scaled_dims(v.width, v.height, opts.max_height);
         log::debug!("{}: decode plan {:?}", asset.name, plans.iter().map(|p| p.backend).collect::<Vec<_>>());
         let deinterlace = deinterlace_for(asset, opts);
@@ -86,7 +106,7 @@ impl CliDecoder {
             src_h: v.height,
             width,
             height,
-            format: PixelFormat::for_bit_depth(depth),
+            format: if alpha { PixelFormat::Rgba8 } else { PixelFormat::for_bit_depth(depth) },
             chroma,
             rate: v.frame_rate,
             resample: v.is_vfr,
@@ -97,11 +117,14 @@ impl CliDecoder {
             expected_end: if asset.kind == AssetKind::Image { 0 } else { asset.duration.frames_floor(v.frame_rate).max(0) },
             end: None,
             deinterlace,
+            alpha,
+            matrix: v.yuv_matrix(),
+            from_proxy: use_proxy,
         })
     }
 
     fn needs_scale(&self) -> bool {
-        (self.width, self.height) != (self.src_w, self.src_h)
+        self.from_proxy || (self.width, self.height) != (self.src_w, self.src_h)
     }
 
     /// Output-side filter graph for the active plan.
@@ -110,6 +133,20 @@ impl CliDecoder {
         let (w, h) = (self.width, self.height);
         let sw_fmt = self.chroma.hw_download_format(if self.format == PixelFormat::P010 { 10 } else { 8 });
         let scale = self.needs_scale();
+        if self.alpha {
+            // software only: deinterlace, scale and convert to straight RGBA
+            // in one swscale pass with the source's matrix (ignored for RGB
+            // sources). Bilinear on straight alpha can tint the outermost
+            // edge pixel a little toward its transparent neighbours.
+            let di = self.deinterlace.as_ref().map(|d| format!("{d},")).unwrap_or_default();
+            let m = match self.matrix {
+                YuvMatrix::Bt709 => "bt709",
+                YuvMatrix::Bt601 => "bt601",
+                YuvMatrix::Bt2020 => "bt2020",
+            };
+            let (w, h) = if scale { (w.to_string(), h.to_string()) } else { ("iw".into(), "ih".into()) };
+            return (Vec::new(), format!("{di}scale={w}:{h}:flags=bilinear:in_color_matrix={m},format={out_fmt}"));
+        }
         if let Some(di) = &self.deinterlace {
             // fields must be separated before any vertical scaling, so the
             // picture is downloaded first and scaled on the CPU

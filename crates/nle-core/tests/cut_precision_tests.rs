@@ -19,6 +19,7 @@ fn asset(dur: Time) -> MediaAsset {
         color_primaries: "".into(),
         is_vfr: false,
         pts_table: Vec::new(),
+        has_alpha: false,
     });
     a.audio = Some(AudioStreamInfo { sample_rate: 48000, channels: 2, codec: "aac".into() });
     a

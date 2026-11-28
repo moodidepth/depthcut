@@ -24,6 +24,25 @@ pub struct VideoStreamInfo {
     /// PTS-to-CFR frame index table built on clip import for sample-accurate scrubbing.
     #[serde(default)]
     pub pts_table: Vec<Time>,
+    /// The stream carries an alpha channel (ProRes 4444, PNG/QuickTime
+    /// Animation RGBA, VP8/VP9 WebM with `alpha_mode`). Projects saved before
+    /// this field read `false`; [`VideoStreamInfo::alpha`] still recognises
+    /// their alpha pixel formats.
+    #[serde(default)]
+    pub has_alpha: bool,
+}
+
+/// Whether an FFmpeg pixel format name has an alpha plane or component.
+pub fn pix_fmt_has_alpha(fmt: &str) -> bool {
+    fmt.starts_with("yuva")
+        || fmt.starts_with("gbrap")
+        || fmt.starts_with("rgba")
+        || fmt.starts_with("bgra")
+        || fmt.starts_with("argb")
+        || fmt.starts_with("abgr")
+        || fmt.starts_with("ya8")
+        || fmt.starts_with("ya16")
+        || fmt.starts_with("ayuv")
 }
 
 /// YCbCr -> RGB matrix of a video stream.
@@ -35,6 +54,11 @@ pub enum YuvMatrix {
 }
 
 impl VideoStreamInfo {
+    /// The stream decodes with a meaningful alpha channel.
+    pub fn alpha(&self) -> bool {
+        self.has_alpha || pix_fmt_has_alpha(&self.pix_fmt)
+    }
+
     /// The stream's YCbCr matrix: its `colorspace` tag, else its primaries,
     /// else the usual guess for untagged video (mpv / FFmpeg / Resolve):
     /// SD (narrower than 1280 and at most 576 lines) is BT.601, HD is BT.709,
@@ -504,7 +528,31 @@ mod tests {
             color_primaries: prim.into(),
             is_vfr: false,
             pts_table: Vec::new(),
+            has_alpha: false,
         }
+    }
+
+    #[test]
+    fn alpha_comes_from_the_flag_or_the_pixel_format() {
+        assert!(!info(1920, 1080, 8, "bt709", "").alpha());
+        let mut v = info(1920, 1080, 10, "bt709", "");
+        v.pix_fmt = "yuva444p10le".into();
+        assert!(v.alpha(), "ProRes 4444");
+        for fmt in ["rgba", "argb", "bgra", "gbrap12le", "ya8", "rgba64be"] {
+            assert!(pix_fmt_has_alpha(fmt), "{fmt}");
+        }
+        for fmt in ["yuv420p", "nv12", "p010le", "rgb24", "gbrp10le", "yuv444p10le"] {
+            assert!(!pix_fmt_has_alpha(fmt), "{fmt}");
+        }
+        // VP9 alpha decodes as yuv420p: only the probed flag knows
+        let mut webm = info(1920, 1080, 8, "bt709", "");
+        webm.has_alpha = true;
+        assert!(webm.alpha());
+        // projects saved before the field load without alpha
+        let mut j = serde_json::to_value(info(64, 64, 8, "", "")).unwrap();
+        j.as_object_mut().unwrap().remove("has_alpha");
+        let old: VideoStreamInfo = serde_json::from_value(j).unwrap();
+        assert!(!old.has_alpha);
     }
 
     #[test]
