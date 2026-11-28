@@ -6,8 +6,11 @@
 //! weapon skin). So a kill is a sustained tone in 1.5–10 kHz that follows
 //! gunfire. The tone must last at least 0.24 s, which rejects the short
 //! periodic spike/bomb beeps, and must have at least two gunshots in the
-//! 1.5 s before it, which rejects ability and UI sounds. The marker lands
-//! on the last shot before the chime, i.e. the killing shot.
+//! 1.5 s before it, which rejects ability and UI sounds. A single shot (a
+//! Sheriff/Vandal one-tap, an Operator flick) is enough when the chime is
+//! clearer: 2.5 dB more prominent and 20 ms longer. A tone with no gunfire
+//! before it is never a kill. The marker lands on the last shot before the
+//! chime, i.e. the killing shot.
 //!
 //! Tuned against the killfeed of four Valorant clips: it found 5 of 8 kills
 //! with one false hit (true chimes held 0.25–0.41 s; the false tones that
@@ -44,6 +47,10 @@ const SHOT_JUMP_DB: f32 = 12.0;
 /// Gunshots needed in this window before the chime.
 const SHOT_LOOKBACK_SECS: f64 = 1.5;
 const MIN_SHOTS: usize = 2;
+/// A lone shot counts when its chime beats the tone threshold by this much ...
+const ONE_TAP_EXTRA_DB: f32 = 2.5;
+/// ... and outlasts the minimum tone by this much.
+const ONE_TAP_EXTRA_SECS: f64 = 0.02;
 /// The killing shot is the last shot at most this long before the chime.
 const KILL_SHOT_SECS: f64 = 1.0;
 /// Kills closer than this to the previous one form a multi-kill.
@@ -163,9 +170,13 @@ pub fn analyze_kills_from_samples(samples: &[f32], channels: usize, rate: u32, s
             i += 1;
         }
         let secs = (i - start) as f64 * hop_secs + HOLD_HOPS as f64 * hop_secs;
-        let shots = shot[start.saturating_sub(lookback)..start].iter().filter(|&&s| s).count();
+        // count onsets: a shot sliding into the window can jump on two hops in a row
+        let from = start.saturating_sub(lookback);
+        let shots = (from..start).filter(|&j| shot[j] && (j == from || !shot[j - 1])).count();
         let tone_at = start as f64 * hop_secs;
-        if secs < min_tone || shots < MIN_SHOTS || tone_at - last_tone < 0.6 {
+        let clear = peak >= tone_db + ONE_TAP_EXTRA_DB && secs >= min_tone + ONE_TAP_EXTRA_SECS;
+        let enough = shots >= MIN_SHOTS || (shots == 1 && clear);
+        if secs < min_tone || !enough || tone_at - last_tone < 0.6 {
             continue;
         }
         last_tone = tone_at;
@@ -268,6 +279,38 @@ mod tests {
         assert!((peaks[0].time.as_secs_f64() - 3.85).abs() < 0.05, "{peaks:?}");
         assert_eq!(peaks[1].label, "Double Kill");
         assert!(peaks[1].is_multikill);
+    }
+
+    #[test]
+    fn a_one_tap_with_a_clear_chime_is_a_kill() {
+        let mut s = noise_bed(12.0);
+        shot(&mut s, 1.8); // a single Sheriff/Operator shot
+        tone(&mut s, 2.0, 5_320.0, 0.4); // clear kill chime
+        // A lone shot followed by a borderline tone (long enough after a
+        // burst, see below) stays out: one shot needs the clearer chime.
+        shot(&mut s, 4.8);
+        tone(&mut s, 5.0, 3_000.0, 0.21);
+        // Spike beeps and a long UI tone, no gunfire. Not kills.
+        for k in 0..3 {
+            tone(&mut s, 7.0 + k as f64, 7_968.0, 0.1);
+        }
+        tone(&mut s, 10.5, 3_000.0, 0.45);
+        let peaks = analyze_kills_from_samples(&s, 1, RATE, 1.0);
+        assert_eq!(peaks.len(), 1, "expected the one-tap only, got {peaks:?}");
+        assert!((peaks[0].time.as_secs_f64() - 1.8).abs() < 0.05, "kill should sit on the shot: {peaks:?}");
+
+        // the same tones with no shot at all find nothing
+        let mut quiet = noise_bed(12.0);
+        tone(&mut quiet, 2.0, 5_320.0, 0.4);
+        tone(&mut quiet, 10.5, 3_000.0, 0.45);
+        assert!(analyze_kills_from_samples(&quiet, 1, RATE, 1.0).is_empty());
+
+        // that borderline tone does count after two shots
+        let mut burst = noise_bed(4.0);
+        shot(&mut burst, 1.65);
+        shot(&mut burst, 1.8);
+        tone(&mut burst, 2.0, 3_000.0, 0.21);
+        assert_eq!(analyze_kills_from_samples(&burst, 1, RATE, 1.0).len(), 1);
     }
 
     /// `KILLS_RAW=clip.f32 cargo test -p nle-media kills_in_raw -- --ignored --nocapture`
