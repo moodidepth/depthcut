@@ -372,7 +372,7 @@ impl MontagePreset {
                 name: "Valorant Vibrant Clean CC".into(),
                 category: PresetCategory::ColorAndSignatureFx,
                 game_tag: "Valorant".into(),
-                description: "+12% contrast, shadow lift -6%, highlight roll-off -10%, +18% vibrance, teal shadows/warm highlights + Deep Glow (0.78 / 32px / 0.35).".into(),
+                description: "+12% contrast, shadow lift -6%, highlight roll-off -10%, +18% vibrance, teal shadows/warm highlights + soft Screen glow (0.80 / 32px / 0.25) that lifts ability VFX without clipping them.".into(),
                 velocity_preset: None,
                 color: Some(ColorPreset {
                     exposure: 0.05,
@@ -384,7 +384,7 @@ impl MontagePreset {
                     midtones: ColorWheel::default(),
                     highlights: ColorWheel { r: 0.04, g: 0.02, b: -0.02, master: -0.10 },
                 }),
-                effects: vec![effect_with(EffectKind::Glow, &[(0, Param::new(0.78)), (1, Param::new(32.0)), (2, Param::new(0.35))])],
+                effects: vec![effect_with(EffectKind::Glow, &[(0, Param::new(0.80)), (1, Param::new(32.0)), (2, Param::new(0.25)), (6, Param::new(1.0))])],
                 transition_in: None,
                 freeze_frames: None,
                 zoom_push_scale: None,

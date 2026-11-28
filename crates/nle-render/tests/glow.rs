@@ -86,7 +86,7 @@ fn glow_blooms_visibly_and_tracks_parameters() {
     let base = render(&mut r, &mut src, None);
     let h0 = halo(&base);
 
-    // the live project's preset values (Threshold 0.78, Radius 32 px, Strength 0.35)
+    // a subtle additive glow (Threshold 0.78, Radius 32 px, Strength 0.35)
     let live = render(&mut r, &mut src, Some(glow(&[0.78, 32.0, 0.35])));
     let h_live = halo(&live);
     eprintln!("halo: none {h0:.1}, live preset {h_live:.1}");
@@ -115,4 +115,21 @@ fn glow_blooms_visibly_and_tracks_parameters() {
     };
     eprintln!("Cr beside the square: base {:.0}, red glow {:.0}", cr(&base), cr(&red));
     assert!(cr(&red) > cr(&base) + 4.0, "glow_color tints the bloom");
+}
+
+/// The Valorant CC preset's glow must lift bright VFX (ability orbs, muzzle flashes) without
+/// flattening them to white: a Y-200 highlight keeps detail headroom but still blooms.
+#[test]
+fn valorant_cc_glow_does_not_clip_highlights() {
+    let Some(gpu) = gpu() else { return };
+    let mut r = Renderer::new(gpu, W, H);
+    let mut src = Pattern { bright: 200 };
+    let base = render(&mut r, &mut src, None);
+    let preset = nle_core::presets::MontagePreset::find("Valorant Vibrant Clean CC").unwrap();
+    let fx = preset.effects.iter().find(|e| e.kind == EffectKind::Glow).cloned().unwrap();
+    let out = render(&mut r, &mut src, Some(fx));
+    let (centre, h) = (luma(&out, 160, 90), halo(&out));
+    eprintln!("preset glow: centre {} -> {centre}, halo {:.1} -> {h:.1}", luma(&base, 160, 90), halo(&base));
+    assert!(centre < 228.0, "highlight blown towards white: {centre}");
+    assert!(h > halo(&base) + 8.0, "glow still visible around the highlight: {h:.1}");
 }
