@@ -165,8 +165,8 @@ fn nearest_label(c: egui::accesskit::Rect, labels: &[(egui::accesskit::Rect, Str
 pub fn audio_track_combo(ui: &mut egui::Ui, salt: impl std::hash::Hash, tracks: &[AudioTrackInfo], selected: usize) -> Option<usize> {
     let mut pick = selected;
     let current = tracks.get(selected).map(|t| t.label()).unwrap_or_else(|| "Track 0".into());
-    egui::ComboBox::from_id_salt(salt)
-        .selected_text(current)
+    let combo = egui::ComboBox::from_id_salt(salt)
+        .selected_text(current.clone())
         .width(220.0)
         .show_ui(ui, |ui| {
             for t in tracks {
@@ -182,6 +182,7 @@ pub fn audio_track_combo(ui: &mut egui::Ui, salt: impl std::hash::Hash, tracks: 
         .on_hover_text(
             "Which audio track of the file plays, shows as a waveform and is analysed (kills, beats, loudness). Pick the game track to leave voice chat and the mic out.",
         );
+    combo.ctx.accesskit_node_builder(combo.id, |n| n.set_value(current));
     (pick != selected).then_some(pick)
 }
 
