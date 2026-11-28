@@ -1,10 +1,10 @@
 ; Inno Setup 6 script for Depthcut.
 ; Built by scripts/package_windows.ps1, which passes:
-;   /DAppVersion=0.1.0-alpha  /DStageDir=<staged files>  /DOutputDir=<dist>
-; Manual build:  ISCC.exe /DAppVersion=0.1.0-alpha /DStageDir=..\dist\stage /DOutputDir=..\dist installer\depthcut.iss
+;   /DAppVersion=0.1.1-alpha  /DStageDir=<staged files>  /DOutputDir=<dist>
+; Manual build:  ISCC.exe /DAppVersion=0.1.1-alpha /DStageDir=..\dist\stage /DOutputDir=..\dist installer\depthcut.iss
 
 #ifndef AppVersion
-  #define AppVersion "0.1.0-alpha"
+  #define AppVersion "0.1.1-alpha"
 #endif
 #ifndef StageDir
   #define StageDir "..\dist\stage"

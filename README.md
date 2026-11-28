@@ -9,7 +9,7 @@ written in Rust. It has a magnetic timeline in the style of Final Cut Pro, plus
 montage tools built for CS2 and Valorant clips: zoom punches, beat sync, kill
 scanning, 9:16 reframing, Whisper auto-captions and an optional AI Copilot.
 
-> **Status: v0.1.0-alpha, early release.** Windows 10/11 x64 is the supported
+> **Status: v0.1.1-alpha, early release.** Windows 10/11 x64 is the supported
 > platform. Linux builds from source but is experimental. macOS is not supported (yet).
 >
 > Features marked **(alpha)** in the app are still in development and may not
@@ -38,10 +38,10 @@ licensed [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/).</sub>
 ## Install (Windows)
 
 1. From the [**Releases page**](../../releases/latest), download
-   `Depthcut-v0.1.0-alpha-win64-setup.exe` (installer) **or**
-   `Depthcut-v0.1.0-alpha-win64-portable.zip` (unzip anywhere and run `depthcut.exe`).
+   `Depthcut-v0.1.1-alpha-win64-setup.exe` (installer) **or**
+   `Depthcut-v0.1.1-alpha-win64-portable.zip` (unzip anywhere and run `depthcut.exe`).
    You can check the download against `SHA256SUMS.txt`:
-   `Get-FileHash .\Depthcut-v0.1.0-alpha-win64-portable.zip`
+   `Get-FileHash .\Depthcut-v0.1.1-alpha-win64-portable.zip`
 2. **SmartScreen warning.** Builds are **not code-signed yet**, so Windows may say
    *"Windows protected your PC"*. Click **More info → Run anyway**. If you'd rather
    not, build from source (see [Build & run](#build--run)).
@@ -168,15 +168,22 @@ OTIO / AAF interchange · CS2 / Valorant montage tools.
   watch every angle in the angle viewer and cut-and-switch live.
 - **Montage tools.**
   - **Zoom Punch** (`Z`) and **Hard Zoom Punch** (`Shift+Z`) at the playhead.
-  - **16 built-in CS2 / Valorant presets**: RSMB-style motion blur, AWP/Operator
-    scope pulse, kill-impact shake, bullet-time ramps, flow sync, freeze-frame
-    outline and colour looks.
-  - Beat detection with **Sync to Beats** (`Alt+S`), **Scan VOD for kills /
-    action peaks** (`Shift+Alt+K`) and **Gaming 9:16 split-crop** (`Alt+9`).
-- **Keyframes everywhere.** Every continuous parameter has a keyframe diamond in
-  the inspector. Bézier easing; an animation lane (`Shift+V`) and a retime editor
-  (`Ctrl+R`) with speed ramps, reverse, hold frames, frame blending and optical
-  flow.
+  - **16 built-in CS2 / Valorant presets**, stackable per category (RSMB-style
+    motion blur, velocity curves, impact shakes, colour looks, transitions),
+    with active preset badges and per-category clearing.
+  - **Beat-pinned velocity solver**: pin any source frame to a beat (`Shift+Alt+P`)
+    or auto-sync kill markers onto beats (`Shift+Alt+S`) with draggable velocity-lane pins.
+  - Beat detection with **Sync to Beats** (`Alt+S`), **Scan VOD for kills**
+    (`Shift+Alt+K`, preferring Medal's local kill events + timeline kill badges)
+    and **Gaming 9:16 split-crop** (`Alt+9`).
+- **Keyframes, masking & RGBA compositing.** Every continuous parameter has a
+  keyframe diamond in the inspector. Bézier easing, an animation lane (`Shift+V`),
+  stacked clip-level alpha shape masks (Rectangle, Ellipse, Polygon/Bézier with
+  Add/Subtract/Intersect and interactive viewer/feather handles), neighbour-layer
+  **Track Mattes** (including one-click **Behind Subject**), native RGBA alpha
+  media (PNG, WebM VP8/VP9 alpha, ProRes 4444 + ProRes 4444 proxies), and a
+  retime editor (`Ctrl+R`) with speed ramps, reverse, hold frames, frame blending
+  and optical flow.
 - **GPU effects and colour.** Blurs, glow, vignette, sharpen, grain, lens
   distortion, chroma key, levels, AI person matte, depth map and more, 14 blend
   modes, `.cube` LUTs, transitions and titles. Everything is rendered in WGSL

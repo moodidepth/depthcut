@@ -876,7 +876,7 @@ checksum = "a76abbdb2907f6fd97fb6bc0b7be96b77d328f2dd9669d1075cc03369ed22154"
 
 [[package]]
 name = "clap-test-gain"
-version = "0.1.0-alpha"
+version = "0.1.1-alpha"
 dependencies = [
  "clap-sys",
 ]
@@ -2892,7 +2892,7 @@ dependencies = [
 
 [[package]]
 name = "nle-ai"
-version = "0.1.0-alpha"
+version = "0.1.1-alpha"
 dependencies = [
  "deep_filter",
  "hound",
@@ -2916,7 +2916,7 @@ dependencies = [
 
 [[package]]
 name = "nle-core"
-version = "0.1.0-alpha"
+version = "0.1.1-alpha"
 dependencies = [
  "cfb",
  "rustfft",
@@ -2929,7 +2929,7 @@ dependencies = [
 
 [[package]]
 name = "nle-media"
-version = "0.1.0-alpha"
+version = "0.1.1-alpha"
 dependencies = [
  "clap-sys",
  "core_affinity",
@@ -2959,7 +2959,7 @@ dependencies = [
 
 [[package]]
 name = "nle-render"
-version = "0.1.0-alpha"
+version = "0.1.1-alpha"
 dependencies = [
  "ab_glyph",
  "bytemuck",
@@ -2976,7 +2976,7 @@ dependencies = [
 
 [[package]]
 name = "nle-ui"
-version = "0.1.0-alpha"
+version = "0.1.1-alpha"
 dependencies = [
  "eframe",
  "env_logger",
@@ -5396,7 +5396,7 @@ dependencies = [
 
 [[package]]
 name = "vst3-test-gain"
-version = "0.1.0-alpha"
+version = "0.1.1-alpha"
 dependencies = [
  "vst3",
 ]
