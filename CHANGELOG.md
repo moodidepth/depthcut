@@ -8,25 +8,36 @@ versions follow [SemVer](https://semver.org/).
 ### Montage presets & velocity
 - **Stackable per-category presets:** Clips now track one preset per `PresetCategory` (RSMB Motion Blur, Velocity Curves, Shake & Impact, CS2/Valorant CC & FX, Transitions) so applying multiple categories composes instead of clobbering earlier presets. Added coloured preset badges in the Presets panel and Inspector, per-category **Clear** and **Clear All Presets**, and automatic migration of older `.rcp` projects.
 - **Beat-pinned velocity solver:** Added source-frame-to-beat velocity pins (`Linear`, `Fast-In / Slow Kill`, `Flow Snap`) that solve a continuous speed curve (`0.10×–8.00×`) hitting every pin within `< 1 ms`. Added **Pin Frame to Playhead / Nearest Beat** (`Shift+Alt+P`), **Auto-Sync Kill Markers to Beat Markers** (`Shift+Alt+S`), and draggable beat-snapping pin diamonds in the velocity lane.
+- **Impact presets hit at the playhead:** Flash and shake impact presets now trigger at the playhead instead of timeline `0:00`.
 - **Custom retime speed %:** The timeline Retime popup now accepts a custom speed percentage directly.
+- **9:16 & Shorts improvements:** Title sizes follow the frame's short side so 9:16 titles fit cleanly, and **Gaming 9:16 Reframe** applies to every selected footage clip in one named undo step.
 
 ### Kill detection & Medal integration
 - **Medal library kill badges & scan:** Reads kill events directly from Medal's local SQLite library (`%APPDATA%\Medal\medal-*.db`) read-only, draws timeline kill badges following trims and retimes, and prefers Medal's exact events in **Scan VOD for Kills** while keeping other clips' kill markers intact.
-- **Improved by-ear kill detection:** Added chime-tail hysteresis (`15 dB` peak / `11 dB` ring) and dense-tone spectral-purity rejection, `20 s` pre-roll / `2 s` post-roll context around trimmed clips, accurate mapping back through retimes/velocity curves, and visible-only streak numbering.
+- **Rebuilt by-ear kill scanner:** Replaced the old transient detector with spectral gunfire + kill-chime detection (including Sheriff/Operator one-taps), chime-tail hysteresis (`15 dB` peak / `11 dB` ring), dense-tone spectral-purity rejection, `20 s` pre-roll / `2 s` post-roll context around trimmed clips, accurate mapping back through retimes/velocity curves, and visible-only streak numbering.
 
 ### Masking, track mattes & RGBA alpha
 - **Clip-level layer masks (`VideoMask`):** Up to 8 stacked Rectangle, Ellipse, or Polygon/Bézier alpha masks per clip (`Add`, `Subtract`, `Intersect`) with keyframable Offset, Scale, Rotation, Feather, Expand, Opacity, split/shift/Paste-Attributes support, and interactive viewer drag/resize/rotate/feather handles.
 - **Track Mattes & Behind Subject:** Neighbour-layer mattes (`Layer Below` or consumed `Layer Above`; `Alpha`, `Luma`, or `Subject (AI)`) plus a one-click **Behind Subject** button for placing titles, glow, or Adjustment grades behind an AI-matted foreground subject.
 - **Native RGBA alpha pipeline:** Detects alpha in `pix_fmt` and WebM `alpha_mode=1`, decodes transparent PNG / WebM VP8-VP9 (`libvpx`) / ProRes 4444 to straight `Rgba8`, generates **ProRes 4444** proxies for alpha media, filters premultiplied across compositor/effects/blur/shake/motion-blur/frame-blend shaders (no dark edge fringing), and handles non-`Normal` blend modes cleanly over transparent canvases.
 
-### Audio mastering & export safety
+### Audio & export mastering
+- **Multi-track audio picker:** Choose which audio track plays in multi-track OBS / Medal recordings (e.g., isolate clean game audio without Discord or mic).
+- **Adjustable Underwater sweep length:** Set the low-pass muffle sweep duration so a build-up can span bars into a drop.
 - **Always-on true-peak export limiter:** 4× oversampled BS.1770-4 look-ahead master limiter enforces `-1.5 dBTP` on AAC exports and `-0.3 dBTP` on PCM/FLAC exports even with loudness normalization off, warns when mixes clip `> 3 dB`, and adds **True-peak limiter** (Export Movie) and **Raw / Unlimited Master** for 32-bit float WAV (Export Audio).
 - **Render overwrite protection:** Asks before overwriting an existing file and automatically advances to a fresh filename after each completed render.
 
-### Visual & daily-driver fixes
+### Timeline, markers & editing ergonomics
+- **Markers follow their media:** Kill and beat markers stay attached to clips through edits, beat markers stay on music tracks rather than gameplay beneath them, and **Previous / Next Marker** navigation was added.
+- **Project format from first clip:** Dropping the first clip automatically sets the timeline resolution and frame rate.
+- **Editing & keyboard polish:** Final Cut-style transition placement; `Q` / `W` trim the clip under the playhead rather than a selection elsewhere; `Ctrl+Y` redoes alongside `Ctrl+Shift+Z`; timecode entry selects all and hands keyboard focus back on `Enter`; `Esc` leaving a text field no longer clears the selection; playhead pulls back cleanly when an edit shortens the timeline.
+
+### Visual, reliability & UI polish
 - **Valorant CC glow:** `Valorant Vibrant Clean CC` glow now uses Screen blend instead of additive, preventing ability VFX and skyboxes from blowing out to white.
 - **Smoother transition blurs:** `WhipPan` (64 taps) and `ZoomPunch` (24 taps) use per-pixel interleaved gradient noise jitter to eliminate visible comb stepping.
-- **UI & accessibility polish:** Fixed `Tracking Expand` titles clipping outside frame, multi-clip Adjustment layer spanning, swallowed Preset Apply clicks, Paste Attributes starting empty and remembering the last selection (`paste_attributes.json`), `Esc` closing Render / Paste Attributes dialogs, and AccessKit naming across combos, preset buttons, and Audio Track selection.
+- **Separate autosave per window:** Opening a second Depthcut window keeps its own autosave instead of overwriting the first.
+- **UI & daily-driver fixes:** `Tracking Expand` title frame bounds, multi-clip Adjustment layer spanning, swallowed Preset Apply clicks, Paste Attributes starting empty and remembering the last selection (`paste_attributes.json`), `Esc` closing Render / Paste Attributes dialogs, untitled projects adopting their saved name (`Save As` updates it), Media Info showing an honest color row and **VFR** flag, Online Audio displaying real track titles instead of raw file IDs, Color preview buttons no longer mutating clip values, and AccessKit naming across combos, preset buttons, and Audio Track selection.
+- **Website & docs:** Launched [depthcut.com](https://depthcut.com) (GitHub Pages) and added app screenshots to the README.
 
 ## [0.1.0-alpha] — 2026-11-27
 
