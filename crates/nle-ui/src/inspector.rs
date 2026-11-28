@@ -973,8 +973,18 @@ fn audio_tab(
     section(ui, "Gaming Audio Mastering", |ui| {
         ui.horizontal(|ui| {
             ui.checkbox(&mut a.lowpass_enabled, "Underwater Low-Pass Sweep");
-            if ui.small_button("🌊 Sweep at Playhead").on_hover_text("Automate 20 kHz → 350 Hz muffle into playhead, snapping back open on impact").clicked() {
-                a.apply_pre_kill_underwater_sweep(t);
+            // how long the muffle builds: 0.6 s before a kill, a bar or more into a drop
+            let id = egui::Id::new("underwater-sweep-len");
+            let mut len = ui.data_mut(|d| *d.get_persisted_mut_or(id, 0.6f32));
+            if ui
+                .add(egui::DragValue::new(&mut len).range(0.1..=8.0).speed(0.02).suffix(" s"))
+                .on_hover_text("Sweep length: 0.6 s for a pre-kill muffle, 1–4 bars for a build into a drop")
+                .changed()
+            {
+                ui.data_mut(|d| d.insert_persisted(id, len));
+            }
+            if ui.small_button("🌊 Sweep at Playhead").on_hover_text("Automate a 20 kHz → 350 Hz muffle ending at the playhead, snapping back open on impact").clicked() {
+                a.apply_underwater_sweep(t, Time::from_secs_f64(len as f64));
             }
         });
         if a.lowpass_enabled {

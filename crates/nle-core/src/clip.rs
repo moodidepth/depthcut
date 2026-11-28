@@ -654,11 +654,20 @@ impl AudioParams {
     /// One-click underwater muffled pre-kill sweep: `20 kHz -> 350 Hz` into `peak_time`,
     /// then snaps sharply back open to `20 kHz` on the kill / beat drop.
     pub fn apply_pre_kill_underwater_sweep(&mut self, peak_time: Time) {
+        self.apply_underwater_sweep(peak_time, Time::from_millis(600));
+    }
+    /// The underwater sweep over `len` before `peak_time`: a pre-kill muffle at
+    /// 0.6 s, or a build into a drop over a bar or more. The muffle reaches its
+    /// floor ~37% of the way before the peak (220 ms of a 600 ms sweep) and
+    /// holds there, so a long build stays underwater until the hit.
+    pub fn apply_underwater_sweep(&mut self, peak_time: Time, len: Time) {
         self.lowpass_enabled = true;
         self.lowpass_q = 1.2;
+        let len = len.max(Time::from_millis(100));
         let peak = peak_time.max(Time::from_millis(120));
-        let start = (peak - Time::from_millis(600)).max(Time::ZERO);
-        let dip = (peak - Time::from_millis(220)).max(start + Time::from_millis(20));
+        let start = (peak - len).max(Time::ZERO);
+        let hold = Time::from_secs_f64((len.as_secs_f64() * 0.37).min(1.0));
+        let dip = (peak - hold).max(start + Time::from_millis(20));
         let hold_end = (peak - Time::from_millis(25)).max(dip + Time::from_millis(10));
         let mut c = crate::keyframe::Curve::new();
         c.insert(crate::keyframe::Keyframe::new(start, 20_000.0).with_interp(Interpolation::EaseOut));
@@ -1663,5 +1672,26 @@ impl Clip {
         };
         // link ids come from the same counter
         own.max(connected).max(takes).max(inner).max(self.link.unwrap_or(0))
+    }
+}
+
+#[cfg(test)]
+mod sweep_tests {
+    use super::*;
+
+    #[test]
+    fn long_underwater_sweep_holds_the_muffle_until_the_drop() {
+        let mut a = AudioParams::default();
+        a.apply_underwater_sweep(Time::from_secs(10), Time::from_secs(4));
+        let hz = |s: f64| a.lowpass_hz.at(Time::from_secs_f64(s));
+        assert!(hz(5.9) > 19_000.0, "open before the build: {}", hz(5.9));
+        assert!(hz(7.5) < 15_000.0, "closing during the build: {}", hz(7.5));
+        assert!((hz(9.5) - 350.0).abs() < 1.0, "underwater just before the drop: {}", hz(9.5));
+        assert!(hz(10.05) > 19_000.0, "open on the drop: {}", hz(10.05));
+        // the classic one-click sweep keeps its 0.6 s shape
+        let mut b = AudioParams::default();
+        b.apply_pre_kill_underwater_sweep(Time::from_secs(1));
+        assert!((b.lowpass_hz.at(Time::from_millis(800)) - 350.0).abs() < 1.0);
+        assert!(b.lowpass_hz.at(Time::from_millis(350)) > 19_000.0);
     }
 }
