@@ -34,7 +34,7 @@ jobs:
     # a cold cache needs ~22 min check + ~40 min test + ~30 min release build
     timeout-minutes: 150
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -95,7 +95,7 @@ jobs:
         shell: pwsh
         run: Remove-Item (Join-Path $env:RUNNER_TEMP "rcp-sign.pfx") -Force -ErrorAction SilentlyContinue
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: depthcut-windows
           path: |
