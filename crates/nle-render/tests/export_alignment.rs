@@ -56,7 +56,7 @@ impl Rig {
 
     /// Export with nothing decoded beforehand, as for media not yet analysed.
     fn export(&self, project: &Project, settings: &ExportSettings) -> Result<(), String> {
-        run_export(project, settings, self.gpu.clone(), &HashMap::new(), &AtomicBool::new(false), |_| {}).map_err(|e| e.to_string())
+        run_export(project, settings, self.gpu.clone(), &HashMap::new(), &AtomicBool::new(false), |_| {}).map(|_| ()).map_err(|e| e.to_string())
     }
 }
 

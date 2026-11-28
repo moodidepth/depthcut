@@ -39,6 +39,8 @@ const PATH_XFADE_SECS: f32 = 0.015;
 pub struct MasterLimiter {
     env: f32,
     release: f32,
+    /// Lowest gain applied since the last reset.
+    worst: f32,
 }
 
 impl MasterLimiter {
@@ -46,7 +48,7 @@ impl MasterLimiter {
     pub const KNEE_DB: f32 = 4.0;
 
     pub fn new(sample_rate: u32) -> Self {
-        MasterLimiter { env: 1.0, release: (-1.0 / (0.080 * sample_rate as f32)).exp() }
+        MasterLimiter { env: 1.0, release: (-1.0 / (0.080 * sample_rate as f32)).exp(), worst: 1.0 }
     }
 
     pub fn ceiling() -> f32 {
@@ -75,6 +77,7 @@ impl MasterLimiter {
         let peak = frame.iter().fold(0.0f32, |m, s| m.max(s.abs()));
         let g = Self::curve_gain(peak);
         self.env = if g < self.env { g } else { g + (self.env - g) * self.release };
+        self.worst = self.worst.min(self.env);
         let ceil = Self::ceiling();
         for s in frame {
             // env ≤ g always, so this clamp only guards float rounding
@@ -84,6 +87,12 @@ impl MasterLimiter {
 
     pub fn reset(&mut self) {
         self.env = 1.0;
+        self.worst = 1.0;
+    }
+
+    /// The most gain reduction applied since the last reset, in dB (≥ 0).
+    pub fn max_reduction_db(&self) -> f32 {
+        -20.0 * self.worst.max(1e-6).log10()
     }
 }
 
@@ -198,6 +207,9 @@ pub struct TimelineMixer {
     vocals: HashMap<ClipId, VocalClarity>,
     retime: HashMap<ClipId, RetimeState>,
     limiter: MasterLimiter,
+    /// The always-on −1 dBFS master limiter; off only for raw / unlimited
+    /// float masters.
+    master_limiter: bool,
     tmp: Vec<f32>,
     dialogue: Vec<f32>,
     ducked: Vec<(ClipId, Vec<f32>)>,
@@ -237,6 +249,7 @@ impl TimelineMixer {
             vocals: HashMap::new(),
             retime: HashMap::new(),
             limiter: MasterLimiter::new(sample_rate),
+            master_limiter: true,
             tmp: Vec::new(),
             dialogue: Vec::new(),
             ducked: Vec::new(),
@@ -448,6 +461,19 @@ impl TimelineMixer {
     /// Render one bus only (post-fader, no master chain) or the full mix (`None`).
     pub fn set_stem(&mut self, stem: Option<StemTap>) {
         self.stem = stem;
+    }
+
+    /// Turn the master bus's −1 dBFS limiter on (default) or off. Off is for
+    /// raw / unlimited 32-bit float masters, which may go over 0 dBFS.
+    pub fn set_master_limiter(&mut self, on: bool) {
+        self.master_limiter = on;
+        self.limiter.reset();
+    }
+
+    /// The most the master-bus limiter pulled the mix down since the last
+    /// reset, in dB.
+    pub fn master_reduction_db(&self) -> f32 {
+        self.limiter.max_reduction_db()
     }
 
     /// A block of scrub audio. It stays out of the loudness measurement.
@@ -724,7 +750,9 @@ impl TimelineMixer {
                 *g += (target[c] - *g) * a;
                 *s *= *g * self.master_gain;
             }
-            self.limiter.process(frame);
+            if self.master_limiter {
+                self.limiter.process(frame);
+            }
             peaks[0] = peaks[0].max(frame[0].abs());
             peaks[1] = peaks[1].max(frame[1].abs());
         }
@@ -1217,9 +1245,14 @@ mod tests {
     }
 
     fn render_clip(c: Clip, a: &MediaAsset, buf: Arc<AudioBuffer>, gain: f32, secs: f64) -> Vec<f32> {
+        render_clip_limited(c, a, buf, gain, secs, true)
+    }
+
+    fn render_clip_limited(c: Clip, a: &MediaAsset, buf: Arc<AudioBuffer>, gain: f32, secs: f64, limiter: bool) -> Vec<f32> {
         let mut tl = Timeline::default();
         tl.append(c).unwrap();
         let mut m = TimelineMixer::new(48_000);
+        m.set_master_limiter(limiter);
         m.master_gain = gain;
         m.set_spans(nle_core::audio_spans(&tl));
         m.set_source(a.id, buf);
@@ -1256,6 +1289,14 @@ mod tests {
             let want = (std::f32::consts::TAU * 220.0 * i as f32 / 48_000.0).sin() * 0.25;
             assert!((s[0] - want).abs() < 1e-4, "sample {i}: {} vs {want}", s[0]);
         }
+    }
+
+    #[test]
+    fn master_limiter_bypass_passes_overs_through() {
+        let a = asset(2);
+        let raw = render_clip_limited(Clip::from_asset(&a), &a, sine(2.0, 220.0, 0.5), 4.0, 1.0, false);
+        let peak = raw.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+        assert!(peak > 1.9, "raw master keeps its +6 dBFS peak: {peak}");
     }
 
     /// Speed keyframe 1.0× → 0.5× (Hold) with pitch preservation: no click

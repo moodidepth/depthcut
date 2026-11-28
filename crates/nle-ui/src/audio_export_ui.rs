@@ -6,7 +6,7 @@ use eframe::egui;
 use nle_core::{AssetId, Project};
 use nle_media::audio::StemTap;
 use nle_media::AudioBuffer;
-use nle_render::audio_export::{all_stems, run_audio_export, stem_label, AudioExportSettings, AudioFormat};
+use nle_render::audio_export::{all_stems, run_audio_export, stem_label, AudioExportOutput, AudioExportSettings, AudioFormat};
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 /// Filled by the worker: the files written, or why it failed.
-type JobResult = Arc<Mutex<Option<Result<Vec<PathBuf>, String>>>>;
+type JobResult = Arc<Mutex<Option<Result<AudioExportOutput, String>>>>;
 
 struct Job {
     progress: Arc<Mutex<f32>>,
@@ -32,14 +32,30 @@ pub struct AudioExportDialog {
     stems: Vec<StemTap>,
     /// 0 = off, 1 = −14 LUFS, 2 = −16, 3 = −23 (EBU R128 broadcast).
     loudness: usize,
+    /// Raw / unlimited master (32-bit float WAV only).
+    raw_master: bool,
     path: Option<PathBuf>,
     job: Option<Job>,
     last: Option<(String, Option<PathBuf>)>,
+    /// What the limiters did to the last export's mix (dB).
+    last_limited_db: Option<f32>,
 }
 
 impl Default for AudioExportDialog {
     fn default() -> Self {
-        AudioExportDialog { open: false, format: 0, aac_kbps: 320, mix: true, stems: Vec::new(), loudness: 0, path: None, job: None, last: None }
+        AudioExportDialog {
+            open: false,
+            format: 0,
+            aac_kbps: 320,
+            mix: true,
+            stems: Vec::new(),
+            loudness: 0,
+            raw_master: false,
+            path: None,
+            job: None,
+            last: None,
+            last_limited_db: None,
+        }
     }
 }
 
@@ -48,6 +64,18 @@ const LOUDNESS: [(&str, Option<f32>); 4] = [("Off", None), ("−14 LUFS (streami
 impl AudioExportDialog {
     pub fn running(&self) -> bool {
         self.job.as_ref().is_some_and(|j| j.result.lock().is_none())
+    }
+
+    /// Settings and the last result for the debug state dump.
+    pub fn debug_state(&self) -> serde_json::Value {
+        serde_json::json!({
+            "running": self.running(),
+            "format": AudioFormat::ALL[self.format].label(),
+            "raw_master": self.raw_master,
+            "unlimited": self.raw_master && AudioFormat::ALL[self.format] == AudioFormat::WavFloat,
+            "last": self.last.as_ref().map(|(m, _)| m.clone()),
+            "last_limited_db": self.last_limited_db,
+        })
     }
 
     fn settings(&self, project: &Project) -> Option<AudioExportSettings> {
@@ -59,6 +87,7 @@ impl AudioExportDialog {
         s.mix = self.mix;
         s.stems = self.stems.clone();
         s.loudness_target = LOUDNESS[self.loudness].1;
+        s.raw_master = self.raw_master;
         Some(s)
     }
 
@@ -71,8 +100,19 @@ impl AudioExportDialog {
                     self.path = Some(crate::export_ui::next_free_path(p, &[]));
                 }
             }
+            self.last_limited_db = r.as_ref().ok().and_then(|o| o.master).map(|m| m.limited_db);
             self.last = Some(match r {
-                Ok(files) => (format!("Wrote {} file{} in {:.1}s", files.len(), if files.len() == 1 { "" } else { "s" }, started.elapsed().as_secs_f32()), files.first().cloned()),
+                Ok(out) => {
+                    let n = out.files.len();
+                    let mut msg = format!("Wrote {n} file{} in {:.1}s", if n == 1 { "" } else { "s" }, started.elapsed().as_secs_f32());
+                    if let Some(m) = out.master {
+                        msg.push_str(&format!(" — mix: {}", m.summary()));
+                        if m.is_hot() {
+                            msg.push_str(" — the mix is hot; lower the master");
+                        }
+                    }
+                    (msg, out.files.first().cloned())
+                }
                 Err(e) if e == nle_render::export::ExportError::Cancelled.to_string() => ("Audio export cancelled".into(), None),
                 Err(e) => (format!("Audio export failed: {e}"), None),
             });
@@ -122,6 +162,16 @@ impl AudioExportDialog {
                             }
                         });
                     });
+                });
+                ui.end_row();
+                ui.label("Master");
+                let float = AudioFormat::ALL[self.format] == AudioFormat::WavFloat;
+                ui.add_enabled_ui(self.mix && float, |ui| {
+                    let r = ui
+                        .checkbox(&mut self.raw_master, "Raw / Unlimited Master")
+                        .on_hover_text("No master-bus or true-peak limiting on the mix, so overs above 0 dBFS survive for later mastering. Only 32-bit float WAV can carry them.")
+                        .on_disabled_hover_text("Only for WAV 32-bit float: other formats clip overs, so the mix holds a true-peak ceiling (AAC −1.5 dBTP, PCM −0.3 dBTP).");
+                    crate::widgets::describe(&r, "Raw / Unlimited Master", if self.raw_master && float { "on" } else { "off" });
                 });
                 ui.end_row();
                 ui.label("Stems");

@@ -105,6 +105,9 @@ pub const CEILING_DBFS: f32 = -1.0;
 /// waveform overshoots the limited PCM (+0.5 dB measured on a 320k gameplay
 /// mix), so the extra headroom keeps the delivered file under −1 dBTP.
 pub const LOSSY_CEILING_DBTP: f32 = -1.5;
+/// Ceiling of the export master limiter for PCM / FLAC deliveries (dBTP):
+/// no codec overshoot to allow for, just headroom for resampling and DACs.
+pub const PCM_CEILING_DBTP: f32 = -0.3;
 
 /// Result of [`normalize_program`].
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -237,6 +240,30 @@ pub fn peak_limit(samples: &mut [f32], channels: usize, rate: u32, ceiling: f32)
     -20.0 * worst.max(1e-6).log10()
 }
 
+/// Export master limiter: holds the whole mix's true peak (4× oversampled,
+/// BS.1770-4) at or under `ceiling_dbtp`, with the look-ahead limiter's 5 ms
+/// attack ramp and 120 ms release. A mix that never goes over is returned
+/// bit-identical (0.0); otherwise passes repeat, each a little under the
+/// ceiling, until the re-measured true peak sits under it. Returns the gain
+/// reduction applied at the loudest point (dB, ≥ 0).
+pub fn master_limit(samples: &mut [f32], channels: usize, rate: u32, ceiling_dbtp: f32) -> f32 {
+    let ch = channels.max(1);
+    let ceiling = 10f32.powf(ceiling_dbtp / 20.0);
+    let over = |s: &[f32]| frame_true_peaks(s, ch, ceiling).into_iter().any(|p| p > ceiling);
+    if samples.len() < ch || !over(samples) {
+        return 0.0;
+    }
+    let (mut total, mut target) = (0.0, ceiling_dbtp - 0.05);
+    for _ in 0..6 {
+        total += peak_limit(samples, ch, rate, 10f32.powf(target / 20.0));
+        if !over(samples) {
+            break;
+        }
+        target -= 0.1;
+    }
+    total
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,6 +336,53 @@ mod tests {
         assert!(reduced > 0.5, "limited {reduced} dB");
         let tp = true_peak_dbtp(&x);
         assert!(tp <= CEILING_DBFS + 0.1, "true peak {tp} dBTP");
+    }
+
+    /// fs/4 sine at 45°: samples at 0.707·amp, true peak at amp.
+    fn quarter_rate_45(amp: f32, frames: usize) -> Vec<f32> {
+        (0..frames)
+            .flat_map(|i| {
+                let v = amp * (std::f64::consts::FRAC_PI_2 * i as f64 + std::f64::consts::FRAC_PI_4).sin() as f32;
+                [v, v]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn master_limit_holds_a_plus_6_dbfs_mix_under_each_ceiling() {
+        // 997 Hz bed at −6 dBFS with +6 dBFS bursts (×4), then an fs/4 tone
+        // whose +6 dBTP peaks sit between samples
+        let mut mix = sine_stereo(48_000, 997.0, 0.5, 2.0);
+        for k in 0..4 {
+            let at = (k * 24_000 + 6_000) * 2;
+            for s in &mut mix[at..at + 4_800] {
+                *s *= 4.0;
+            }
+        }
+        mix.extend(quarter_rate_45(2.0, 48_000));
+        assert!(true_peak_dbtp(&mix) > 5.9, "test mix is +6 dBTP");
+        for (ceiling, at_most) in [(LOSSY_CEILING_DBTP, -1.5), (PCM_CEILING_DBTP, 0.0)] {
+            let mut x = mix.clone();
+            let reduced = master_limit(&mut x, 2, 48_000, ceiling);
+            let tp = true_peak_dbtp(&x);
+            assert!(tp <= at_most && tp <= ceiling, "ceiling {ceiling}: true peak {tp} dBTP");
+            assert!(reduced > 6.0 - ceiling - 0.5, "ceiling {ceiling}: reduced only {reduced} dB");
+            // the −6 dBFS bed between bursts keeps its level (no pumping)
+            let bed = x[30_000 * 2..40_000 * 2].iter().fold(0.0f32, |m, s| m.max(s.abs()));
+            assert!(bed > 0.45, "ceiling {ceiling}: bed squashed to {bed}");
+        }
+    }
+
+    #[test]
+    fn master_limit_leaves_a_minus_6_dbfs_mix_bit_identical() {
+        let mut mix = sine_stereo(48_000, 997.0, 0.5, 2.0);
+        mix.extend(quarter_rate_45(0.5, 48_000));
+        assert!(true_peak_dbtp(&mix) < -5.9);
+        for ceiling in [LOSSY_CEILING_DBTP, PCM_CEILING_DBTP] {
+            let mut x = mix.clone();
+            assert_eq!(master_limit(&mut x, 2, 48_000, ceiling), 0.0);
+            assert!(x.iter().zip(&mix).all(|(a, b)| a.to_bits() == b.to_bits()), "ceiling {ceiling}: samples changed");
+        }
     }
 
     fn sine_stereo(rate: u32, freq: f64, amp: f32, secs: f64) -> Vec<f32> {

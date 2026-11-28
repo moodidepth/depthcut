@@ -10,7 +10,7 @@ use eframe::egui;
 use nle_core::{AssetId, Clip, ClipKind, Project, SubtitleFormat, Time};
 use nle_media::encoder_probe;
 use nle_media::AudioBuffer;
-use nle_render::export::{fits_size_budget, mastering_presets, run_export, working_presets, AudioExport, ExportCodec, ExportProgress, RateControl};
+use nle_render::export::{fits_size_budget, mastering_presets, run_export, working_presets, AudioExport, ExportCodec, ExportProgress, ExportReport, MasterReport, RateControl};
 use nle_render::{ExportPreset, ExportSettings, GamingDeliveryPreset, GpuContext};
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
@@ -21,7 +21,7 @@ use std::time::Instant;
 
 struct Job {
     progress: Arc<Mutex<Option<ExportProgress>>>,
-    result: Arc<Mutex<Option<Result<(), String>>>>,
+    result: Arc<Mutex<Option<Result<ExportReport, String>>>>,
     cancel: Arc<AtomicBool>,
     started: Instant,
     path: PathBuf,
@@ -73,6 +73,10 @@ pub struct ExportDialog {
     done_path: Option<PathBuf>,
     /// Program loudness: 0 = off, 1 = -14 LUFS (YouTube), 2 = -16 LUFS (Shorts/TikTok).
     loudness: usize,
+    /// Hold the mix under the format's true-peak ceiling.
+    true_peak_limit: bool,
+    /// What the limiters did to the last export's mix.
+    last_master: Option<MasterReport>,
     path: Option<PathBuf>,
     /// An existing file the user agreed to replace (in the OS save dialog,
     /// which asks, or with "Overwrite" here).
@@ -178,6 +182,8 @@ impl Default for ExportDialog {
             range: ExportRange::Whole,
             done_path: None,
             loudness: 0,
+            true_peak_limit: true,
+            last_master: None,
             path: None,
             overwrite_ok: None,
             confirm_overwrite: false,
@@ -208,6 +214,9 @@ impl ExportDialog {
             "preset": self.preset.map(|p| format!("{p:?}")),
             "range": format!("{:?}", self.range),
             "loudness": (["off", "-14 LUFS", "-16 LUFS"].get(self.loudness).copied()),
+            "true_peak_limit": self.true_peak_limit,
+            "last_limited_db": self.last_master.map(|m| m.limited_db),
+            "last_ceiling_dbtp": self.last_master.and_then(|m| m.ceiling_dbtp),
             "queued": self.queue.len(),
             "queue_running": self.queue_running,
             "queue_log": self.queue_log,
@@ -233,9 +242,16 @@ impl ExportDialog {
             if self.path.as_ref() == Some(&path) && path.exists() {
                 self.path = Some(next_free_path(&path, &self.queue));
             }
+            self.last_master = r.as_ref().ok().and_then(|rep| rep.audio);
             let msg = match r {
-                Ok(()) => {
+                Ok(report) => {
                     let mut msg = format!("Exported {} in {:.1}s", path.display(), started.elapsed().as_secs_f32());
+                    if let Some(m) = report.audio {
+                        msg.push_str(&format!(" — audio: {}", m.summary()));
+                        if m.is_hot() {
+                            msg.push_str(" — the mix is hot; lower the master");
+                        }
+                    }
                     if let Some(cp) = write_credits_file(&project, &path) {
                         msg.push_str(&format!(" — credits written to {}", cp.display()));
                     }
@@ -516,13 +532,22 @@ impl ExportDialog {
                     ui.selectable_value(&mut self.audio, 2, "None");
                 });
                 ui.end_row();
-                ui.label("Loudness").on_hover_text("Normalize the whole mix to the platform's integrated-loudness target (EBU R128), with a -1 dBFS look-ahead peak limiter.");
+                ui.label("Loudness").on_hover_text("Normalize the whole mix to the platform's integrated-loudness target (EBU R128), with a look-ahead peak limiter.");
                 ui.add_enabled_ui(self.audio != 2, |ui| {
                     ui.horizontal(|ui| {
                         ui.selectable_value(&mut self.loudness, 0, "Off");
                         ui.selectable_value(&mut self.loudness, 1, "-14 LUFS (YouTube)");
                         ui.selectable_value(&mut self.loudness, 2, "-16 LUFS (Shorts)");
                     });
+                });
+                ui.end_row();
+                ui.label("Peaks");
+                ui.add_enabled_ui(self.audio != 2, |ui| {
+                    let ceiling = if self.audio == 0 { "−1.5" } else { "−0.3" };
+                    let r = ui.checkbox(&mut self.true_peak_limit, format!("True-peak limiter ({ceiling} dBTP)")).on_hover_text(
+                        "Hold the mix under the format's true-peak ceiling (AAC −1.5 dBTP, PCM −0.3 dBTP) with a 4× oversampled look-ahead limiter, also with loudness off. More than 3 dB of limiting means the mix itself is too hot.",
+                    );
+                    crate::widgets::describe(&r, "True-peak limiter", if self.true_peak_limit { "on" } else { "off" });
                 });
                 ui.end_row();
                 ui.label("Duration");
@@ -764,6 +789,7 @@ impl ExportDialog {
             2 => Some(nle_media::analysis::loudness::TARGET_LUFS_SHORTS),
             _ => None,
         };
+        settings.true_peak_limit = self.true_peak_limit;
         if let Some(&(w, h, _)) = self.resolution.checked_sub(1).and_then(|i| OUTPUT_SIZES.get(i)) {
             settings.width = w;
             settings.height = h;

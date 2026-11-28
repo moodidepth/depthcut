@@ -74,7 +74,7 @@ fn export_every_working_encoder() {
         let cancel = AtomicBool::new(false);
         let mut frames = 0;
         match run_export(&project, &s, gpu.clone(), &audio, &cancel, |p| frames = p.frame) {
-            Ok(()) => {
+            Ok(_) => {
                 let out = probe::probe(&path).expect("probe export");
                 let v = out.video.as_ref().expect("exported video");
                 assert_eq!((v.width, v.height), (640, 360));

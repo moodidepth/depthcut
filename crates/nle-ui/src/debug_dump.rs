@@ -434,6 +434,7 @@ fn body(app: &App, ctx: &egui::Context) -> Value {
             "multiband_scan": app.multiband_job.is_some(),
             "media_job": app.media_job.is_some(),
             "export": app.export.debug_state(),
+            "audio_export": app.audio_export.debug_state(),
         },
         "status": status,
         "recent_events": app.dbg.events.iter().cloned().collect::<Vec<_>>(),

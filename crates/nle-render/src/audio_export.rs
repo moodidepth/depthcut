@@ -1,9 +1,11 @@
 //! Audio-only delivery: the full mix and / or one stem per mixer bus, as
 //! WAV (24-bit or 32-bit float), FLAC or AAC. Stems are tapped after each
 //! bus's fader, before the master chain, so the master's processing and
-//! limiter apply only to the mix file.
+//! limiters apply only to the mix file: the mix holds a true-peak ceiling
+//! (AAC −1.5 dBTP, PCM −0.3 dBTP) unless it goes out as a raw / unlimited
+//! 32-bit float master.
 
-use crate::export::{export_audio, partial_path, prepared_mixer, render_range, write_wav_f32, ExportError};
+use crate::export::{export_audio, master_mix, partial_path, prepared_mixer, render_range, write_wav_f32, ExportError, MasterReport};
 use nle_core::{AssetId, AudioRole, BusId, Project, Time};
 use nle_media::audio::StemTap;
 use nle_media::{ffmpeg_cli, AudioBuffer};
@@ -64,6 +66,18 @@ pub struct AudioExportSettings {
     pub stems: Vec<StemTap>,
     /// Normalize the mix (not the stems) to this integrated loudness.
     pub loudness_target: Option<f32>,
+    /// Raw / unlimited master: no master-bus or true-peak limiting on the
+    /// mix, so overs survive. Only for [`AudioFormat::WavFloat`], the one
+    /// format that can carry samples above full scale.
+    pub raw_master: bool,
+}
+
+/// What [`run_audio_export`] wrote.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AudioExportOutput {
+    pub files: Vec<PathBuf>,
+    /// Mastering of the mix; `None` when only stems were written.
+    pub master: Option<MasterReport>,
 }
 
 impl AudioExportSettings {
@@ -76,7 +90,13 @@ impl AudioExportSettings {
             mix: true,
             stems: Vec::new(),
             loudness_target: None,
+            raw_master: false,
         }
+    }
+
+    /// Whether the mix goes out unlimited (raw master on a float WAV).
+    pub fn unlimited(&self) -> bool {
+        self.raw_master && self.format == AudioFormat::WavFloat
     }
 
     /// Every file this export writes: (`None` = the mix, or the stem's tap, path).
@@ -122,7 +142,7 @@ pub fn run_audio_export(
     audio_sources: &HashMap<AssetId, Arc<AudioBuffer>>,
     cancel: &AtomicBool,
     mut progress: impl FnMut(f32),
-) -> Result<Vec<PathBuf>, ExportError> {
+) -> Result<AudioExportOutput, ExportError> {
     let outputs = settings.outputs(project);
     if outputs.is_empty() {
         return Err(ExportError::Encoder("nothing to export: choose the mix or at least one stem".into()));
@@ -140,19 +160,17 @@ pub fn run_audio_export(
     let sources = export_audio(project, audio_sources, settings.start, settings.end, cancel)?;
     let mut mixer = prepared_mixer(project, &sources);
     let n = outputs.len() as f32;
-    let mut written = Vec::new();
+    let mut written = AudioExportOutput::default();
+    mixer.set_master_limiter(!settings.unlimited());
     for (k, (tap, path)) in outputs.iter().enumerate() {
         mixer.reset_state();
         mixer.set_stem(*tap);
         let base = k as f32 / n;
         let pcm = render_range(&mut mixer, settings.start, settings.end, cancel, &mut |f| progress(base + f / n));
         let Some(mut pcm) = pcm else { return Err(ExportError::Cancelled) };
-        if let (None, Some(target)) = (tap, settings.loudness_target) {
-            use nle_media::analysis::loudness::{normalize_program, CEILING_DBFS, LOSSY_CEILING_DBTP};
-            let ceiling = if matches!(settings.format, AudioFormat::Aac { .. }) { LOSSY_CEILING_DBTP } else { CEILING_DBFS };
-            if let Some(r) = normalize_program(&mut pcm, 2, 48_000, target, ceiling) {
-                log::info!("audio export: loudness {:.1} LUFS -> {target:.1} ({:+.1} dB)", r.measured_lufs, r.gain_db);
-            }
+        if tap.is_none() {
+            let lossy = matches!(settings.format, AudioFormat::Aac { .. });
+            written.master = Some(master_mix(&mut pcm, settings.loudness_target, lossy, !settings.unlimited(), mixer.master_reduction_db()));
         }
         let part = partial_path(path, &id);
         let r = encode(&pcm, &part, codec.as_deref(), &id).and_then(|()| {
@@ -162,7 +180,7 @@ pub fn run_audio_export(
             let _ = std::fs::remove_file(&part);
             return Err(e);
         }
-        written.push(path.clone());
+        written.files.push(path.clone());
     }
     progress(1.0);
     Ok(written)
@@ -237,7 +255,7 @@ mod tests {
         let mut s = AudioExportSettings::new(dir.join("show.wav"), &project);
         s.format = AudioFormat::WavFloat;
         s.stems = vec![StemTap::Role(AudioRole::Dialogue), StemTap::Role(AudioRole::Music), StemTap::User(bus)];
-        let files = run_audio_export(&project, &s, &sources, &AtomicBool::new(false), |_| {}).unwrap();
+        let files = run_audio_export(&project, &s, &sources, &AtomicBool::new(false), |_| {}).unwrap().files;
         let names: Vec<String> = files.iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
         assert_eq!(names, ["show.wav", "show - Dialogue.wav", "show - Music.wav", "show - Sub_1.wav"]);
         let rms = |x: &[f32]| (x.iter().map(|s| s * s).sum::<f32>() / x.len().max(1) as f32).sqrt();
@@ -257,9 +275,50 @@ mod tests {
         if ffmpeg_cli::available() {
             let mut s = AudioExportSettings::new(dir.join("show"), &project);
             s.format = AudioFormat::Flac;
-            let files = run_audio_export(&project, &s, &sources, &AtomicBool::new(false), |_| {}).unwrap();
+            let files = run_audio_export(&project, &s, &sources, &AtomicBool::new(false), |_| {}).unwrap().files;
             assert!(files[0].extension().unwrap() == "flac" && std::fs::metadata(&files[0]).unwrap().len() > 10_000);
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    fn true_peak_db(x: &[f32]) -> f32 {
+        let mut m = nle_media::audio::meter::LoudnessMeter::new(48_000);
+        m.push(x);
+        m.true_peak_db().unwrap_or(f32::NEG_INFINITY)
+    }
+
+    #[test]
+    fn a_hot_mix_holds_the_pcm_ceiling_unless_exported_raw() {
+        let mut project = Project::new("hot");
+        let mut a = MediaAsset::new("hot", "/h.wav", Time::from_secs(1));
+        a.audio = Some(AudioStreamInfo { sample_rate: 48_000, channels: 2, codec: "pcm".into() });
+        let mut c = Clip::from_asset(&a);
+        c.audio.role = AudioRole::Effects;
+        project.timeline.append(c).unwrap();
+        // +6 dBFS: a 1 kHz tone at twice full scale
+        let sources: HashMap<AssetId, Arc<AudioBuffer>> = [(a.id, tone(1.0, 1_000.0, 2.0))].into_iter().collect();
+        project.assets.push(a);
+        let dir = std::env::temp_dir().join(format!("rcp-hot-{}", std::process::id()));
+        let mut s = AudioExportSettings::new(dir.join("hot.wav"), &project);
+        s.format = AudioFormat::WavFloat;
+
+        let out = run_audio_export(&project, &s, &sources, &AtomicBool::new(false), |_| {}).unwrap();
+        let tp = true_peak_db(&read_f32_wav(&out.files[0]));
+        assert!(tp <= -0.3 + 0.05, "limited mix true peak {tp:.2} dBTP");
+        let m = out.master.unwrap();
+        assert_eq!(m.ceiling_dbtp, Some(-0.3));
+        assert!(m.is_hot(), "6 dB over is a hot mix: {m:?}");
+
+        s.raw_master = true;
+        let out = run_audio_export(&project, &s, &sources, &AtomicBool::new(false), |_| {}).unwrap();
+        let raw = read_f32_wav(&out.files[0]);
+        let peak = raw.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+        assert!(peak > 1.9, "raw master keeps the overs: {peak}");
+        assert_eq!(out.master.unwrap().ceiling_dbtp, None);
+
+        // raw only applies to float WAV
+        s.format = AudioFormat::Wav24;
+        assert!(!s.unlimited());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -449,8 +449,12 @@ pub struct ExportSettings {
     /// cannot overshoot its byte budget.
     pub size_capped: bool,
     /// Normalize the program mix to this integrated loudness (LUFS) with a
-    /// -1 dBFS look-ahead limiter; `None` exports the mix as-is.
+    /// look-ahead limiter; `None` keeps the mix's level.
     pub loudness_target: Option<f32>,
+    /// Hold the mix under a true-peak ceiling (AAC −1.5 dBTP, PCM −0.3 dBTP)
+    /// with a 4× oversampled look-ahead limiter, also without a loudness
+    /// target. Off sends the mix as rendered.
+    pub true_peak_limit: bool,
     /// 10-bit (Main10, P010) for HEVC / AV1.
     pub ten_bit: bool,
     /// Keep alpha (transparent background) for formats that carry it.
@@ -483,6 +487,7 @@ impl ExportSettings {
             end: project.timeline.extent(),
             size_capped: false,
             loudness_target: None,
+            true_peak_limit: true,
             ten_bit: false,
             alpha: false,
             hdr: HdrOutput::Sdr,
@@ -790,10 +795,93 @@ pub fn write_wav_f32(path: &Path, rate: u32, samples: &[f32]) -> std::io::Result
     f.flush()
 }
 
-/// Mix the timeline's audio for `[start, end)` at 48 kHz stereo.
-pub fn mix_audio(project: &Project, sources: &HashMap<AssetId, Arc<AudioBuffer>>, start: Time, end: Time) -> Vec<f32> {
+/// Mix the timeline's audio for `[start, end)` at 48 kHz stereo; also
+/// returns how much the master-bus limiter pulled it down (dB).
+pub fn mix_audio(project: &Project, sources: &HashMap<AssetId, Arc<AudioBuffer>>, start: Time, end: Time) -> (Vec<f32>, f32) {
     let mut mixer = prepared_mixer(project, sources);
-    render_range(&mut mixer, start, end, &AtomicBool::new(false), &mut |_| {}).unwrap_or_default()
+    let pcm = render_range(&mut mixer, start, end, &AtomicBool::new(false), &mut |_| {}).unwrap_or_default();
+    (pcm, mixer.master_reduction_db())
+}
+
+/// Limiting above this much (dB) means the mix itself is too hot: the
+/// export UI asks for the master to come down instead of squashing it.
+pub const HOT_MIX_DB: f32 = 3.0;
+
+/// What mastering did to an exported mix.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MasterReport {
+    /// The most any limiter (master bus, loudness, true-peak) pulled the
+    /// mix down, in dB.
+    pub limited_db: f32,
+    /// The true-peak ceiling held; `None` when the mix went out unlimited.
+    pub ceiling_dbtp: Option<f32>,
+    /// Gain applied by loudness normalization.
+    pub loudness_gain_db: Option<f32>,
+}
+
+impl MasterReport {
+    pub fn is_hot(&self) -> bool {
+        self.limited_db > HOT_MIX_DB
+    }
+
+    /// One line for the export status.
+    pub fn summary(&self) -> String {
+        let mut s = match self.ceiling_dbtp {
+            Some(c) if self.limited_db >= 0.05 => format!("limiter −{:.1} dB (ceiling {c:.1} dBTP)", self.limited_db),
+            Some(c) => format!("peaks under {c:.1} dBTP"),
+            None => "unlimited master".to_string(),
+        };
+        if let Some(g) = self.loudness_gain_db {
+            s.push_str(&format!(", loudness {g:+.1} dB"));
+        }
+        s
+    }
+}
+
+/// Master an exported mix in place: optional loudness normalization, then
+/// the true-peak limiter at the format's ceiling (lossy −1.5 dBTP, PCM
+/// −0.3 dBTP) unless `limit` is off. `bus_limited_db` is what the master
+/// bus's own limiter already did while mixing.
+pub fn master_mix(pcm: &mut [f32], loudness_target: Option<f32>, lossy: bool, limit: bool, bus_limited_db: f32) -> MasterReport {
+    use nle_media::analysis::loudness::{master_limit, normalize_program, CEILING_DBFS, LOSSY_CEILING_DBTP, PCM_CEILING_DBTP};
+    let mut report = MasterReport { limited_db: bus_limited_db.max(0.0), ..Default::default() };
+    if let Some(target) = loudness_target {
+        // unlimited: gain only (a ceiling no mix reaches)
+        let ceiling = if !limit {
+            60.0
+        } else if lossy {
+            LOSSY_CEILING_DBTP
+        } else {
+            CEILING_DBFS
+        };
+        match normalize_program(pcm, 2, 48_000, target, ceiling) {
+            Some(r) => {
+                log::info!("export: loudness {:.1} LUFS -> {target:.1} ({:+.1} dB, limiter {:.1} dB)", r.measured_lufs, r.gain_db, r.limited_db);
+                report.loudness_gain_db = Some(r.gain_db);
+                report.limited_db = report.limited_db.max(r.limited_db);
+            }
+            None => log::info!("export: mix is silent; loudness normalization skipped"),
+        }
+    }
+    if limit {
+        let ceiling = if lossy { LOSSY_CEILING_DBTP } else { PCM_CEILING_DBTP };
+        let db = master_limit(pcm, 2, 48_000, ceiling);
+        report.limited_db = report.limited_db.max(db);
+        report.ceiling_dbtp = Some(ceiling);
+    }
+    if report.is_hot() {
+        log::warn!("export: mix is hot, limited {:.1} dB; lower the master", report.limited_db);
+    } else {
+        log::info!("export: master {}", report.summary());
+    }
+    report
+}
+
+/// What [`run_export`] reports besides the file.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ExportReport {
+    /// Mastering of the audio track; `None` without audio.
+    pub audio: Option<MasterReport>,
 }
 
 /// A 48 kHz offline mixer for the project, with the duck envelope and the
@@ -933,7 +1021,7 @@ pub fn run_export(
     audio_sources: &HashMap<AssetId, Arc<AudioBuffer>>,
     cancel: &AtomicBool,
     mut progress: impl FnMut(ExportProgress),
-) -> Result<(), ExportError> {
+) -> Result<ExportReport, ExportError> {
     if !ffmpeg_cli::available() {
         return Err(ExportError::NoFfmpeg);
     }
@@ -950,20 +1038,13 @@ pub fn run_export(
     let id = format!("{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
 
     // sequences get the mix as a sidecar WAV next to the frames
+    let mut report = ExportReport::default();
     let wav = if settings.audio != AudioExport::None {
         let path = if seq { settings.path.with_extension("wav") } else { std::env::temp_dir().join(format!("rcp-export-{id}.wav")) };
         let sources = export_audio(project, audio_sources, settings.start, settings.end, cancel)?;
-        let mut pcm = mix_audio(project, &sources, settings.start, settings.end);
-        if let Some(target) = settings.loudness_target {
-            use nle_media::analysis::loudness::{normalize_program, CEILING_DBFS, LOSSY_CEILING_DBTP};
-            let ceiling = if matches!(settings.audio, AudioExport::Aac { .. }) { LOSSY_CEILING_DBTP } else { CEILING_DBFS };
-            match normalize_program(&mut pcm, 2, 48_000, target, ceiling) {
-                Some(r) => {
-                    log::info!("export: loudness {:.1} LUFS -> {target:.1} ({:+.1} dB, limiter {:.1} dB, ceiling {ceiling:.1} dBTP)", r.measured_lufs, r.gain_db, r.limited_db)
-                }
-                None => log::info!("export: mix is silent; loudness normalization skipped"),
-            }
-        }
+        let (mut pcm, bus_db) = mix_audio(project, &sources, settings.start, settings.end);
+        let lossy = matches!(settings.audio, AudioExport::Aac { .. });
+        report.audio = Some(master_mix(&mut pcm, settings.loudness_target, lossy, settings.true_peak_limit, bus_db));
         write_wav_f32(&path, 48_000, &pcm)?;
         Some(path)
     } else {
@@ -1033,7 +1114,7 @@ pub fn run_export(
         None => Ok(()),
     });
     if seq {
-        return result;
+        return result.map(|()| report);
     }
     let result = result.and_then(|()| {
         std::fs::rename(&output.path, &settings.path)
@@ -1043,7 +1124,7 @@ pub fn run_export(
         // only ever this export's own partial file
         let _ = std::fs::remove_file(&output.path);
     }
-    result
+    result.map(|()| report)
 }
 
 #[cfg(test)]
