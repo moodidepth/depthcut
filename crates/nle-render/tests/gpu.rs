@@ -712,3 +712,25 @@ fn gpu_scopes_bin_a_solid_frame_like_the_cpu_mirror() {
     r.set_scopes_enabled(false);
     assert!(r.scope_view(nle_render::ScopeKind::Waveform).is_none());
 }
+
+#[test]
+fn gpu_impact_flash_fires_at_its_trigger_late_in_the_timeline() {
+    let Some(gpu) = gpu() else { return };
+    let mut r = Renderer::new(gpu, W, H);
+    let a = AssetId(9102);
+    let mut src = Solid(HashMap::from([(a, (100, 128, 128))]));
+    // Hard Kill Impact dropped 12 s into a clip that sits 15 s into the timeline
+    let mut clip = nle_core::Clip::gap(Time::from_secs(20));
+    nle_core::MontagePreset::find("Hard Kill Impact").unwrap().apply_to_clip(&mut clip, Time::from_secs(12));
+    let flash = clip.effects.iter().find(|e| e.kind == EffectKind::ImpactFlash).unwrap().clone();
+    let mut luma = |local_ms: i64| {
+        let mut l = media_layer(a);
+        l.effects = vec![flash.resolve(Time::from_millis(local_ms))];
+        let comp = Composition::new(Time::from_secs(15) + Time::from_millis(local_ms), vec![RenderNode::Layer(l)]);
+        mean_y(&r.render_nv12(&comp, &mut src, RenderOptions::default()), 0, W)
+    };
+    let (before, hit, after) = (luma(11_900), luma(12_000), luma(12_600));
+    eprintln!("flash luma: before {before:.1}, hit {hit:.1}, after {after:.1}");
+    assert!(hit > before + 20.0, "white flash on the hit: {hit} vs {before}");
+    assert!((after - before).abs() < 2.0, "flash gone 0.6 s later: {after} vs {before}");
+}

@@ -554,12 +554,16 @@ pub fn gaussian_levels(sigma: f32) -> u32 {
     n
 }
 
+/// `t` is timeline seconds (drives continuous shakes); a decaying hit counts
+/// from the effect's own trigger instead, so it fires where it was placed.
 pub fn shake_transform(e: &ResolvedEffect, t: f32) -> [f32; 4] {
     let v = &e.values;
     let (scale, speed, rot, bias, impact, seed) = (v[0], v[1], v[2], v[3], v[4] > 0.5, v[5]);
     let (decay_rate, zoom_punch, tilt_deg) = (v[6].max(0.0), v[7].max(1.0), v[8].max(0.0));
     let (x, env) = if decay_rate > 0.01 {
-        (t * speed.max(0.2) * 3.0, (-t.max(0.0) * decay_rate).exp())
+        // still before the hit: no shake yet
+        let t = e.elapsed;
+        (t * speed.max(0.2) * 3.0, if t < 0.0 { 0.0 } else { (-t * decay_rate).exp() })
     } else if impact {
         // sharp hits every 2/speed seconds that decay quickly
         let period = 2.0 / speed.max(0.05);
@@ -1933,7 +1937,8 @@ impl Renderer {
             EffectKind::ZoomBlur => simple(self, enc, "zoom_blur", base),
             EffectKind::ChromaKey => simple(self, enc, "chroma", base),
             EffectKind::RgbSplitGlitch => simple(self, enc, "rgb_split", base),
-            EffectKind::ImpactFlash => simple(self, enc, "impact_flash", base),
+            // the flash decays from its trigger, not from the timeline start
+            EffectKind::ImpactFlash => simple(self, enc, "impact_flash", FxU { time: e.elapsed, ..base }),
             EffectKind::NeonOutline => simple(self, enc, "neon_outline", base),
             EffectKind::GamingReframe916 => self.reframe_916(enc, src, size, base, resize),
             EffectKind::GaussianBlur => self.gaussian_blur(enc, src, size, base, v[0] * v[1] * k, v[0] * v[2] * k),
@@ -2535,5 +2540,19 @@ mod tests {
         let b = shake_transform(&e, 0.9);
         assert_ne!(a, b, "shake moves over time");
         assert!(a[0].abs() < 0.05 && a[1].abs() < 0.05 && a[3] >= 1.0);
+    }
+
+    #[test]
+    fn a_decaying_shake_counts_from_its_trigger_not_the_timeline() {
+        let p = nle_core::MontagePreset::find("Hard Kill Impact").unwrap();
+        let mut c = nle_core::Clip::gap(nle_core::Time::from_secs(20));
+        p.apply_to_clip(&mut c, nle_core::Time::from_secs(12));
+        let shake = c.effects.iter().find(|e| e.kind == EffectKind::CameraShake).unwrap();
+        let at = |ms: i64| shake_transform(&shake.resolve(nle_core::Time::from_millis(ms)), 27.0);
+        // the zoom punch is the envelope: 1.08 at the hit, gone well after it
+        assert_eq!(at(11_900), [0.0, 0.0, 0.0, 1.0], "nothing before the hit");
+        assert!(at(12_000)[3] > 1.08, "full punch on the hit, even 27 s into the timeline: {:?}", at(12_000));
+        assert!(at(12_100)[3] < at(12_000)[3] && at(12_100)[3] > 1.0, "decaying");
+        assert!(at(12_600)[3] < 1.001, "settled: {:?}", at(12_600));
     }
 }

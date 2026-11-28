@@ -334,7 +334,8 @@ fn impact_flash(@builtin(global_invocation_id) id: vec3<u32>) {
     let zoom = max(u.b.z, 1.0);
     let uv = mirror(vec2<f32>(0.5) + (uv0 - vec2<f32>(0.5)) / zoom);
     let base = textureSampleLevel(src, samp, uv, 0.0);
-    let decay = select(1.0, exp(-max(u.time, 0.0) * u.a.y), u.a.y > 0.01);
+    // u.time = seconds since the trigger; a decaying flash is dark before it
+    let decay = select(1.0, select(0.0, exp(-u.time * u.a.y), u.time >= 0.0), u.a.y > 0.01);
     let flash = clamp(u.a.x * decay, 0.0, 2.5);
     let vig_amt = clamp(u.b.y, 0.0, 1.0);
     let r2 = dot(uv0 - vec2<f32>(0.5), uv0 - vec2<f32>(0.5)) * 4.0;

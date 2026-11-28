@@ -471,11 +471,28 @@ pub struct Effect {
     /// Drive the effect's position from a clip track (Smart Reframe pan).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub track: Option<u64>,
+    /// Clip-local instant a one-shot effect fires (a preset dropped at the
+    /// playhead): shake decay and impact flash count their time from here.
+    #[serde(default, skip_serializing_if = "is_zero_time")]
+    pub trigger: Time,
+}
+
+fn is_zero_time(t: &Time) -> bool {
+    t.is_zero()
 }
 
 impl Effect {
     pub fn new(kind: EffectKind) -> Self {
-        Effect { id: new_effect_id(), kind, enabled: true, params: kind.params().iter().map(|d| Param::new(d.default)).collect(), from_preset: false, mask: None, track: None }
+        Effect {
+            id: new_effect_id(),
+            kind,
+            enabled: true,
+            params: kind.params().iter().map(|d| Param::new(d.default)).collect(),
+            from_preset: false,
+            mask: None,
+            track: None,
+            trigger: Time::ZERO,
+        }
     }
 
     /// A copy with its own id (pasting, duplicating).
@@ -508,7 +525,8 @@ impl Effect {
                 _ => v as f32,
             };
         }
-        ResolvedEffect { kind: self.kind, values, mask: self.mask.as_ref().map(|m| m.at(t).resolve()) }
+        let elapsed = (t - self.trigger).as_secs_f64() as f32;
+        ResolvedEffect { kind: self.kind, values, mask: self.mask.as_ref().map(|m| m.at(t).resolve()), elapsed }
     }
 }
 
@@ -518,6 +536,8 @@ pub struct ResolvedEffect {
     pub kind: EffectKind,
     pub values: [f32; MAX_EFFECT_PARAMS],
     pub mask: Option<crate::color::ResolvedMask>,
+    /// Seconds since the effect's trigger (negative before it fires).
+    pub elapsed: f32,
 }
 
 impl ResolvedEffect {

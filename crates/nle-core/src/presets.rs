@@ -618,6 +618,7 @@ impl MontagePreset {
             e.params = template.params.clone();
             e.enabled = template.enabled;
             e.from_preset = true;
+            e.trigger = at_local;
             e.normalize();
             if at_local.is_positive() {
                 for p in &mut e.params {
@@ -763,6 +764,33 @@ mod tests {
         assert!(MontagePreset::find("Valorant Vibrant Clean CC").is_some());
         assert!(MontagePreset::find("Operator / AWP Scope Pulse").is_some());
         assert!(MontagePreset::find("RSMB Clean Flick").is_some());
+    }
+
+    #[test]
+    fn a_preset_at_the_playhead_fires_its_hit_there() {
+        let p = MontagePreset::find("Hard Kill Impact").unwrap();
+        let mut c = Clip::gap(Time::from_secs(20));
+        p.apply_to_clip(&mut c, Time::from_secs(12));
+        let flash = c.effects.iter().find(|e| e.kind == EffectKind::ImpactFlash).unwrap();
+        assert_eq!(flash.trigger, Time::from_secs(12));
+        assert_eq!(flash.resolve(Time::from_secs(12)).elapsed, 0.0);
+        assert!((flash.resolve(Time::from_millis(12_250)).elapsed - 0.25).abs() < 1e-4);
+        assert!(flash.resolve(Time::from_secs(11)).elapsed < 0.0, "not fired yet");
+
+        // the trigger stays on the same frame through a split and a head trim
+        let (_, right) = c.split(Time::from_secs(10)).unwrap();
+        let flash = right.effects.iter().find(|e| e.kind == EffectKind::ImpactFlash).unwrap();
+        assert_eq!(flash.trigger, Time::from_secs(2));
+        let mut trimmed = c.clone();
+        trimmed.shift_keys(Time::ZERO - Time::from_secs(5));
+        assert_eq!(trimmed.effects.iter().find(|e| e.kind == EffectKind::ImpactFlash).unwrap().trigger, Time::from_secs(7));
+
+        // projects saved before triggers existed fire from the clip start
+        let mut json = serde_json::to_value(Effect::new(EffectKind::ImpactFlash)).unwrap();
+        assert!(json.get("trigger").is_none(), "a zero trigger is not written");
+        json.as_object_mut().unwrap().remove("trigger");
+        let old: Effect = serde_json::from_value(json).unwrap();
+        assert_eq!(old.trigger, Time::ZERO);
     }
 
     #[test]

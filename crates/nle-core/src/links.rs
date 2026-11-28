@@ -179,6 +179,7 @@ fn follow_pair(tl: &mut Timeline, cmd: &Command, p: &Pair) -> EditResult<()> {
                 param.keep_right(local);
                 param.keep_left(end);
             });
+            a.effects.iter_mut().for_each(|e| e.trigger -= local);
             if i > 0 {
                 a.audio.fade_in = Time::ZERO;
                 a.audio.crossfade_in = Time::ZERO;
@@ -189,6 +190,7 @@ fn follow_pair(tl: &mut Timeline, cmd: &Command, p: &Pair) -> EditResult<()> {
             }
         } else if !local.is_zero() {
             a.for_each_param_mut(|param| param.shift(-local));
+            a.effects.iter_mut().for_each(|e| e.trigger -= local);
         }
         a.anchor = (-h).max(Time::ZERO).min((a.duration - Time(1)).max(Time::ZERO));
         made.push((*v_start + h, a));

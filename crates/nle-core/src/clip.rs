@@ -1540,6 +1540,7 @@ impl Clip {
         self.for_each_param_mut(|p| p.shift(dt));
         self.color.corrections.iter_mut().for_each(|n| n.shift_keys(dt));
         self.effects.iter_mut().filter_map(|e| e.mask.as_mut()).for_each(|m| m.shift_keys(dt));
+        self.effects.iter_mut().for_each(|e| e.trigger += dt);
     }
 
     pub fn for_each_param_mut(&mut self, mut f: impl FnMut(&mut Param)) {
@@ -1595,6 +1596,7 @@ impl Clip {
         right.color.corrections.iter_mut().for_each(|n| n.keep_right(at));
         left.effects.iter_mut().filter_map(|e| e.mask.as_mut()).for_each(|m| m.keep_left(at));
         right.effects.iter_mut().filter_map(|e| e.mask.as_mut()).for_each(|m| m.keep_right(at));
+        right.effects.iter_mut().for_each(|e| e.trigger -= at);
 
         left.anchor = if self.anchor < at { self.anchor } else { Time::ZERO };
         right.anchor = if self.anchor >= at { self.anchor - at } else { Time::ZERO };
