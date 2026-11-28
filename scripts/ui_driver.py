@@ -26,6 +26,7 @@ Steps (arguments separated by spaces; quote a step that holds spaces):
                                NAME@FX,FY is a point inside a rect (0..1 each)
     drag FROM TO               press on FROM, move, release on TO (same targets)
     hover TARGET
+    scroll TARGET NOTCHES      wheel over TARGET; positive scrolls down (content moves up)
     seek SECONDS               type the playhead position into the viewer timecode
     import PATH                Ctrl+I, type the path into the file dialog
     save [PATH]                Ctrl+S (Save As into PATH when given), then 'saved'
@@ -167,7 +168,7 @@ def wheel(notches: int) -> None:
 # ----------------------------------------------------------------- the window
 
 # steps that send keyboard / mouse input (to the foreground window)
-INPUT_STEPS = {"key", "type", "hover", "click", "drag", "seek", "import", "save"}
+INPUT_STEPS = {"key", "type", "hover", "scroll", "click", "drag", "seek", "import", "save"}
 
 
 def find_window(pid: int) -> int:
@@ -593,6 +594,14 @@ class Driver:
 
     def do_hover(self, target):
         move_to(*self.point(target))
+        self._after_input()
+
+    def do_scroll(self, target, notches):
+        move_to(*self.point(target))
+        time.sleep(0.05)
+        for _ in range(abs(int(notches))):
+            wheel(-1 if int(notches) > 0 else 1)
+            time.sleep(0.03)
         self._after_input()
 
     def do_click(self, target, *mods):
