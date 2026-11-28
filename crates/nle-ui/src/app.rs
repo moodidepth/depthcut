@@ -3597,6 +3597,7 @@ impl eframe::App for App {
                 self.status(format!("Autosave failed: {e}"));
             }
         }
+        crate::widgets::name_unlabelled_combos(ctx);
         crate::debug_dump::tick(self, ctx);
         self.text_focus_last_frame = ctx.wants_keyboard_input();
         // keep decoding/thumbnail jobs flowing

@@ -100,9 +100,6 @@ pub fn slider_f32(ui: &mut egui::Ui, label: &str, v: &mut f32, range: std::ops::
     .inner
 }
 
-/// Picker for the audio track a multi-track recording plays (Medal / OBS
-/// clips keep the game, voice chat and the mic apart). Returns the track
-/// clicked, if it differs from `selected`.
 /// Names a combo box after the label beside it and exposes its choice, for
 /// screen readers and the UI driver: a `ComboBox::from_id_salt` has neither.
 pub fn name_combo(combo: &egui::Response, label: &egui::Response, value: &str) {
@@ -110,6 +107,61 @@ pub fn name_combo(combo: &egui::Response, label: &egui::Response, value: &str) {
     combo.ctx.accesskit_node_builder(combo.id, |b| b.set_value(value));
 }
 
+/// Names a widget and exposes its current value, for screen readers and the
+/// UI driver, where no label sits beside it.
+pub fn describe(r: &egui::Response, label: impl Into<String>, value: impl Into<String>) {
+    let (label, value) = (label.into(), value.into());
+    r.ctx.accesskit_node_builder(r.id, |n| {
+        n.set_label(label);
+        n.set_value(value);
+    });
+}
+
+/// Gives every combo box that is still nameless this frame the name of the
+/// text label beside it (left on the same row, else just above), so screen
+/// readers and the UI driver can tell "Codec" from "Resolution". Runs after
+/// the UI is built; does nothing unless accesskit is on.
+pub fn name_unlabelled_combos(ctx: &egui::Context) {
+    use egui::accesskit::{Rect, Role};
+    let (combos, labels): (Vec<(egui::Id, Rect)>, Vec<(Rect, String)>) = ctx.viewport(|v| {
+        let Some(state) = v.this_pass.accesskit_state.as_ref() else { return Default::default() };
+        let mut combos = Vec::new();
+        let mut labels = Vec::new();
+        for (id, n) in state.nodes.iter() {
+            let Some(b) = n.bounds() else { continue };
+            match n.role() {
+                Role::ComboBox if n.label().is_none_or(|l| l.trim().is_empty()) && n.labelled_by().is_empty() => combos.push((*id, b)),
+                // egui keeps a label's text in the node's value
+                Role::Label => {
+                    if let Some(l) = n.label().or(n.value()).map(str::trim).filter(|l| !l.is_empty() && l.chars().count() <= 40) {
+                        labels.push((b, l.to_string()));
+                    }
+                }
+                _ => {}
+            }
+        }
+        (combos, labels)
+    });
+    for (id, c) in combos {
+        if let Some(name) = nearest_label(c, &labels) {
+            ctx.accesskit_node_builder(id, |n| n.set_label(name));
+        }
+    }
+}
+
+/// The label left of `c` on its row (closest first, within 320 px), else
+/// the one right above it.
+fn nearest_label(c: egui::accesskit::Rect, labels: &[(egui::accesskit::Rect, String)]) -> Option<String> {
+    let cy = (c.y0 + c.y1) * 0.5;
+    let left =
+        labels.iter().filter(|(b, _)| b.x1 <= c.x0 + 2.0 && c.x0 - b.x1 < 320.0 && cy >= b.y0 - 2.0 && cy <= b.y1 + 2.0).min_by(|a, b| (c.x0 - a.0.x1).total_cmp(&(c.x0 - b.0.x1)));
+    let above = || labels.iter().filter(|(b, _)| b.y1 <= c.y0 + 2.0 && c.y0 - b.y1 < 24.0 && b.x0 < c.x1 && b.x1 > c.x0).min_by(|a, b| (c.y0 - a.0.y1).total_cmp(&(c.y0 - b.0.y1)));
+    left.or_else(above).map(|(_, l)| l.trim_end_matches(':').to_string())
+}
+
+/// Picker for the audio track a multi-track recording plays (Medal / OBS
+/// clips keep the game, voice chat and the mic apart). Returns the track
+/// clicked, if it differs from `selected`.
 pub fn audio_track_combo(ui: &mut egui::Ui, salt: impl std::hash::Hash, tracks: &[AudioTrackInfo], selected: usize) -> Option<usize> {
     let mut pick = selected;
     let current = tracks.get(selected).map(|t| t.label()).unwrap_or_else(|| "Track 0".into());
@@ -241,6 +293,21 @@ pub fn secs_label(t: Time) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_combo_takes_the_label_on_its_left_or_above() {
+        use egui::accesskit::Rect;
+        let r = |x0, y0, x1, y1| Rect { x0, y0, x1, y1 };
+        let labels = vec![
+            (r(10.0, 100.0, 90.0, 118.0), "Video codec".to_string()),
+            (r(10.0, 130.0, 90.0, 148.0), "Resolution:".to_string()),
+            (r(400.0, 60.0, 460.0, 76.0), "Model".to_string()),
+        ];
+        assert_eq!(nearest_label(r(100.0, 98.0, 340.0, 120.0), &labels).as_deref(), Some("Video codec"));
+        assert_eq!(nearest_label(r(100.0, 128.0, 340.0, 150.0), &labels).as_deref(), Some("Resolution"));
+        assert_eq!(nearest_label(r(400.0, 80.0, 600.0, 100.0), &labels).as_deref(), Some("Model"));
+        assert_eq!(nearest_label(r(100.0, 300.0, 340.0, 320.0), &labels), None);
+    }
 
     #[test]
     fn color_well_leaves_an_untouched_colour_alone() {

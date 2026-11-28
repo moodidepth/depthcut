@@ -78,7 +78,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 None => "Fit".to_string(),
                 Some(z) => format!("{:.0}%", z * 100.0),
             };
-            egui::ComboBox::from_id_salt("viewer-zoom").selected_text(zl).width(64.0).show_ui(ui, |ui| {
+            let zoom = egui::ComboBox::from_id_salt("viewer-zoom").selected_text(zl.clone()).width(64.0).show_ui(ui, |ui| {
                 let mut picked = ui.selectable_value(&mut app.viewer.zoom, None, "Fit").clicked();
                 for z in [0.25f32, 0.5, 1.0, 2.0] {
                     picked |= ui.selectable_value(&mut app.viewer.zoom, Some(z), format!("{:.0}%", z * 100.0)).clicked();
@@ -86,6 +86,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 if picked {
                     app.viewer.pan = Vec2::ZERO;
                 }
+            });
+            ui.ctx().accesskit_node_builder(zoom.response.id, |n| {
+                n.set_label("Viewer zoom");
+                n.set_value(zl);
             });
             ui.menu_button("View ▾", |ui| {
                 ui.checkbox(&mut app.viewer.safe_zones, "Title/Action Safe Zones");

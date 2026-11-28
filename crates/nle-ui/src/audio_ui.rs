@@ -234,22 +234,24 @@ pub fn eq_editor(ui: &mut egui::Ui, eq: &mut ParametricEq, id: egui::Id) {
             ui.add_enabled_ui(flt.enabled, |ui| {
                 let speed = flt.freq * 0.01;
                 ui.add(egui::DragValue::new(&mut flt.freq).range(20.0..=20_000.0).speed(speed).custom_formatter(|v, _| freq_label(v as f32)));
-                egui::ComboBox::from_id_salt(id.with(("slope", sel))).selected_text(flt.slope.label()).show_ui(ui, |ui| {
+                let slope = egui::ComboBox::from_id_salt(id.with(("slope", sel))).selected_text(flt.slope.label()).show_ui(ui, |ui| {
                     for s in FilterSlope::ALL {
                         ui.selectable_value(&mut flt.slope, s, s.label());
                     }
                 });
+                crate::widgets::describe(&slope.response, if sel == HPF { "High-pass slope" } else { "Low-pass slope" }, flt.slope.label());
             });
         }
         _ => {
             let b = &mut eq.bands[sel - 1];
             ui.checkbox(&mut b.enabled, format!("Band {sel}"));
             ui.add_enabled_ui(b.enabled, |ui| {
-                egui::ComboBox::from_id_salt(id.with(("type", sel))).selected_text(b.kind.label()).width(84.0).show_ui(ui, |ui| {
+                let kind = egui::ComboBox::from_id_salt(id.with(("type", sel))).selected_text(b.kind.label()).width(84.0).show_ui(ui, |ui| {
                     for k in EqBandType::ALL {
                         ui.selectable_value(&mut b.kind, k, k.label());
                     }
                 });
+                crate::widgets::describe(&kind.response, format!("Band {sel} type"), b.kind.label());
                 let speed = b.freq * 0.01;
                 ui.add(egui::DragValue::new(&mut b.freq).range(20.0..=20_000.0).speed(speed).custom_formatter(|v, _| freq_label(v as f32)));
                 if b.kind.has_gain() {

@@ -1393,7 +1393,8 @@ fn project_settings(app: &mut App, ui: &mut egui::Ui) {
         });
         ui.horizontal(|ui| {
             ui.label("Format");
-            egui::ComboBox::from_id_salt("fmt").selected_text(format!("{}×{}", f.width, f.height)).show_ui(ui, |ui| {
+            let size = format!("{}×{}", f.width, f.height);
+            let size_combo = egui::ComboBox::from_id_salt("fmt").selected_text(size.clone()).show_ui(ui, |ui| {
                 for (w, h, l) in [
                     (1280, 720, "720p HD"),
                     (1920, 1080, "1080p HD"),
@@ -1409,7 +1410,8 @@ fn project_settings(app: &mut App, ui: &mut egui::Ui) {
                     }
                 }
             });
-            egui::ComboBox::from_id_salt("rate").selected_text(f.rate.label()).show_ui(ui, |ui| {
+            crate::widgets::describe(&size_combo.response, "Frame size", size);
+            let rate = egui::ComboBox::from_id_salt("rate").selected_text(f.rate.label()).show_ui(ui, |ui| {
                 for r in FrameRate::PRESETS {
                     if ui.selectable_label(f.rate == r, r.label()).clicked() {
                         nf.rate = r;
@@ -1417,6 +1419,7 @@ fn project_settings(app: &mut App, ui: &mut egui::Ui) {
                     }
                 }
             });
+            crate::widgets::describe(&rate.response, "Frame rate", f.rate.label());
         });
     });
     if changed {
