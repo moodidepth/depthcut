@@ -239,7 +239,8 @@ pub fn rasterize(p: &TitleParams, anim: &TitleAnim, frame_w: u32, frame_h: u32, 
     };
     let main_scale = PxScale::from((p.font_size * k).max(4.0));
     let sub_scale = PxScale::from((p.font_size * k * 0.55).max(4.0));
-    let tracking = (p.tracking + anim.tracking_add) * k;
+    let base_tracking = p.tracking * k;
+    let mut tracking = base_tracking + anim.tracking_add * k;
 
     let mut lines = Vec::new();
     let (mut row, mut word) = (0usize, 0usize);
@@ -261,6 +262,21 @@ pub fn rasterize(p: &TitleParams, anim: &TitleAnim, frame_w: u32, frame_h: u32, 
         }
     }
     let rows = row;
+    let gap = main_scale.y * 0.6;
+    // an animated tracking spread (Tracking Expand) stops growing before the
+    // widest line leaves the frame, so a long title never spreads off both edges
+    if anim.tracking_add > 0.0 && p.roll == RollMode::None {
+        let room = frame_w as f32 * 0.92;
+        for l in &lines {
+            let gaps = l.text.chars().count().saturating_sub(1) as f32;
+            if gaps == 0.0 {
+                continue;
+            }
+            let (mul, extra) = if l.col == Col::Center { (1.0, 0.0) } else { (2.0, gap) };
+            let max_add = ((room - mul * line_width(l, base_tracking) - extra) / (mul * gaps)).max(0.0);
+            tracking = tracking.min(base_tracking + max_add);
+        }
+    }
     let widths: Vec<f32> = lines.iter().map(|l| line_width(l, tracking)).collect();
     let heights: Vec<f32> = lines
         .iter()
@@ -269,7 +285,6 @@ pub fn rasterize(p: &TitleParams, anim: &TitleAnim, frame_w: u32, frame_h: u32, 
             s.ascent() - s.descent() + s.line_gap()
         })
         .collect();
-    let gap = main_scale.y * 0.6;
     let (mut row_h, mut row_w) = (vec![0f32; rows], vec![0f32; rows]);
     for (i, l) in lines.iter().enumerate() {
         row_h[l.row] = row_h[l.row].max(heights[i]);
@@ -593,6 +608,30 @@ mod tests {
         // without a dim colour nothing is dimmed
         let plain = rasterize(&p, &a, 1920, 1080, &fonts).unwrap();
         assert!((0..plain.height).all(|y| (0..plain.width).all(|x| plain.dimmed(x, y) == 0)));
+    }
+
+    #[test]
+    fn tracking_expand_stays_inside_the_frame() {
+        let fonts = FontBook::system();
+        if !fonts.has_fonts() {
+            return;
+        }
+        let anim = TitleAnim { tracking_add: 40.0, ..Default::default() };
+        // a long title at full spread fits the frame instead of running off both edges
+        let long = TitleParams { text: "IT CAN'T COME QUICKLY ENOUGH".into(), font_size: 96.0, ..Default::default() };
+        let base = rasterize(&long, &TitleAnim::default(), 1920, 1080, &fonts).unwrap();
+        let spread = rasterize(&long, &anim, 1920, 1080, &fonts).unwrap();
+        assert!(spread.width > base.width, "still spreads: {} vs {}", spread.width, base.width);
+        assert!(spread.rect[0] >= 0.0 && spread.rect[0] + spread.rect[2] <= 1920.0, "inside the frame: {:?}", spread.rect);
+        // a short word still gets the full 40 px spread
+        let short = TitleParams { text: "ACE".into(), font_size: 96.0, ..Default::default() };
+        let w0 = rasterize(&short, &TitleAnim::default(), 1920, 1080, &fonts).unwrap().width as f32;
+        let w1 = rasterize(&short, &anim, 1920, 1080, &fonts).unwrap().width as f32;
+        assert!((w1 - w0 - 80.0).abs() < 2.0, "two gaps × 40 px: {w0} -> {w1}");
+        // on a 1080-wide Short the line is already too wide, so it doesn't spread any further
+        let port0 = rasterize(&long, &TitleAnim::default(), 1080, 1920, &fonts).unwrap();
+        let port = rasterize(&long, &anim, 1080, 1920, &fonts).unwrap();
+        assert_eq!(port.width, port0.width);
     }
 
     #[test]
