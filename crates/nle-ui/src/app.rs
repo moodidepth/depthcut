@@ -1030,12 +1030,14 @@ impl App {
         self.project.timeline.free_lane(1, at, dur)
     }
 
+    /// Adds an adjustment clip. With clips selected it spans exactly the selection, so one grade can
+    /// cover a whole edit; otherwise it is 5 s long at the playhead.
     pub fn add_adjustment_clip(&mut self) {
-        let dur = Time::from_secs(5);
+        let (at, dur) = self.selection_span().unwrap_or((self.playhead, Time::from_secs(5)));
         let clip = Clip::adjustment(dur);
         let id = clip.id;
-        let lane = self.free_lane_above(self.playhead, dur);
-        let added = if self.project.timeline.spine.is_empty() { self.exec(Command::Append { clip }) } else { self.exec(Command::Connect { clip, at: self.playhead, lane }) };
+        let lane = self.free_lane_above(at, dur);
+        let added = if self.project.timeline.spine.is_empty() { self.exec(Command::Append { clip }) } else { self.exec(Command::Connect { clip, at, lane }) };
         // select it so the inspector shows what was just added
         if added && self.project.timeline.clip(id).is_some() {
             self.selection = vec![id];
@@ -1043,6 +1045,20 @@ impl App {
         if matches!(self.inspector_tab, InspectorTab::Audio | InspectorTab::TitlesTransitions) {
             self.inspector_tab = InspectorTab::Video;
         }
+    }
+
+    /// Start and length of the timeline range the selected top-level clips cover.
+    fn selection_span(&self) -> Option<(Time, Time)> {
+        let placed = self.project.timeline.placed_clips();
+        let mut span: Option<(Time, Time)> = None;
+        for p in placed.iter().filter(|p| self.selection.contains(&p.clip.id)) {
+            let end = p.start + p.clip.duration;
+            span = Some(match span {
+                Some((s, e)) => (s.min(p.start), e.max(end)),
+                None => (p.start, end),
+            });
+        }
+        span.filter(|(s, e)| *e > *s).map(|(s, e)| (s, e - s))
     }
 
     pub fn insert_gap(&mut self) {
