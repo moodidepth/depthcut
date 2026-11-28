@@ -4,7 +4,7 @@
 //! over a channel and are turned into egui textures on the UI thread.
 
 use eframe::egui;
-use nle_core::{AssetId, MediaAsset, Time};
+use nle_core::{AssetId, AudioTrackInfo, MediaAsset, Time};
 use nle_media::proxy::{ProxyManager, ProxyStatus};
 use nle_media::thumbnails::{self, Filmstrip};
 use nle_media::{peaks, probe, AudioBuffer, PeakBuffer, Waveform};
@@ -39,14 +39,22 @@ enum JobResult {
     },
     Audio {
         asset: AssetId,
+        /// Audio stream the buffer was decoded from.
+        stream: usize,
         buffer: Arc<AudioBuffer>,
         waveform: Arc<Waveform>,
         loudness_lufs: Option<f32>,
     },
     Peaks {
         asset: AssetId,
+        stream: usize,
         peaks: Arc<PeakBuffer>,
         transients: Arc<Vec<Time>>,
+    },
+    /// Audio tracks of an asset saved before track selection existed.
+    Tracks {
+        asset: AssetId,
+        tracks: Vec<AudioTrackInfo>,
     },
     Failed {
         asset: AssetId,
@@ -80,6 +88,8 @@ pub enum MediaEvent {
     /// Probe result for an asset already in the project.
     Refreshed(AssetId, MediaAsset),
     AudioReady(AssetId, Arc<AudioBuffer>, Option<f32>),
+    /// The audio tracks of a multi-track file (two or more).
+    AudioTracks(AssetId, Vec<AudioTrackInfo>),
     Message(String),
 }
 
@@ -95,6 +105,8 @@ pub struct MediaLibrary {
     pub audio: HashMap<AssetId, Arc<AudioBuffer>>,
     pub failed: HashMap<AssetId, String>,
     requested: HashSet<(AssetId, u8)>,
+    /// Audio stream each asset's audio jobs decode; results for another are stale.
+    streams: HashMap<AssetId, usize>,
     pub proxies: ProxyManager,
     pub importing: usize,
     proxy_seen: HashMap<AssetId, PathBuf>,
@@ -119,6 +131,7 @@ impl MediaLibrary {
             audio: HashMap::new(),
             failed: HashMap::new(),
             requested: HashSet::new(),
+            streams: HashMap::new(),
             proxies: ProxyManager::new(),
             importing: 0,
             proxy_seen: HashMap::new(),
@@ -163,6 +176,19 @@ impl MediaLibrary {
         self.audio.remove(&id);
         self.failed.remove(&id);
         self.requested.retain(|(a, _)| *a != id);
+        self.streams.remove(&id);
+    }
+
+    /// Drop an asset's decoded audio, waveform and peaks (another audio track
+    /// was picked), so [`Self::ensure`] decodes it again. Thumbnails stay.
+    pub fn forget_audio(&mut self, id: AssetId) {
+        self.waveforms.remove(&id);
+        self.peaks.remove(&id);
+        self.transients.remove(&id);
+        self.audio.remove(&id);
+        self.failed.remove(&id);
+        self.requested.remove(&(id, 1));
+        self.streams.remove(&id);
     }
 
     /// Queue thumbnails and audio analysis for an asset (once).
@@ -182,14 +208,26 @@ impl MediaLibrary {
             // Video-only clip: an empty peak buffer, never an error.
             self.peaks.entry(asset.id).or_insert_with(|| Arc::new(PeakBuffer::empty()));
         }
+        if asset.has_audio() && asset.audio_streams.is_empty() && !probe::is_synthetic(asset) && self.requested.insert((asset.id, 2)) {
+            // a project saved before track selection: look for extra tracks
+            let tx = self.tx.clone();
+            let (id, path) = (asset.id, asset.path.clone());
+            rayon::spawn(move || {
+                if let Some(tracks) = probe::audio_tracks(&path).filter(|t| t.len() > 1) {
+                    let _ = tx.send(JobResult::Tracks { asset: id, tracks });
+                }
+            });
+        }
         if asset.has_audio() && self.requested.insert((asset.id, 1)) {
             let tx = self.tx.clone();
             let a = asset.clone();
+            let stream = a.audio_stream_index();
+            self.streams.insert(a.id, stream);
             rayon::spawn(move || {
                 // Cached peaks show the waveform before the audio is decoded.
-                let cached = peaks::load_cached(&a.path);
+                let cached = peaks::load_cached_stream(&a.path, stream);
                 if let Some(pk) = &cached {
-                    let _ = tx.send(peaks_result(a.id, pk.clone()));
+                    let _ = tx.send(peaks_result(a.id, stream, pk.clone()));
                 }
                 let decoded = if probe::is_synthetic(&a) {
                     Ok(nle_media::audio::decode::synthetic_audio(&a, nle_media::audio::resample::INTERNAL_RATE))
@@ -200,14 +238,14 @@ impl MediaLibrary {
                     Ok(buf) => {
                         if cached.is_none() {
                             let pk = PeakBuffer::from_audio(&buf);
-                            if let Err(e) = peaks::store_cached(&a.path, &pk) {
+                            if let Err(e) = peaks::store_cached_stream(&a.path, stream, &pk) {
                                 log::warn!("waveform cache for {}: {e}", a.name);
                             }
-                            let _ = tx.send(peaks_result(a.id, pk));
+                            let _ = tx.send(peaks_result(a.id, stream, pk));
                         }
                         let waveform = Arc::new(Waveform::compute(&buf, WAVE_BUCKETS_PER_SEC));
                         let loudness_lufs = nle_media::analysis::integrated_lufs(&buf.samples, buf.channels as usize, buf.sample_rate);
-                        JobResult::Audio { asset: a.id, buffer: Arc::new(buf), waveform, loudness_lufs }
+                        JobResult::Audio { asset: a.id, stream, buffer: Arc::new(buf), waveform, loudness_lufs }
                     }
                     Err(e) => JobResult::Failed { asset: a.id, what: "audio", error: e.to_string() },
                 };
@@ -267,16 +305,20 @@ impl MediaLibrary {
                     }
                     self.filmstrips.insert(asset, StripTextures { interval: strip.interval, frames, aspect });
                 }
-                JobResult::Audio { asset, buffer, waveform, loudness_lufs } => {
+                JobResult::Audio { asset, stream, .. } | JobResult::Peaks { asset, stream, .. } if self.streams.get(&asset) != Some(&stream) => {
+                    // decoded from a track that is no longer selected
+                }
+                JobResult::Audio { asset, buffer, waveform, loudness_lufs, .. } => {
                     self.waveforms.insert(asset, waveform);
                     self.audio.insert(asset, buffer.clone());
                     events.push(MediaEvent::AudioReady(asset, buffer, loudness_lufs));
                 }
-                JobResult::Peaks { asset, peaks, transients } => {
+                JobResult::Peaks { asset, peaks, transients, .. } => {
                     self.peaks.insert(asset, peaks);
                     self.transients.insert(asset, transients);
                     ctx.request_repaint();
                 }
+                JobResult::Tracks { asset, tracks } => events.push(MediaEvent::AudioTracks(asset, tracks)),
                 JobResult::Failed { asset, what, error } => {
                     log::warn!("{what} for asset {}: {error}", asset.0);
                     self.failed.insert(asset, format!("{what}: {error}"));
@@ -290,9 +332,9 @@ impl MediaLibrary {
     }
 }
 
-fn peaks_result(asset: AssetId, peaks: PeakBuffer) -> JobResult {
+fn peaks_result(asset: AssetId, stream: usize, peaks: PeakBuffer) -> JobResult {
     let transients = peaks.transients().into_iter().map(Time::from_secs_f64).collect();
-    JobResult::Peaks { asset, peaks: Arc::new(peaks), transients: Arc::new(transients) }
+    JobResult::Peaks { asset, stream, peaks: Arc::new(peaks), transients: Arc::new(transients) }
 }
 
 /// Base folder [`data_dir`] lives in (`%APPDATA%` on Windows).

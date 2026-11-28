@@ -2,7 +2,7 @@
 
 use crate::theme;
 use eframe::egui::{self, Color32, Pos2, Sense, Stroke, Vec2};
-use nle_core::{ColorWheel, Param, Time};
+use nle_core::{AudioTrackInfo, ColorWheel, Param, Time};
 
 /// Display mapping for a parameter (`shown = value * scale`).
 pub struct ParamSpec {
@@ -98,6 +98,32 @@ pub fn slider_f32(ui: &mut egui::Ui, label: &str, v: &mut f32, range: std::ops::
         ui.add(egui::Slider::new(v, range).suffix(suffix)).changed()
     })
     .inner
+}
+
+/// Picker for the audio track a multi-track recording plays (Medal / OBS
+/// clips keep the game, voice chat and the mic apart). Returns the track
+/// clicked, if it differs from `selected`.
+pub fn audio_track_combo(ui: &mut egui::Ui, salt: impl std::hash::Hash, tracks: &[AudioTrackInfo], selected: usize) -> Option<usize> {
+    let mut pick = selected;
+    let current = tracks.get(selected).map(|t| t.label()).unwrap_or_else(|| "Track 0".into());
+    egui::ComboBox::from_id_salt(salt)
+        .selected_text(current)
+        .width(220.0)
+        .show_ui(ui, |ui| {
+            for t in tracks {
+                let ch = match t.channels {
+                    1 => "mono".to_string(),
+                    2 => "stereo".to_string(),
+                    n => format!("{n} ch"),
+                };
+                ui.selectable_value(&mut pick, t.index, format!("{} · {ch}", t.label()));
+            }
+        })
+        .response
+        .on_hover_text(
+            "Which audio track of the file plays, shows as a waveform and is analysed (kills, beats, loudness). Pick the game track to leave voice chat and the mic out.",
+        );
+    (pick != selected).then_some(pick)
 }
 
 /// A colour button that writes back only what the user picks. egui's own

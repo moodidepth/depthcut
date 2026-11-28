@@ -126,6 +126,11 @@ impl AudioEngine {
         self.shared.mixer.lock().set_source(asset, buf);
     }
 
+    /// Forget one asset's audio (another audio track was picked).
+    pub fn remove_source(&self, asset: AssetId) {
+        self.shared.mixer.lock().remove_source(asset);
+    }
+
     /// Forget every asset's audio (project switch).
     pub fn clear_sources(&self) {
         self.shared.mixer.lock().clear_sources();

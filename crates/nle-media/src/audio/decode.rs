@@ -16,17 +16,10 @@ pub fn decode_audio(asset: &MediaAsset) -> Result<AudioBuffer, MediaError> {
     if !ffmpeg_cli::available() {
         return Err(MediaError::FfmpegMissing);
     }
-    let out = ffmpeg_cli::output_confined(ffmpeg_cli::command(&ffmpeg_cli::ffmpeg_path()).args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"]).arg(&asset.path).args([
-        "-map",
-        "0:a:0",
-        "-vn",
-        "-f",
-        "f32le",
-        "-acodec",
-        "pcm_f32le",
-        "pipe:1",
-    ]))
-    .map_err(MediaError::Io)?;
+    // the selected track of a multi-track recording (game audio without voice chat)
+    let mut cmd = ffmpeg_cli::command(&ffmpeg_cli::ffmpeg_path());
+    cmd.args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"]).arg(&asset.path).args(["-map", &asset.audio_map(), "-vn"]);
+    let out = ffmpeg_cli::output_confined(cmd.args(["-f", "f32le", "-acodec", "pcm_f32le", "pipe:1"])).map_err(MediaError::Io)?;
     if !out.status.success() && out.stdout.is_empty() {
         return Err(MediaError::Decode(format!("audio decode failed for {}", asset.path.display())));
     }

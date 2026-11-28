@@ -91,6 +91,35 @@ pub struct AudioStreamInfo {
     pub codec: String,
 }
 
+/// One audio stream of a file with several (OBS / Medal recordings keep the
+/// full mix, the game, voice chat and the microphone on separate tracks).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AudioTrackInfo {
+    /// 0-based index among the file's audio streams (`-map 0:a:{index}`).
+    pub index: usize,
+    /// Track title from the file's tags (may be empty).
+    #[serde(default)]
+    pub name: String,
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub codec: String,
+}
+
+impl AudioTrackInfo {
+    pub fn info(&self) -> AudioStreamInfo {
+        AudioStreamInfo { sample_rate: self.sample_rate, channels: self.channels, codec: self.codec.clone() }
+    }
+
+    /// `Track 1: VALORANT-Win64-Shipping` (or `Track 1` when untitled).
+    pub fn label(&self) -> String {
+        if self.name.trim().is_empty() {
+            format!("Track {}", self.index)
+        } else {
+            format!("Track {}: {}", self.index, self.name.trim())
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AssetKind {
     #[default]
@@ -112,7 +141,15 @@ pub struct MediaAsset {
     pub kind: AssetKind,
     pub duration: Time,
     pub video: Option<VideoStreamInfo>,
+    /// The audio stream clips of this item play (`audio_streams[selected]`).
     pub audio: Option<AudioStreamInfo>,
+    /// Every audio stream of the file, when probed (empty in projects saved
+    /// before multi-track support: those play the first stream).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audio_streams: Vec<AudioTrackInfo>,
+    /// Index into `audio_streams` of the track that is decoded and played.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub selected_audio_stream: usize,
     #[serde(default)]
     pub tags: Vec<String>,
     #[serde(default)]
@@ -272,6 +309,8 @@ impl MediaAsset {
             duration,
             video: None,
             audio: None,
+            audio_streams: Vec::new(),
+            selected_audio_stream: 0,
             tags: Vec::new(),
             favorite: false,
             rejected: false,
@@ -328,6 +367,29 @@ impl MediaAsset {
         self.audio.is_some()
     }
 
+    /// The audio stream that is decoded: the selected one when it exists,
+    /// else the first (old projects and single-track files).
+    pub fn audio_stream_index(&self) -> usize {
+        self.audio_streams.get(self.selected_audio_stream).map_or(0, |t| t.index)
+    }
+
+    /// ffmpeg `-map` specifier of the decoded audio stream (`0:a:1`).
+    pub fn audio_map(&self) -> String {
+        format!("0:a:{}", self.audio_stream_index())
+    }
+
+    /// Play audio stream `i` of `audio_streams`; `false` (and no change) when
+    /// there is no such stream or it is already selected.
+    pub fn select_audio_stream(&mut self, i: usize) -> bool {
+        let Some(t) = self.audio_streams.get(i) else { return false };
+        if i == self.selected_audio_stream && self.audio.as_ref() == Some(&t.info()) {
+            return false;
+        }
+        self.audio = Some(t.info());
+        self.selected_audio_stream = i;
+        true
+    }
+
     pub fn frame_rate(&self) -> FrameRate {
         self.video.as_ref().map(|v| v.frame_rate).unwrap_or_default()
     }
@@ -375,9 +437,59 @@ impl MediaAsset {
     }
 }
 
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn track(index: usize, name: &str, channels: u16) -> AudioTrackInfo {
+        AudioTrackInfo { index, name: name.into(), sample_rate: 48_000, channels, codec: "aac".into() }
+    }
+
+    #[test]
+    fn selecting_an_audio_stream_switches_what_is_decoded() {
+        let mut a = MediaAsset::new("clip", "/x/clip.mp4", Time::from_secs(10));
+        // nothing probed (old project): the first stream, unchangeable
+        assert_eq!(a.audio_map(), "0:a:0");
+        assert!(!a.select_audio_stream(1));
+        a.audio_streams = vec![track(0, "All Audio", 2), track(1, "VALORANT-Win64-Shipping", 2), track(2, "Microphone", 1)];
+        a.audio = Some(a.audio_streams[0].info());
+        assert!(!a.select_audio_stream(0), "already playing");
+        assert!(a.select_audio_stream(2));
+        assert_eq!((a.selected_audio_stream, a.audio_map()), (2, "0:a:2".to_string()));
+        assert_eq!(a.audio.as_ref().map(|i| i.channels), Some(1));
+        assert!(!a.select_audio_stream(7), "no such stream");
+        assert_eq!(a.audio_map(), "0:a:2");
+        assert_eq!(a.audio_streams[1].label(), "Track 1: VALORANT-Win64-Shipping");
+        assert_eq!(track(3, " ", 2).label(), "Track 3");
+        // a stale selection past the probed streams falls back to the first
+        a.selected_audio_stream = 9;
+        assert_eq!(a.audio_map(), "0:a:0");
+    }
+
+    #[test]
+    fn audio_streams_round_trip_and_old_projects_still_load() {
+        let mut a = MediaAsset::new("clip", "/x/clip.mp4", Time::from_secs(10));
+        a.audio_streams = vec![track(0, "All Audio", 2), track(1, "Game", 2)];
+        a.select_audio_stream(1);
+        let json = serde_json::to_string(&a).unwrap();
+        let back: MediaAsset = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, a);
+        // a project written before multi-track support has neither field
+        let mut v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let o = v.as_object_mut().unwrap();
+        o.remove("audio_streams");
+        o.remove("selected_audio_stream");
+        let old: MediaAsset = serde_json::from_value(v).unwrap();
+        assert!(old.audio_streams.is_empty());
+        assert_eq!((old.selected_audio_stream, old.audio_map()), (0, "0:a:0".to_string()));
+        // a single-stream asset writes neither field
+        let plain = serde_json::to_string(&MediaAsset::new("b", "/x/b.wav", Time::from_secs(1))).unwrap();
+        assert!(!plain.contains("audio_streams") && !plain.contains("selected_audio_stream"));
+    }
 
     fn info(w: u32, h: u32, depth: u8, space: &str, prim: &str) -> VideoStreamInfo {
         VideoStreamInfo {

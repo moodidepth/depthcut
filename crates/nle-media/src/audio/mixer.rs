@@ -399,6 +399,15 @@ impl TimelineMixer {
         self.refresh_restored();
     }
 
+    /// Drop one asset's audio and the restorations rendered from it (another
+    /// audio track of the file was picked); its clips are silent until the new
+    /// decode arrives through [`Self::set_source`].
+    pub fn remove_source(&mut self, asset: AssetId) {
+        self.sources.remove(&asset);
+        self.restored.retain(|_, r| r.key.asset != asset);
+        self.refresh_restored();
+    }
+
     /// Drop all audio of the project being left: its ids are reused by the next.
     pub fn clear_sources(&mut self) {
         self.sources.clear();

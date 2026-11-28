@@ -74,6 +74,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let mut punch_request: Option<bool> = None;
     let mut set_role: Option<AudioRole> = None;
     let asset_lufs = if let ClipKind::Asset { asset } = &c.kind { app.asset_loudness_lufs(*asset) } else { None };
+    // multi-track recordings (Medal / OBS): which track the clip's asset plays
+    let asset_tracks = match &c.kind {
+        ClipKind::Asset { asset } => app.project.asset(*asset).filter(|a| a.audio_streams.len() > 1).map(|a| (a.id, a.audio_streams.clone(), a.selected_audio_stream)),
+        _ => None,
+    };
+    let mut pick_track: Option<usize> = None;
     let beat_busy = app.beat_job.is_some();
     let kill_busy = app.kill_job.is_some();
     let mb_busy = app.multiband_job.is_some();
@@ -104,6 +110,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             local,
             frame,
             asset_lufs,
+            asset_tracks.as_ref().map(|(_, t, s)| (t.as_slice(), *s)),
+            &mut pick_track,
             beat_busy,
             kill_busy,
             mb_busy,
@@ -178,6 +186,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     }
     if multiband_beats {
         app.analyze_multiband_beats();
+    }
+    if let (Some(track), Some((asset, _, _))) = (pick_track, &asset_tracks) {
+        app.select_audio_stream(*asset, track);
     }
     if scan_kills {
         app.scan_selected_kills();
@@ -823,6 +834,8 @@ fn audio_tab(
     t: Time,
     f: Time,
     asset_lufs: Option<f32>,
+    tracks: Option<(&[nle_core::AudioTrackInfo], usize)>,
+    pick_track: &mut Option<usize>,
     beat_busy: bool,
     kill_busy: bool,
     mb_busy: bool,
@@ -838,6 +851,13 @@ fn audio_tab(
         let why = if c.link.is_some() { "This clip's audio is on its linked audio clip." } else { "No audio in this clip." };
         ui.label(egui::RichText::new(why).color(theme::TEXT_DIM));
         return;
+    }
+    if let Some((tracks, selected)) = tracks {
+        ui.horizontal(|ui| {
+            ui.add_sized([96.0, 20.0], egui::Label::new(egui::RichText::new("Audio Track").color(theme::TEXT_DIM)));
+            *pick_track = crate::widgets::audio_track_combo(ui, "inspector-audio-track", tracks, selected);
+        });
+        ui.add_space(4.0);
     }
     // fades span the audible extent, which J/L cuts widen beyond the video
     let audible = (c.duration + c.audio.audio_lead.max(Time::ZERO) + c.audio.audio_tail.max(Time::ZERO)).as_secs_f64() as f32;

@@ -748,6 +748,32 @@ impl App {
         }
     }
 
+    /// Play and analyse audio track `track` of a multi-track asset (e.g. only the
+    /// game, without voice chat). Its decoded audio, waveform, loudness and
+    /// restorations are dropped and rebuilt from the new track.
+    pub fn select_audio_stream(&mut self, asset: AssetId, track: usize) {
+        let Some(a) = self.project.asset_mut(asset) else { return };
+        if !a.select_audio_stream(track) {
+            return;
+        }
+        a.loudness_lufs = None;
+        let label = a.audio_streams.get(track).map(|t| t.label()).unwrap_or_default();
+        let a = a.clone();
+        self.assets_changed = true;
+        self.library.forget_audio(asset);
+        self.audio.remove_source(asset);
+        self.audio_sources.remove(&asset);
+        if self.restore_job.as_ref().is_some_and(|(_, k, _)| k.asset == asset) {
+            if let Some((_, _, j)) = self.restore_job.take() {
+                j.cancel();
+            }
+        }
+        // the ducking envelope follows the voice track's audio
+        self.audio_revision = u64::MAX;
+        self.library.ensure(&a);
+        self.status(format!("{}: playing {label}", a.name));
+    }
+
     // ----- several timelines per project -------------------------------------
 
     /// Forget everything cached for the open timeline's clips (after a
@@ -3271,6 +3297,15 @@ impl App {
                     self.audio_revision = u64::MAX;
                     if let Some(a) = self.project.asset_mut(id) {
                         a.loudness_lufs = lufs;
+                    }
+                }
+                MediaEvent::AudioTracks(id, tracks) => {
+                    // found on open; filling it in is not an edit, so the project stays clean
+                    if let Some(a) = self.project.asset_mut(id) {
+                        if a.audio_streams.is_empty() {
+                            a.audio_streams = tracks;
+                            a.selected_audio_stream = 0;
+                        }
                     }
                 }
                 MediaEvent::Refreshed(id, a) => self.apply_reprobe(id, a),

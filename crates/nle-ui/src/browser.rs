@@ -903,7 +903,13 @@ fn metadata(app: &mut App, ui: &mut egui::Ui, a: &MediaAsset) {
         let mut bin = a.bin;
         let mut changed = false;
         let mut deinterlace = a.deinterlace;
+        let mut pick_track = None;
         egui::Grid::new("meta-edit").num_columns(2).spacing([10.0, 3.0]).show(ui, |ui| {
+            if a.audio_streams.len() > 1 {
+                ui.label(egui::RichText::new("Audio Track").color(theme::TEXT_DIM));
+                pick_track = crate::widgets::audio_track_combo(ui, ("browser-audio-track", a.id), &a.audio_streams, a.selected_audio_stream);
+                ui.end_row();
+            }
             if a.has_video() && a.kind != nle_core::AssetKind::Image {
                 ui.label(egui::RichText::new("Deinterlace").color(theme::TEXT_DIM));
                 ui.horizontal(|ui| {
@@ -946,6 +952,9 @@ fn metadata(app: &mut App, ui: &mut egui::Ui, a: &MediaAsset) {
                 app.assets_changed = true;
             }
             app.reload_decoders(a.id);
+        }
+        if let Some(t) = pick_track {
+            app.select_audio_stream(a.id, t);
         }
         ui.horizontal_wrapped(|ui| {
             ui.label(egui::RichText::new("Keywords").color(theme::TEXT_DIM));

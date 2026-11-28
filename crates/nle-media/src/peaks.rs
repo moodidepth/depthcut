@@ -207,9 +207,24 @@ pub fn cache_file_name(source: &Path) -> Option<String> {
     Some(format!("{h:016x}.peaks"))
 }
 
+/// Cache file name for audio stream `stream` of `source`: the first stream
+/// keeps [`cache_file_name`], so caches written before multi-track support
+/// stay valid.
+pub fn stream_cache_file_name(source: &Path, stream: usize) -> Option<String> {
+    let name = cache_file_name(source)?;
+    Some(if stream == 0 { name } else { name.replace(".peaks", &format!(".a{stream}.peaks")) })
+}
+
 /// Cached peaks for `source`, if present and valid.
 pub fn load_cached(source: &Path) -> Option<PeakBuffer> {
     load_cached_in(&cache_dir(), source)
+}
+
+/// Cached peaks for audio stream `stream` of `source`.
+pub fn load_cached_stream(source: &Path, stream: usize) -> Option<PeakBuffer> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(cache_dir().join(stream_cache_file_name(source, stream)?)).ok()?.read_to_end(&mut bytes).ok()?;
+    PeakBuffer::from_bytes(&bytes)
 }
 
 pub fn load_cached_in(dir: &Path, source: &Path) -> Option<PeakBuffer> {
@@ -225,7 +240,16 @@ pub fn store_cached(source: &Path, peaks: &PeakBuffer) -> io::Result<()> {
 }
 
 pub fn store_cached_in(dir: &Path, source: &Path, peaks: &PeakBuffer) -> io::Result<()> {
-    let Some(name) = cache_file_name(source) else { return Ok(()) };
+    store_named(dir, cache_file_name(source), peaks)
+}
+
+/// Write the peaks of audio stream `stream` of `source` to the cache.
+pub fn store_cached_stream(source: &Path, stream: usize, peaks: &PeakBuffer) -> io::Result<()> {
+    store_named(&cache_dir(), stream_cache_file_name(source, stream), peaks)
+}
+
+fn store_named(dir: &Path, name: Option<String>, peaks: &PeakBuffer) -> io::Result<()> {
+    let Some(name) = name else { return Ok(()) };
     std::fs::create_dir_all(dir)?;
     let tmp = dir.join(format!("{name}.{}.tmp", std::process::id()));
     let res = std::fs::File::create(&tmp).and_then(|mut f| f.write_all(&peaks.to_bytes())).and_then(|_| std::fs::rename(&tmp, dir.join(name)));
@@ -318,6 +342,19 @@ mod tests {
         let mut bad = bytes.clone();
         bad[4] = 99;
         assert!(PeakBuffer::from_bytes(&bad).is_none());
+    }
+
+    #[test]
+    fn each_audio_track_has_its_own_cache_entry() {
+        let src = std::env::temp_dir().join(format!("rcp-peaks-track-{}.mp4", std::process::id()));
+        std::fs::write(&src, b"clip").unwrap();
+        let first = stream_cache_file_name(&src, 0).unwrap();
+        // the first track keeps the name caches had before track selection
+        assert_eq!(Some(first.clone()), cache_file_name(&src));
+        let game = stream_cache_file_name(&src, 1).unwrap();
+        assert_ne!(first, game);
+        assert!(game.ends_with(".a1.peaks"), "{game}");
+        let _ = std::fs::remove_file(&src);
     }
 
     #[test]

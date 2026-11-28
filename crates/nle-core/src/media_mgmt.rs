@@ -47,7 +47,14 @@ pub fn refresh_asset(project: &mut Project, id: AssetId, probed: MediaAsset) {
     a.kind = probed.kind;
     a.duration = probed.duration;
     a.video = probed.video;
+    // keep the picked audio track while the file still has it
+    let track = a.selected_audio_stream;
     a.audio = probed.audio;
+    a.audio_streams = probed.audio_streams;
+    a.selected_audio_stream = 0;
+    if track != 0 {
+        a.select_audio_stream(track);
+    }
     a.field_order = probed.field_order;
     let (has_v, has_a, dur) = (a.has_video(), a.has_audio(), a.clip_media_duration());
     fn walk(c: &mut Clip, id: AssetId, f: &dyn Fn(&mut Clip)) {

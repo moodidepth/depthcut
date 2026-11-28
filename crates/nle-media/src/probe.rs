@@ -2,7 +2,7 @@
 
 use crate::ffmpeg_cli;
 use crate::MediaError;
-use nle_core::{AssetKind, AudioStreamInfo, FrameRate, MediaAsset, Time, VideoStreamInfo};
+use nle_core::{AssetKind, AudioStreamInfo, AudioTrackInfo, FrameRate, MediaAsset, Time, VideoStreamInfo};
 use serde_json::Value;
 use std::path::Path;
 
@@ -125,13 +125,14 @@ pub fn parse_ffprobe_json(path: &Path, json: &str) -> Result<MediaAsset, MediaEr
                 is_vfr,
                 pts_table,
             });
-        } else if kind == "audio" && asset.audio.is_none() {
-            asset.audio = Some(AudioStreamInfo {
-                sample_rate: s["sample_rate"].as_str().and_then(|r| r.parse().ok()).unwrap_or(48_000),
-                channels: s["channels"].as_u64().unwrap_or(2) as u16,
-                codec: s["codec_name"].as_str().unwrap_or("unknown").to_string(),
-            });
+        } else if kind == "audio" {
+            asset.audio_streams.push(audio_track(asset.audio_streams.len(), s));
         }
+    }
+    asset.audio = asset.audio_streams.first().map(AudioTrackInfo::info);
+    if asset.audio_streams.len() < 2 {
+        // one track: nothing to choose, and the project file stays as before
+        asset.audio_streams.clear();
     }
     asset.kind = if IMAGE_EXTS.contains(&ext.as_str()) {
         AssetKind::Image
@@ -145,6 +146,51 @@ pub fn parse_ffprobe_json(path: &Path, json: &str) -> Result<MediaAsset, MediaEr
     asset.duration = if asset.kind == AssetKind::Image || dur <= 0.0 { STILL_DURATION } else { Time::from_secs_f64(dur) };
     asset.start_timecode = start_timecode(&v, &streams, asset.video.as_ref().map(|v| v.frame_rate), asset.audio.as_ref().map(|a| a.sample_rate));
     Ok(asset)
+}
+
+/// Every audio track of `path` (an empty list for files with fewer than two),
+/// for projects saved before track selection existed.
+pub fn audio_tracks(path: &Path) -> Option<Vec<AudioTrackInfo>> {
+    if !path.exists() || !ffmpeg_cli::available() {
+        return None;
+    }
+    let out = ffmpeg_cli::run_capture(&ffmpeg_cli::ffprobe_path(), &["-v", "error", "-print_format", "json", "-select_streams", "a", "-show_streams", &path.to_string_lossy()])?;
+    parse_audio_tracks(&out)
+}
+
+/// The audio tracks of ffprobe `-show_streams` JSON; empty unless there are two or more.
+pub fn parse_audio_tracks(json: &str) -> Option<Vec<AudioTrackInfo>> {
+    let v: Value = serde_json::from_str(json).ok()?;
+    let mut tracks: Vec<AudioTrackInfo> = Vec::new();
+    for s in v["streams"].as_array()?.iter().filter(|s| s["codec_type"].as_str() == Some("audio")) {
+        tracks.push(audio_track(tracks.len(), s));
+    }
+    if tracks.len() < 2 {
+        tracks.clear();
+    }
+    Some(tracks)
+}
+
+fn audio_track(index: usize, s: &Value) -> AudioTrackInfo {
+    AudioTrackInfo {
+        index,
+        name: track_name(s),
+        sample_rate: s["sample_rate"].as_str().and_then(|r| r.parse().ok()).unwrap_or(48_000),
+        channels: s["channels"].as_u64().unwrap_or(2) as u16,
+        codec: s["codec_name"].as_str().unwrap_or("unknown").to_string(),
+    }
+}
+
+/// Title of an audio track: its `title` / `name` tag, else a non-generic
+/// `handler_name` (muxers write "SoundHandler" on every track).
+fn track_name(s: &Value) -> String {
+    let tag =
+        |key: &str| s["tags"].as_object().and_then(|t| t.iter().find(|(k, _)| k.eq_ignore_ascii_case(key))).and_then(|(_, v)| v.as_str()).map(str::trim).filter(|v| !v.is_empty());
+    let generic = |h: &&str| {
+        let h = h.to_ascii_lowercase();
+        h.contains("handler") || h.contains("core media") || h == "sound"
+    };
+    tag("title").or_else(|| tag("name")).or_else(|| tag("handler_name").filter(|h| !generic(h))).unwrap_or_default().to_string()
 }
 
 /// The file's start timecode: a `timecode` tag (container first, then any
@@ -242,12 +288,52 @@ mod tests {
           "format": {"duration":"12.512"}
         }"#;
         let a = parse_ffprobe_json(Path::new("/x/clip.mov"), json).unwrap();
-        let v = a.video.unwrap();
+        let v = a.video.as_ref().unwrap();
         assert_eq!((v.width, v.height, v.bit_depth), (3840, 2160, 10));
         assert_eq!(v.frame_rate, FrameRate::FPS_29_97);
         assert_eq!(v.codec, "hevc");
-        assert_eq!(a.audio.unwrap().sample_rate, 48_000);
+        assert_eq!(a.audio.as_ref().unwrap().sample_rate, 48_000);
         assert_eq!(a.name, "clip");
         assert!((a.duration.as_secs_f64() - 12.512).abs() < 1e-6);
+        // a single audio track is not listed as a choice
+        assert!(a.audio_streams.is_empty());
+        assert_eq!(a.audio_map(), "0:a:0");
+    }
+
+    #[test]
+    fn lists_every_audio_track_of_a_multitrack_recording() {
+        // Medal / OBS layout: full mix first, then the game, encoder, voice chat, mic
+        let tags = |name: &str| format!(r#"{{"language":"und","handler_name":"SoundHandler","name":"{name}"}}"#);
+        let audio = |name: &str, ch: u32, def: u8| {
+            format!(r#"{{"codec_type":"audio","codec_name":"aac","sample_rate":"48000","channels":{ch},"disposition":{{"default":{def}}},"tags":{}}}"#, tags(name))
+        };
+        let json = format!(
+            r#"{{"format":{{"duration":"30.0"}},"streams":[{{"codec_type":"video","codec_name":"h264","width":1920,"height":1080,"pix_fmt":"yuv420p","avg_frame_rate":"60/1","r_frame_rate":"60/1"}},{},{},{},{},{}]}}"#,
+            audio("All Audio", 2, 1),
+            audio("VALORANT-Win64-Shipping", 2, 0),
+            audio("MedalEncoder", 2, 0),
+            audio("Discord", 2, 0),
+            audio("Microphone", 1, 0),
+        );
+        let mut a = parse_ffprobe_json(Path::new("/x/MedalTV.mp4"), &json).unwrap();
+        let names: Vec<&str> = a.audio_streams.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["All Audio", "VALORANT-Win64-Shipping", "MedalEncoder", "Discord", "Microphone"]);
+        assert_eq!(a.audio_streams.iter().map(|t| t.index).collect::<Vec<_>>(), [0, 1, 2, 3, 4]);
+        // the first track plays until another is picked
+        assert_eq!((a.selected_audio_stream, a.audio_map()), (0, "0:a:0".to_string()));
+        assert!(a.select_audio_stream(1));
+        assert_eq!(a.audio_map(), "0:a:1");
+        assert!(a.select_audio_stream(4));
+        assert_eq!(a.audio.as_ref().map(|i| i.channels), Some(1));
+        // the stream-only probe used for older projects finds the same tracks
+        assert_eq!(parse_audio_tracks(&json).unwrap(), a.audio_streams);
+        assert_eq!(parse_audio_tracks(r#"{"streams":[{"codec_type":"audio","channels":2}]}"#), Some(vec![]));
+        // a title tag wins, a generic handler name is no name
+        let titled = r#"{"codec_type":"audio","channels":2,"tags":{"title":"Game","handler_name":"SoundHandler"}}"#;
+        assert_eq!(track_name(&serde_json::from_str(titled).unwrap()), "Game");
+        let plain = r#"{"codec_type":"audio","channels":2,"tags":{"handler_name":"SoundHandler"}}"#;
+        assert_eq!(track_name(&serde_json::from_str(plain).unwrap()), "");
+        let custom = r#"{"codec_type":"audio","channels":2,"tags":{"handler_name":"Boom Mic"}}"#;
+        assert_eq!(track_name(&serde_json::from_str(custom).unwrap()), "Boom Mic");
     }
 }
